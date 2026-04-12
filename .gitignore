@@ -1,0 +1,40 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling / editors
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local environment / secrets
+.env
+.env.*
+
+# App runtime data
+output/
+tests/.tmp/
+iv_agent/data/profile.json
+iv_agent/data/calendar.json
+
+# Local PDFs / generated documents
+*.pdf
+
+# OS / temp files
+*.log
+*.tmp
+*.temp

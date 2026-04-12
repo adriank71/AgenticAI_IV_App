@@ -1,0 +1,35 @@
+{
+  "insuredPerson": {
+    "firstName": "Max",
+    "lastName": "Muster",
+    "fullName": "Max Muster",
+    "ahvNumber": "756.0000.0000.00",
+    "street": "Musterstrasse 1",
+    "zip": "6000",
+    "city": "Luzern"
+  },
+  "invoiceIssuer": {
+    "sameAsInsuredPerson": true,
+    "firstName": "",
+    "lastName": "",
+    "fullName": "",
+    "email": "example@example.com",
+    "phone": "",
+    "street": "",
+    "zip": "",
+    "city": ""
+  },
+  "billing": {
+    "gln": "",
+    "referenceNumber": "IV-AB-000000",
+    "iban": "CH00 0000 0000 0000 0000 0",
+    "accountHolderFullName": "Max Muster",
+    "accountHolderStreet": "Musterstrasse 1",
+    "accountHolderZip": "6000",
+    "accountHolderCity": "Luzern"
+  },
+  "reportingPeriod": {
+    "year": 2026,
+    "month": "April"
+  }
+}
