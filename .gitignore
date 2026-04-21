@@ -38,3 +38,6 @@ iv_agent/data/calendar.json
 *.log
 *.tmp
 *.temp
+
+.vercel
+.env*.local

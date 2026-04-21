@@ -1,0 +1,14 @@
+[project]
+name = "agenticai-iv-app"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "Flask",
+  "flask-cors",
+  "pypdf",
+  "psycopg[binary]",
+  "vercel",
+]
+
+[project.scripts]
+app = "iv_agent.app:app"

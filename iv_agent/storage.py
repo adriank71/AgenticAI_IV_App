@@ -272,7 +272,7 @@ class VercelBlobAssetStore:
         content_type: str,
     ) -> dict[str, Any]:
         BlobClient, _ = _load_vercel_blob()
-        client = BlobClient()
+        client = BlobClient(token=self._token)
         safe_file_name = _sanitize_storage_name(file_name)
         report_prefix = str(os.environ.get("IV_AGENT_REPORTS_BLOB_PREFIX", "reports") or "reports").strip("/")
         pathname = "/".join(part for part in (report_prefix, month, f"{report_id}_{safe_file_name}") if part)
@@ -282,7 +282,6 @@ class VercelBlobAssetStore:
             access="private",
             content_type=content_type,
             overwrite=True,
-            token=self._token,
         )
         return {
             "storage_key": uploaded_blob.pathname,
@@ -691,4 +690,3 @@ def make_report_store(output_dir: str) -> ReportStore:
     if _database_backend_enabled():
         return PostgresReportStore(os.environ["DATABASE_URL"].strip(), asset_store=asset_store)
     return JsonReportStore(output_dir, asset_store=asset_store)
-
