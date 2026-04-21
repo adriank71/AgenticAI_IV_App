@@ -26,6 +26,48 @@ def isolated_calendar_storage():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+@contextmanager
+def passthrough_materialized_path(path, suffix=".pdf"):
+    yield path
+
+
+class FakeReportStore:
+    def __init__(self):
+        self.saved_reports = []
+        self.report_lookup = {}
+
+    def save_report(self, **kwargs):
+        report_id = f"rpt-{len(self.saved_reports) + 1}"
+        record = {
+            "report_id": report_id,
+            "month": kwargs["month"],
+            "type": kwargs["report_type"],
+            "file_name": kwargs["file_name"],
+            "storage_backend": "blob",
+            "storage_key": f"reports/{report_id}",
+            "storage_url": "https://blob.example/report.pdf",
+            "content_type": kwargs.get("content_type", "application/pdf"),
+            "metadata": kwargs.get("metadata", {}),
+        }
+        self.saved_reports.append(record)
+        self.report_lookup[report_id] = record
+        self.report_lookup[record["file_name"]] = record
+        return record
+
+    def get_report(self, *, report_id=None, file_name=None, month=None):
+        if report_id:
+            return self.report_lookup.get(report_id)
+        if file_name:
+            record = self.report_lookup.get(file_name)
+            if record and month and record["month"] != month:
+                return None
+            return record
+        return None
+
+    def read_report_bytes(self, report):
+        return b"%PDF-1.4\n", "application/pdf"
+
+
 class CalendarManagerTests(unittest.TestCase):
     def test_add_events_supports_weekly_repetition_and_breakdown_totals(self):
         with isolated_calendar_storage():
@@ -219,102 +261,136 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_generate_report_accepts_multiple_report_types(self):
         client = app_module.app.test_client()
-        base_tmp = os.path.join(os.getcwd(), "output", "test_tmp")
-        os.makedirs(base_tmp, exist_ok=True)
-        temp_dir = os.path.join(base_tmp, f"report_{uuid.uuid4().hex}")
-        os.makedirs(temp_dir, exist_ok=True)
-        try:
-            profile_path = os.path.join(temp_dir, "profile.json")
-            output_dir = os.path.join(temp_dir, "output")
-            os.makedirs(output_dir, exist_ok=True)
-            with open(profile_path, "w", encoding="utf-8") as file:
-                json.dump({"insured_name": "Max Muster"}, file)
-
-            generated_pdf_path = os.path.join(output_dir, "Assistenzbeitrag_2026-04.pdf")
-
-            with patch.object(app_module, "OUTPUT_DIR", output_dir), patch.object(
-                app_module, "resolve_profile_path", return_value=profile_path
-            ), patch.object(app_module, "resolve_dual_template_paths", return_value=None), patch.object(
-                app_module, "resolve_template_path", return_value="template.pdf"
-            ), patch.object(
-                app_module, "fill_assistenz_form_auto", return_value=generated_pdf_path
-            ), patch.object(app_module, "get_assistant_hours", return_value=4.5), patch.object(
-                app_module,
-                "get_assistant_hours_breakdown",
-                return_value={
-                    "koerperpflege": 1.0,
-                    "mahlzeiten_eingeben": 1.0,
-                    "mahlzeiten_zubereiten": 1.5,
-                    "begleitung_therapie": 1.0,
+        fake_report_store = FakeReportStore()
+        with patch.object(
+            app_module,
+            "load_profile_payload",
+            return_value={"insured_name": "Max Muster", "ahv_number": "1", "street": "Street", "plz_ort": "City", "iban": "IBAN", "mitteilungsnummer": "REF"},
+        ), patch.object(app_module, "get_report_store", return_value=fake_report_store), patch.object(
+            app_module, "resolve_dual_template_paths", return_value=None
+        ), patch.object(
+            app_module, "resolve_template_path", return_value="template.pdf"
+        ), patch.object(
+            app_module, "materialize_binary_reference", side_effect=passthrough_materialized_path
+        ), patch.object(
+            app_module, "fill_assistenz_form_auto_bytes", return_value=b"%PDF-1.4\n"
+        ), patch.object(app_module, "get_assistant_hours", return_value=4.5), patch.object(
+            app_module,
+            "get_assistant_hours_breakdown",
+            return_value={
+                "koerperpflege": 1.0,
+                "mahlzeiten_eingeben": 1.0,
+                "mahlzeiten_zubereiten": 1.5,
+                "begleitung_therapie": 1.0,
+            },
+        ):
+            response = client.post(
+                "/api/reports/generate",
+                json={
+                    "month": "2026-04",
+                    "report_types": ["assistenzbeitrag", "transportkostenabrechnung"],
                 },
-            ):
-                response = client.post(
-                    "/api/reports/generate",
-                    json={
-                        "month": "2026-04",
-                        "report_types": ["assistenzbeitrag", "transportkostenabrechnung"],
-                    },
-                )
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(len(payload["generated_reports"]), 1)
         self.assertEqual(payload["generated_reports"][0]["type"], "assistenzbeitrag")
+        self.assertEqual(payload["generated_reports"][0]["report_id"], "rpt-1")
         self.assertEqual(len(payload["unavailable_reports"]), 1)
         self.assertEqual(payload["unavailable_reports"][0]["type"], "transportkostenabrechnung")
 
     def test_generate_report_prefers_dual_template_workflow(self):
         client = app_module.app.test_client()
-        base_tmp = os.path.join(os.getcwd(), "output", "test_tmp")
-        os.makedirs(base_tmp, exist_ok=True)
-        temp_dir = os.path.join(base_tmp, f"report_dual_{uuid.uuid4().hex}")
-        os.makedirs(temp_dir, exist_ok=True)
-        try:
-            profile_path = os.path.join(temp_dir, "profile.json")
-            output_dir = os.path.join(temp_dir, "output")
-            os.makedirs(output_dir, exist_ok=True)
-            with open(profile_path, "w", encoding="utf-8") as file:
-                json.dump({"insured_name": "Max Muster"}, file)
-
-            generated_pdf_path = os.path.join(output_dir, "Assistenzbeitrag_2026-04.pdf")
-
-            with patch.object(app_module, "OUTPUT_DIR", output_dir), patch.object(
-                app_module, "resolve_profile_path", return_value=profile_path
-            ), patch.object(
-                app_module, "resolve_dual_template_paths", return_value=("stundenblatt.pdf", "rechnung.pdf")
-            ), patch.object(
-                app_module, "fill_assistenz_dual_form_auto", return_value=generated_pdf_path
-            ) as dual_fill_mock, patch.object(
-                app_module, "fill_assistenz_form_auto"
-            ) as single_fill_mock, patch.object(
-                app_module, "get_assistant_hours", return_value=4.5
-            ), patch.object(
-                app_module,
-                "get_assistant_hours_breakdown",
-                return_value={
-                    "koerperpflege": 1.0,
-                    "mahlzeiten_eingeben": 1.0,
-                    "mahlzeiten_zubereiten": 1.5,
-                    "begleitung_therapie": 1.0,
+        fake_report_store = FakeReportStore()
+        with patch.object(
+            app_module,
+            "load_profile_payload",
+            return_value={"insured_name": "Max Muster", "ahv_number": "1", "street": "Street", "plz_ort": "City", "iban": "IBAN", "mitteilungsnummer": "REF"},
+        ), patch.object(app_module, "get_report_store", return_value=fake_report_store), patch.object(
+            app_module, "resolve_dual_template_paths", return_value=("stundenblatt.pdf", "rechnung.pdf")
+        ), patch.object(
+            app_module, "materialize_binary_reference", side_effect=passthrough_materialized_path
+        ), patch.object(
+            app_module, "fill_assistenz_dual_form_auto_bytes", return_value=b"%PDF-1.4\n"
+        ) as dual_fill_mock, patch.object(
+            app_module, "fill_assistenz_form_auto_bytes"
+        ) as single_fill_mock, patch.object(
+            app_module, "get_assistant_hours", return_value=4.5
+        ), patch.object(
+            app_module,
+            "get_assistant_hours_breakdown",
+            return_value={
+                "koerperpflege": 1.0,
+                "mahlzeiten_eingeben": 1.0,
+                "mahlzeiten_zubereiten": 1.5,
+                "begleitung_therapie": 1.0,
+            },
+        ):
+            response = client.post(
+                "/api/reports/generate",
+                json={
+                    "month": "2026-04",
+                    "report_types": ["assistenzbeitrag"],
                 },
-            ):
-                response = client.post(
-                    "/api/reports/generate",
-                    json={
-                        "month": "2026-04",
-                        "report_types": ["assistenzbeitrag"],
-                    },
-                )
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         dual_fill_mock.assert_called_once()
         single_fill_mock.assert_not_called()
         self.assertEqual(payload["generated_reports"][0]["gross_amount_chf"], "157.50")
+
+    def test_send_report_accepts_report_id_and_omits_file_path(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+        saved_report = fake_report_store.save_report(
+            month="2026-04",
+            report_type="assistenzbeitrag",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-1.4\n",
+        )
+
+        captured_payload = {}
+
+        def fake_trigger(payload):
+            captured_payload.update(payload)
+
+        with patch.object(app_module, "get_report_store", return_value=fake_report_store), patch.object(
+            app_module, "trigger_n8n_webhook", side_effect=fake_trigger
+        ):
+            response = client.post(
+                "/api/reports/send",
+                json={
+                    "month": "2026-04",
+                    "report_id": saved_report["report_id"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["sent"])
+        self.assertEqual(payload["report_id"], saved_report["report_id"])
+        self.assertNotIn("file_path", captured_payload)
+        self.assertEqual(captured_payload["report_id"], saved_report["report_id"])
+
+    def test_download_report_streams_from_store_lookup(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+        saved_report = fake_report_store.save_report(
+            month="2026-04",
+            report_type="assistenzbeitrag",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-1.4\n",
+        )
+
+        with patch.object(app_module, "get_report_store", return_value=fake_report_store):
+            response = client.get(
+                f"/api/reports/download/{saved_report['report_id']}/{saved_report['file_name']}"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/pdf")
 
 
 if __name__ == "__main__":

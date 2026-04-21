@@ -1,12 +1,14 @@
 import logging
 import json
+import io
 import os
 import socket
 import urllib.error
 import urllib.request
+from contextlib import ExitStack
 from datetime import datetime
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 
 try:
@@ -20,7 +22,18 @@ try:
         get_events,
         update_event,
     )
-    from .form_pilot import DUAL_REPORT_HOURLY_RATE, STANDARD_RATE, fill_assistenz_dual_form_auto, fill_assistenz_form_auto
+    from .form_pilot import (
+        DUAL_REPORT_HOURLY_RATE,
+        STANDARD_RATE,
+        fill_assistenz_dual_form_auto_bytes,
+        fill_assistenz_form_auto_bytes,
+    )
+    from .storage import (
+        make_profile_store,
+        make_report_store,
+        materialize_binary_reference,
+        resolve_profile_file_path,
+    )
 except ImportError:
     from calendar_manager import (
         ASSISTANT_HOUR_FIELDS,
@@ -32,7 +45,18 @@ except ImportError:
         get_events,
         update_event,
     )
-    from form_pilot import DUAL_REPORT_HOURLY_RATE, STANDARD_RATE, fill_assistenz_dual_form_auto, fill_assistenz_form_auto
+    from form_pilot import (
+        DUAL_REPORT_HOURLY_RATE,
+        STANDARD_RATE,
+        fill_assistenz_dual_form_auto_bytes,
+        fill_assistenz_form_auto_bytes,
+    )
+    from storage import (
+        make_profile_store,
+        make_report_store,
+        materialize_binary_reference,
+        resolve_profile_file_path,
+    )
 
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -142,23 +166,40 @@ def parse_month(value: str) -> str:
 
 
 def resolve_profile_path(profile_id: str | None) -> str:
-    if profile_id:
-        safe_profile_id = "".join(ch for ch in profile_id if ch.isalnum() or ch in ("-", "_"))
-        if safe_profile_id != profile_id:
-            raise ValueError("Invalid profile_id")
-        return os.path.join(PROFILE_DIR, f"{safe_profile_id}.json")
-    return DEFAULT_PROFILE_PATH
+    return resolve_profile_file_path(DEFAULT_PROFILE_PATH, PROFILE_DIR, profile_id)
 
 
 def resolve_existing_path(candidates: tuple[str, ...]) -> str | None:
     for candidate in candidates:
-        if candidate and os.path.exists(candidate):
-            return candidate
+        normalized_candidate = str(candidate or "").strip()
+        if not normalized_candidate:
+            continue
+        if os.path.exists(normalized_candidate):
+            return normalized_candidate
+        if normalized_candidate.startswith(("http://", "https://")):
+            return normalized_candidate
+    return None
+
+
+def resolve_configured_reference(candidate: str) -> str | None:
+    normalized_candidate = str(candidate or "").strip()
+    if not normalized_candidate:
+        return None
+    if os.path.exists(normalized_candidate):
+        return normalized_candidate
+    if normalized_candidate.startswith(("http://", "https://")):
+        return normalized_candidate
+    if not os.path.isabs(normalized_candidate):
+        return normalized_candidate
     return None
 
 
 def resolve_template_path() -> str:
-    resolved_path = resolve_existing_path(DEFAULT_TEMPLATE_CANDIDATES)
+    configured_reference = resolve_configured_reference(DEFAULT_TEMPLATE_CANDIDATES[0])
+    if configured_reference:
+        return configured_reference
+
+    resolved_path = resolve_existing_path(DEFAULT_TEMPLATE_CANDIDATES[1:])
     if resolved_path:
         return resolved_path
     raise FileNotFoundError(
@@ -167,11 +208,61 @@ def resolve_template_path() -> str:
 
 
 def resolve_dual_template_paths() -> tuple[str, str] | None:
-    stundenblatt_path = resolve_existing_path(DEFAULT_STUNDENBLATT_TEMPLATE_CANDIDATES)
-    rechnung_path = resolve_existing_path(DEFAULT_RECHNUNG_TEMPLATE_CANDIDATES)
+    stundenblatt_path = resolve_configured_reference(DEFAULT_STUNDENBLATT_TEMPLATE_CANDIDATES[0]) or resolve_existing_path(
+        DEFAULT_STUNDENBLATT_TEMPLATE_CANDIDATES[1:]
+    )
+    rechnung_path = resolve_configured_reference(DEFAULT_RECHNUNG_TEMPLATE_CANDIDATES[0]) or resolve_existing_path(
+        DEFAULT_RECHNUNG_TEMPLATE_CANDIDATES[1:]
+    )
     if stundenblatt_path and rechnung_path:
         return stundenblatt_path, rechnung_path
     return None
+
+
+def load_profile_payload(profile_id: str | None) -> dict:
+    profile_store = make_profile_store(DEFAULT_PROFILE_PATH, PROFILE_DIR)
+    profile_payload = profile_store.get_profile(profile_id)
+    if profile_payload is not None:
+        return profile_payload
+
+    fallback_profile_path = resolve_profile_path(profile_id)
+    if os.path.exists(fallback_profile_path):
+        with open(fallback_profile_path, "r", encoding="utf-8") as file:
+            return json.load(file)
+
+    raise FileNotFoundError("Profile not found")
+
+
+def build_report_download_path(report_record: dict) -> str:
+    return f"/api/reports/download/{report_record['report_id']}/{report_record['file_name']}"
+
+
+def build_report_preview_path(report_record: dict) -> str:
+    return f"/api/reports/view/{report_record['report_id']}/{report_record['file_name']}"
+
+
+def get_report_store():
+    return make_report_store(OUTPUT_DIR)
+
+
+def resolve_report_record(
+    *,
+    report_id: str | None = None,
+    file_name: str | None = None,
+    month: str | None = None,
+) -> dict | None:
+    return get_report_store().get_report(report_id=report_id, file_name=file_name, month=month)
+
+
+def serve_report_response(report_record: dict, *, as_attachment: bool):
+    report_store = get_report_store()
+    report_bytes, content_type = report_store.read_report_bytes(report_record)
+    return send_file(
+        io.BytesIO(report_bytes),
+        mimetype=content_type or "application/pdf",
+        as_attachment=as_attachment,
+        download_name=report_record["file_name"],
+    )
 
 
 def trigger_n8n_webhook(payload: dict) -> None:
@@ -509,53 +600,69 @@ def api_generate_report():
         report_types = parse_report_types(payload)
         raw_profile_id = payload.get("profile_id")
         profile_id = str(raw_profile_id).strip() if raw_profile_id is not None else None
-        profile_path = resolve_profile_path(profile_id or None)
-
-        if not os.path.exists(profile_path):
-            logger.error("Profile not found: %s", profile_path)
-            return json_error("Profile not found", 404)
-
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        profile_payload = load_profile_payload(profile_id or None)
+        report_store = get_report_store()
         generated_reports = []
         unavailable_reports = []
 
         if "assistenzbeitrag" in report_types:
             output_filename = f"Assistenzbeitrag_{month}.pdf"
-            output_path = os.path.join(OUTPUT_DIR, output_filename)
             total_hours = get_assistant_hours(month)
+            assistant_breakdown = get_assistant_hours_breakdown(month)
             dual_template_paths = resolve_dual_template_paths()
 
-            if dual_template_paths:
-                generated_path = fill_assistenz_dual_form_auto(
-                    stundenblatt_template_pdf_path=dual_template_paths[0],
-                    rechnung_template_pdf_path=dual_template_paths[1],
-                    month=month,
-                    profile_path=profile_path,
-                    output_path=output_path,
-                    preview=False,
-                )
-                gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
-            else:
-                template_path = resolve_template_path()
-                generated_path = fill_assistenz_form_auto(
-                    template_pdf_path=template_path,
-                    month=month,
-                    profile_path=profile_path,
-                    output_path=output_path,
-                    preview=False,
-                )
-                gross_amount = round(total_hours * STANDARD_RATE, 2)
+            with ExitStack() as exit_stack:
+                if dual_template_paths:
+                    stundenblatt_template_path = exit_stack.enter_context(
+                        materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
+                    )
+                    rechnung_template_path = exit_stack.enter_context(
+                        materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
+                    )
+                    report_bytes = fill_assistenz_dual_form_auto_bytes(
+                        stundenblatt_template_pdf_path=stundenblatt_template_path,
+                        rechnung_template_pdf_path=rechnung_template_path,
+                        month=month,
+                        profile_data=profile_payload,
+                        preview=False,
+                    )
+                    gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
+                else:
+                    template_path = exit_stack.enter_context(
+                        materialize_binary_reference(resolve_template_path(), suffix=".pdf")
+                    )
+                    report_bytes = fill_assistenz_form_auto_bytes(
+                        template_pdf_path=template_path,
+                        month=month,
+                        profile_data=profile_payload,
+                        preview=False,
+                    )
+                    gross_amount = round(total_hours * STANDARD_RATE, 2)
+
+            stored_report = report_store.save_report(
+                month=month,
+                report_type="assistenzbeitrag",
+                file_name=output_filename,
+                content=report_bytes,
+                profile_id=profile_id,
+                metadata={
+                    "assistant_hours": total_hours,
+                    "assistant_breakdown": assistant_breakdown,
+                    "gross_amount_chf": f"{gross_amount:.2f}",
+                },
+            )
 
             generated_reports.append(
                 {
+                    "report_id": stored_report["report_id"],
                     "type": "assistenzbeitrag",
                     "label": "Assistenzbeitraege report",
-                    "file_name": os.path.basename(generated_path),
-                    "download_url": f"/api/reports/download/{os.path.basename(generated_path)}",
-                    "preview_url": f"/api/reports/view/{os.path.basename(generated_path)}",
+                    "file_name": stored_report["file_name"],
+                    "download_url": build_report_download_path(stored_report),
+                    "preview_url": build_report_preview_path(stored_report),
                     "year": int(month.split("-")[0]),
                     "assistant_hours": total_hours,
-                    "assistant_breakdown": get_assistant_hours_breakdown(month),
+                    "assistant_breakdown": assistant_breakdown,
                     "gross_amount_chf": f"{gross_amount:.2f}",
                 }
             )
@@ -579,6 +686,7 @@ def api_generate_report():
             first_report = generated_reports[0]
             response_payload.update(
                 {
+                    "report_id": first_report["report_id"],
                     "file_name": first_report["file_name"],
                     "download_url": first_report["download_url"],
                     "preview_url": first_report["preview_url"],
@@ -600,12 +708,41 @@ def api_generate_report():
         return json_error("Failed to generate report", 500)
 
 
+@app.get("/api/reports/download/<report_id>/<path:filename>")
+def api_download_report_by_id(report_id: str, filename: str):
+    try:
+        if not filename.lower().endswith(".pdf"):
+            return json_error("Invalid file type", 400)
+        report_record = resolve_report_record(report_id=report_id)
+        if not report_record:
+            return json_error("Report file not found", 404)
+        return serve_report_response(report_record, as_attachment=True)
+    except FileNotFoundError:
+        return json_error("Report file not found", 404)
+
+
 @app.get("/api/reports/download/<path:filename>")
 def api_download_report(filename: str):
     try:
         if not filename.lower().endswith(".pdf"):
             return json_error("Invalid file type", 400)
-        return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+        report_record = resolve_report_record(file_name=filename)
+        if not report_record:
+            return json_error("Report file not found", 404)
+        return serve_report_response(report_record, as_attachment=True)
+    except FileNotFoundError:
+        return json_error("Report file not found", 404)
+
+
+@app.get("/api/reports/view/<report_id>/<path:filename>")
+def api_view_report_by_id(report_id: str, filename: str):
+    try:
+        if not filename.lower().endswith(".pdf"):
+            return json_error("Invalid file type", 400)
+        report_record = resolve_report_record(report_id=report_id)
+        if not report_record:
+            return json_error("Report file not found", 404)
+        return serve_report_response(report_record, as_attachment=False)
     except FileNotFoundError:
         return json_error("Report file not found", 404)
 
@@ -615,7 +752,10 @@ def api_view_report(filename: str):
     try:
         if not filename.lower().endswith(".pdf"):
             return json_error("Invalid file type", 400)
-        return send_from_directory(OUTPUT_DIR, filename, as_attachment=False)
+        report_record = resolve_report_record(file_name=filename)
+        if not report_record:
+            return json_error("Report file not found", 404)
+        return serve_report_response(report_record, as_attachment=False)
     except FileNotFoundError:
         return json_error("Report file not found", 404)
 
@@ -625,29 +765,40 @@ def api_send_report():
     try:
         payload = request.get_json(silent=True) or {}
         month = parse_month(str(payload.get("month", "")).strip())
+        report_id = str(payload.get("report_id", "") or "").strip() or None
         file_name = str(payload.get("file_name", "")).strip()
 
-        if not file_name or not file_name.lower().endswith(".pdf"):
-            return json_error("Valid file_name (.pdf) is required", 400)
+        if not report_id and (not file_name or not file_name.lower().endswith(".pdf")):
+            return json_error("report_id or valid file_name (.pdf) is required", 400)
 
-        file_path = os.path.join(OUTPUT_DIR, file_name)
-        if not os.path.exists(file_path):
-            logger.error("Cannot send missing report: %s", file_path)
+        report_record = resolve_report_record(report_id=report_id, file_name=file_name or None, month=month)
+        if not report_record:
             return json_error("Report file not found", 404)
 
         if not N8N_WEBHOOK_URL:
             return json_error("Send endpoint not configured (missing IV_AGENT_N8N_WEBHOOK_URL)", 501)
 
         base_url = request.host_url.rstrip("/")
+        download_path = build_report_download_path(report_record)
+        preview_path = build_report_preview_path(report_record)
         webhook_payload = {
             "month": month,
-            "file_name": file_name,
-            "download_url": f"{base_url}/api/reports/download/{file_name}",
-            "preview_url": f"{base_url}/api/reports/view/{file_name}",
-            "file_path": file_path,
+            "report_id": report_record["report_id"],
+            "report_type": report_record["type"],
+            "file_name": report_record["file_name"],
+            "download_url": f"{base_url}{download_path}",
+            "preview_url": f"{base_url}{preview_path}",
+            "storage_backend": report_record.get("storage_backend"),
         }
         trigger_n8n_webhook(webhook_payload)
-        return jsonify({"sent": True, "file_name": file_name, "month": month})
+        return jsonify(
+            {
+                "sent": True,
+                "report_id": report_record["report_id"],
+                "file_name": report_record["file_name"],
+                "month": month,
+            }
+        )
     except ValueError as exc:
         return json_error(str(exc), 400)
     except urllib.error.URLError as exc:

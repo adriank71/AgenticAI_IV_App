@@ -18,6 +18,7 @@ from iv_agent.form_pilot import (
     build_stundenblatt_payload,
     fill_assistenz_dual_form_auto,
     fill_assistenz_form_auto,
+    fill_assistenz_form_auto_bytes,
     get_assistant_daily_hours,
     get_month_data,
     load_profile,
@@ -161,8 +162,8 @@ class FormPilotTests(unittest.TestCase):
 
             output_path = os.path.join(temp_dir, "out.pdf")
             with patch("iv_agent.form_pilot.get_assistant_hours", return_value=8.0), patch(
-                "iv_agent.form_pilot.fill_form"
-            ) as fill_form_mock, patch("builtins.input", side_effect=AssertionError("input was called")):
+                "iv_agent.form_pilot.fill_form_to_bytes", return_value=b"%PDF-1.4\n"
+            ), patch("builtins.input", side_effect=AssertionError("input was called")):
                 resolved = fill_assistenz_form_auto(
                     template_pdf_path="template.pdf",
                     month="2026-04",
@@ -172,7 +173,32 @@ class FormPilotTests(unittest.TestCase):
                 )
 
             self.assertEqual(resolved, output_path)
-            fill_form_mock.assert_called_once()
+            self.assertTrue(os.path.exists(output_path))
+            with open(output_path, "rb") as file:
+                self.assertEqual(file.read(), b"%PDF-1.4\n")
+
+    def test_fill_assistenz_form_auto_bytes_accepts_profile_payload(self):
+        profile_payload = {
+            "insured_name": "Max Muster",
+            "ahv_number": "756.1234.5678.97",
+            "street": "Musterstrasse 1",
+            "plz_ort": "8000 Zuerich",
+            "iban": "CH93 0076 2011 6238 5295 7",
+            "mitteilungsnummer": "MT-000001",
+        }
+
+        with patch("iv_agent.form_pilot.get_assistant_hours", return_value=8.0), patch(
+            "iv_agent.form_pilot.fill_form_to_bytes", return_value=b"%PDF-1.4\n"
+        ) as fill_form_to_bytes_mock:
+            output_bytes = fill_assistenz_form_auto_bytes(
+                template_pdf_path="template.pdf",
+                month="2026-04",
+                profile_data=profile_payload,
+                preview=False,
+            )
+
+        self.assertEqual(output_bytes, b"%PDF-1.4\n")
+        fill_form_to_bytes_mock.assert_called_once()
 
     @unittest.skipUnless(
         os.path.exists(os.environ.get("IV_AGENT_TEMPLATE_PDF", r"c:\Users\trxqz\Desktop\318.536_D_Rechnung_AB_01_2025_V1.pdf")),

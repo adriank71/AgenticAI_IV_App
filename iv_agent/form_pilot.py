@@ -171,6 +171,10 @@ def load_profile(profile_path: str) -> dict:
     return _validate_profile(raw_profile)
 
 
+def load_profile_payload(profile_data: dict) -> dict:
+    return _validate_profile(profile_data)
+
+
 def calculate_payroll(gross_hourly_rate: float, hours: float) -> Dict[str, float]:
     gross_pay = round(gross_hourly_rate * hours, 2)
     ahv = round(gross_pay * AHV_RATE, 2)
@@ -592,20 +596,26 @@ def build_rechnung_payload(
     return payload
 
 
-def merge_pdf_documents(input_documents: list[bytes], output_path: str) -> str:
+def merge_pdf_documents_to_bytes(input_documents: list[bytes]) -> bytes:
     writer = PdfWriter()
     try:
         for document in input_documents:
             writer.append(PdfReader(io.BytesIO(document)))
 
-        output_dir = os.path.dirname(output_path)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        with open(output_path, "wb") as file:
-            writer.write(file)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        return buffer.getvalue()
     finally:
         writer.close()
 
+
+def merge_pdf_documents(input_documents: list[bytes], output_path: str) -> str:
+    output_bytes = merge_pdf_documents_to_bytes(input_documents)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, "wb") as file:
+        file.write(output_bytes)
     return output_path
 
 
@@ -690,34 +700,64 @@ def fill_assistenz_form(template_pdf_path: str, output_path: str, data: dict, pr
     return True
 
 
-def fill_assistenz_form_auto(
+def _resolve_profile(profile_path: Optional[str] = None, profile_data: Optional[dict] = None) -> dict:
+    if profile_data is not None:
+        return load_profile_payload(profile_data)
+    if not profile_path:
+        raise ValueError("profile_path or profile_data is required")
+    return load_profile(profile_path)
+
+
+def fill_assistenz_form_auto_bytes(
     template_pdf_path: str,
     month: str,
-    profile_path: str,
-    output_path: Optional[str] = None,
+    profile_path: Optional[str] = None,
+    profile_data: Optional[dict] = None,
     preview: bool = False,
-) -> str:
-    profile = load_profile(profile_path)
+) -> bytes:
+    profile = _resolve_profile(profile_path=profile_path, profile_data=profile_data)
     month_data = get_month_data(month)
     payload = build_form_payload(month_data, profile)
 
     if preview:
         print(preview_payload(payload))
 
+    return fill_form_to_bytes(template_pdf_path, payload)
+
+
+def fill_assistenz_form_auto(
+    template_pdf_path: str,
+    month: str,
+    profile_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+    profile_data: Optional[dict] = None,
+    preview: bool = False,
+) -> str:
+    profile = _resolve_profile(profile_path=profile_path, profile_data=profile_data)
     resolved_output_path = output_path or generate_output_path(profile["insured_name"], month)
-    fill_form(template_pdf_path, resolved_output_path, payload)
+    output_bytes = fill_assistenz_form_auto_bytes(
+        template_pdf_path=template_pdf_path,
+        month=month,
+        profile_data=profile,
+        preview=preview,
+    )
+    output_dir = os.path.dirname(resolved_output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(resolved_output_path, "wb") as file:
+        file.write(output_bytes)
     return resolved_output_path
 
 
-def fill_assistenz_dual_form_auto(
+def fill_assistenz_dual_form_auto_bytes(
     stundenblatt_template_pdf_path: str,
     rechnung_template_pdf_path: str,
     month: str,
-    profile_path: str,
-    output_path: Optional[str] = None,
+    profile_path: Optional[str] = None,
+    profile_data: Optional[dict] = None,
     preview: bool = False,
-) -> str:
-    profile = load_profile(profile_path)
+) -> bytes:
+    profile = _resolve_profile(profile_path=profile_path, profile_data=profile_data)
 
     stundenblatt_fields = PdfReader(stundenblatt_template_pdf_path).get_fields() or {}
     rechnung_fields = PdfReader(rechnung_template_pdf_path).get_fields() or {}
@@ -734,10 +774,35 @@ def fill_assistenz_dual_form_auto(
     if preview:
         print(preview_dual_payloads(stundenblatt_payload, rechnung_payload))
 
-    resolved_output_path = output_path or generate_output_path(profile["insured_name"], month)
     stundenblatt_pdf = fill_form_to_bytes(stundenblatt_template_pdf_path, stundenblatt_payload)
     rechnung_pdf = fill_form_to_bytes(rechnung_template_pdf_path, rechnung_payload)
-    return merge_pdf_documents([stundenblatt_pdf, rechnung_pdf], resolved_output_path)
+    return merge_pdf_documents_to_bytes([stundenblatt_pdf, rechnung_pdf])
+
+
+def fill_assistenz_dual_form_auto(
+    stundenblatt_template_pdf_path: str,
+    rechnung_template_pdf_path: str,
+    month: str,
+    profile_path: Optional[str] = None,
+    output_path: Optional[str] = None,
+    profile_data: Optional[dict] = None,
+    preview: bool = False,
+) -> str:
+    profile = _resolve_profile(profile_path=profile_path, profile_data=profile_data)
+    resolved_output_path = output_path or generate_output_path(profile["insured_name"], month)
+    output_bytes = fill_assistenz_dual_form_auto_bytes(
+        stundenblatt_template_pdf_path=stundenblatt_template_pdf_path,
+        rechnung_template_pdf_path=rechnung_template_pdf_path,
+        month=month,
+        profile_data=profile,
+        preview=preview,
+    )
+    output_dir = os.path.dirname(resolved_output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(resolved_output_path, "wb") as file:
+        file.write(output_bytes)
+    return resolved_output_path
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:

@@ -1,4 +1,5 @@
 Flask
 flask-cors
 pypdf
-
+psycopg[binary]
+vercel

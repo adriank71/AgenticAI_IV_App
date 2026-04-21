@@ -1106,12 +1106,22 @@ function renderGeneratedReports() {
   state.generatedReports.forEach((report) => {
     const card = document.createElement("article");
     card.className = "report-result-card";
-    if (state.activeGeneratedReport && state.activeGeneratedReport.fileName === report.fileName) {
+    if (
+      state.activeGeneratedReport
+      && (
+        (state.activeGeneratedReport.reportId && state.activeGeneratedReport.reportId === report.reportId)
+        || (!state.activeGeneratedReport.reportId && state.activeGeneratedReport.fileName === report.fileName)
+      )
+    ) {
       card.classList.add("is-active");
     }
     card.tabIndex = 0;
     card.addEventListener("click", () => {
-      if (!state.activeGeneratedReport || state.activeGeneratedReport.fileName !== report.fileName) {
+      const sameReport = state.activeGeneratedReport && (
+        (state.activeGeneratedReport.reportId && state.activeGeneratedReport.reportId === report.reportId)
+        || (!state.activeGeneratedReport.reportId && state.activeGeneratedReport.fileName === report.fileName)
+      );
+      if (!sameReport) {
         selectGeneratedReport(report);
       }
     });
@@ -1182,6 +1192,7 @@ async function submitReportForm(event) {
     });
 
     state.generatedReports = (result.generated_reports || []).map((report) => ({
+      reportId: report.report_id || "",
       type: report.type,
       label: report.label || reportTypeLabelMap[report.type] || report.type,
       month,
@@ -1216,7 +1227,7 @@ async function submitReportForm(event) {
 }
 
 async function sendGeneratedReport() {
-  if (!state.activeGeneratedReport || !state.activeGeneratedReport.fileName) {
+  if (!state.activeGeneratedReport || (!state.activeGeneratedReport.fileName && !state.activeGeneratedReport.reportId)) {
     setReportStatus("Generate a report first before sending.", "error");
     return;
   }
@@ -1234,6 +1245,7 @@ async function sendGeneratedReport() {
       method: "POST",
       body: JSON.stringify({
         month: state.activeGeneratedReport.month,
+        report_id: state.activeGeneratedReport.reportId || undefined,
         file_name: state.activeGeneratedReport.fileName,
       }),
     });
