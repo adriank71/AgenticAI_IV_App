@@ -248,6 +248,22 @@
                 <button id="reports-open-calendar-btn" class="secondary-button" type="button">Check Calendar Hours</button>
               </div>
             </article>
+            <article class="reports-card glass-panel invoices-card">
+              <div class="invoices-header">
+                <div>
+                  <p class="section-title">Add Invoices</p>
+                  <p class="muted-copy">Scan the QR with your phone, take a photo of the receipt.</p>
+                </div>
+                <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add invoice" />
+              </div>
+              <div class="invoices-list-wrap">
+                <button id="invoices-toggle" class="invoices-toggle" type="button" aria-expanded="false">
+                  <span>Invoices (<span id="invoices-count">0</span>)</span>
+                  <span class="invoices-chevron" aria-hidden="true">&#9662;</span>
+                </button>
+                <ul id="invoices-list" class="invoices-list hidden"></ul>
+              </div>
+            </article>
           </div>
         </section>
       </main>

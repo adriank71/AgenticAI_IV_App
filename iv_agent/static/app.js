@@ -1858,7 +1858,61 @@ async function initialize() {
   setChatPending(false);
   syncEndTimeWithStart(true);
   updateReportsSummary();
+  initInvoices();
   await switchAppView(state.activeAppView);
+}
+
+function initInvoices() {
+  const qrImg = document.getElementById("invoices-qr");
+  const toggle = document.getElementById("invoices-toggle");
+  const list = document.getElementById("invoices-list");
+  const count = document.getElementById("invoices-count");
+  if (!qrImg || !toggle || !list || !count) return;
+
+  let sid = localStorage.getItem("invoices_sid");
+  if (!sid) {
+    sid = Math.random().toString(36).slice(2, 10);
+    localStorage.setItem("invoices_sid", sid);
+  }
+
+  fetch(`/api/invoices/${sid}/scan-url`)
+    .then((r) => r.json())
+    .then((data) => {
+      const url = data.scan_url;
+      qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=8&data=${encodeURIComponent(url)}`;
+      qrImg.title = url;
+    })
+    .catch(() => {});
+
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") === "true";
+    toggle.setAttribute("aria-expanded", String(!expanded));
+    list.classList.toggle("hidden", expanded);
+  });
+
+  async function poll() {
+    try {
+      const r = await fetch(`/api/invoices/${sid}`);
+      const data = await r.json();
+      const items = data.invoices || [];
+      count.textContent = String(items.length);
+      if (!items.length) {
+        list.innerHTML = `<li class="invoices-empty">No invoices yet. Scan the QR on your phone.</li>`;
+        return;
+      }
+      list.innerHTML = items
+        .map((t, i) => `<li><span class="invoice-title">Receipt ${i + 1}</span>${escapeHtml(t)}</li>`)
+        .join("");
+    } catch (err) {
+      /* ignore */
+    }
+  }
+  poll();
+  setInterval(poll, 2500);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 initialize().catch((error) => {

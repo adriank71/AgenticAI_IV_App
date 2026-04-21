@@ -812,5 +812,245 @@ def api_send_report():
         return json_error("Failed to send report", 500)
 
 
+INVOICES: dict[str, list[dict]] = {}
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6").strip()
+
+INVOICE_PROMPT = (
+    "Extract structured fields from this receipt/invoice image. "
+    "Respond with ONLY compact JSON, no prose, no code fences. Schema: "
+    '{"merchant": string, "date": "YYYY-MM-DD"|null, "total": number|null, '
+    '"currency": string|null, "invoice_number": string|null, "vat": number|null, '
+    '"confidence": "high"|"medium"|"low"}. '
+    "If a field is not clearly visible, use null. "
+    "If the image is not a receipt/invoice at all, respond: "
+    '{"error": "not_a_receipt"}'
+)
+
+SCAN_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Add invoice</title>
+<style>
+body{font-family:system-ui;max-width:480px;margin:0 auto;padding:24px 16px;background:#faf7f5;color:#1a1a1a}
+h2{margin:0 0 16px}
+.btn{display:block;font-size:18px;padding:14px 18px;width:100%;margin:10px 0;border:1px solid #d8b2ae;border-radius:10px;background:#fff;cursor:pointer;text-align:center;box-sizing:border-box}
+.btn.primary{background:#b10806;color:#fff;border-color:#b10806}
+.btn[disabled]{opacity:.55;cursor:default}
+#status{margin-top:16px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:13px;color:#333;background:#fff;border:1px solid #eee;border-radius:8px;padding:12px;min-height:24px}
+#preview{margin-top:12px;max-width:100%;border-radius:8px;display:none;border:1px solid #eee}
+input[type=file]{display:none}
+</style></head><body>
+<h2>Add invoice</h2>
+<label class="btn primary" id="capture-label">Take photo of receipt
+  <input id="file" type="file" accept="image/*" capture="environment">
+</label>
+<img id="preview" />
+<div id="status">Ready.</div>
+<script>
+const sid=__SID__;
+const status=document.getElementById("status");
+const preview=document.getElementById("preview");
+const label=document.getElementById("capture-label");
+
+async function downscale(file, maxDim=1600, quality=0.85){
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
+  const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
+  return blob;
+}
+
+function blobToBase64(blob){
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1]);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+document.getElementById("file").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; if(!f) return;
+  label.setAttribute("disabled","");
+  status.textContent = "Processing image...";
+  preview.src = URL.createObjectURL(f);
+  preview.style.display = "block";
+  try {
+    const jpeg = await downscale(f);
+    const b64 = await blobToBase64(jpeg);
+    status.textContent = "Reading receipt with AI...";
+    const r = await fetch("/api/invoices/" + sid + "/extract", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({image_base64: b64, mime: "image/jpeg"})
+    });
+    const j = await r.json();
+    if(!r.ok){ status.textContent = "Failed: " + (j.error || r.statusText); return; }
+    const f2 = j.fields || {};
+    const lines = [
+      "Merchant: " + (f2.merchant || "?"),
+      "Date: " + (f2.date || "?"),
+      "Total: " + (f2.total != null ? f2.total + " " + (f2.currency || "") : "?"),
+      f2.invoice_number ? "Invoice #: " + f2.invoice_number : null,
+      f2.vat != null ? "VAT: " + f2.vat : null,
+      "Confidence: " + (f2.confidence || "?"),
+    ].filter(Boolean);
+    status.textContent = "Added!\\n\\n" + lines.join("\\n");
+  } catch(err){
+    status.textContent = "Error: " + err.message;
+  } finally {
+    label.removeAttribute("disabled");
+    e.target.value = "";
+  }
+});
+</script></body></html>"""
+
+
+@app.get("/api/invoices/<sid>/scan-url")
+def api_invoice_scan_url(sid: str):
+    base = request.host_url.rstrip("/")
+    return jsonify({"scan_url": f"{base}/scan/{sid}"})
+
+
+@app.get("/scan/<sid>")
+def scan_page(sid: str):
+    INVOICES.setdefault(sid, [])
+    return SCAN_HTML.replace("__SID__", json.dumps(sid))
+
+
+@app.get("/api/invoices/<sid>")
+def api_invoices_get(sid: str):
+    items = INVOICES.get(sid, [])
+    return jsonify({
+        "invoices": [_format_invoice(it) for it in items],
+        "fields": items,
+    })
+
+
+def _format_invoice(fields: dict) -> str:
+    parts = [
+        f"Merchant: {fields.get('merchant') or '?'}",
+        f"Date: {fields.get('date') or '?'}",
+    ]
+    total = fields.get("total")
+    if total is not None:
+        parts.append(f"Total: {total} {fields.get('currency') or ''}".strip())
+    else:
+        parts.append("Total: ?")
+    if fields.get("invoice_number"):
+        parts.append(f"Invoice #: {fields['invoice_number']}")
+    if fields.get("vat") is not None:
+        parts.append(f"VAT: {fields['vat']}")
+    return "\n".join(parts)
+
+
+def _call_claude_vision(image_b64: str, mime: str) -> dict:
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set on the server")
+
+    body = json.dumps({
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 400,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": image_b64}},
+                {"type": "text", "text": INVOICE_PROMPT},
+            ],
+        }],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = format_webhook_error_detail(exc.read())
+        raise RuntimeError(f"Claude API error {exc.code}: {detail or 'no body'}") from exc
+
+    parsed = json.loads(raw.decode("utf-8"))
+    blocks = parsed.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+    if not text:
+        raise RuntimeError("Empty response from Claude")
+
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+
+    try:
+        fields = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Claude returned non-JSON: {text[:200]}") from exc
+
+    if not isinstance(fields, dict):
+        raise RuntimeError("Claude returned non-object")
+
+    return fields
+
+
+@app.post("/api/invoices/<sid>/extract")
+def api_invoices_extract(sid: str):
+    payload = request.get_json(silent=True) or {}
+    image_b64 = str(payload.get("image_base64", "")).strip()
+    mime = str(payload.get("mime", "image/jpeg")).strip() or "image/jpeg"
+    if not image_b64:
+        return json_error("image_base64 is required", 400)
+    if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        return json_error("unsupported mime", 400)
+
+    try:
+        fields = _call_claude_vision(image_b64, mime)
+    except RuntimeError as exc:
+        logger.error("Invoice extraction failed: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.exception("Unexpected invoice extraction error")
+        return json_error(f"extraction failed: {exc}", 500)
+
+    if fields.get("error") == "not_a_receipt":
+        return json_error("Image does not look like a receipt", 422)
+
+    normalized = {
+        "merchant": (fields.get("merchant") or "").strip() or None,
+        "date": (fields.get("date") or "").strip() or None,
+        "total": fields.get("total"),
+        "currency": (fields.get("currency") or "").strip() or None,
+        "invoice_number": (fields.get("invoice_number") or "").strip() or None,
+        "vat": fields.get("vat"),
+        "confidence": (fields.get("confidence") or "").strip() or None,
+    }
+
+    if not normalized["merchant"] and normalized["total"] is None and not normalized["date"]:
+        return json_error("Could not extract any fields from image", 422)
+
+    INVOICES.setdefault(sid, []).append(normalized)
+    return jsonify({"ok": True, "fields": normalized, "count": len(INVOICES[sid])})
+
+
+@app.post("/api/invoices/<sid>")
+def api_invoices_post(sid: str):
+    text = str((request.get_json(silent=True) or {}).get("text", "")).strip()
+    if not text:
+        return json_error("empty", 400)
+    INVOICES.setdefault(sid, []).append({"merchant": text, "date": None, "total": None})
+    return jsonify({"ok": True, "count": len(INVOICES[sid])})
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", debug=True)
