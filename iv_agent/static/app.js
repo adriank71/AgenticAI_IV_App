@@ -1867,6 +1867,7 @@ function initInvoices() {
   const toggle = document.getElementById("invoices-toggle");
   const list = document.getElementById("invoices-list");
   const count = document.getElementById("invoices-count");
+  const cameraLink = document.getElementById("invoices-camera-link");
   if (!qrImg || !toggle || !list || !count) return;
 
   let sid = localStorage.getItem("invoices_sid");
@@ -1878,9 +1879,13 @@ function initInvoices() {
   fetch(`/api/invoices/${sid}/scan-url`)
     .then((r) => r.json())
     .then((data) => {
-      const url = data.scan_url;
+      const url = data.camera_url || data.scan_url;
       qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=8&data=${encodeURIComponent(url)}`;
       qrImg.title = url;
+      if (cameraLink) {
+        cameraLink.href = url;
+        cameraLink.title = url;
+      }
     })
     .catch(() => {});
 
@@ -1894,14 +1899,14 @@ function initInvoices() {
     try {
       const r = await fetch(`/api/invoices/${sid}`);
       const data = await r.json();
-      const items = data.invoices || [];
+      const items = data.captures || [];
       count.textContent = String(items.length);
       if (!items.length) {
-        list.innerHTML = `<li class="invoices-empty">No invoices yet. Scan the QR on your phone.</li>`;
+        list.innerHTML = `<li class="invoices-empty">No invoices yet. Scan the QR or open the /camera link on your phone.</li>`;
         return;
       }
       list.innerHTML = items
-        .map((t, i) => `<li><span class="invoice-title">Receipt ${i + 1}</span>${escapeHtml(t)}</li>`)
+        .map((capture, index) => renderInvoiceCapture(capture, index))
         .join("");
     } catch (err) {
       /* ignore */
@@ -1909,6 +1914,64 @@ function initInvoices() {
   }
   poll();
   setInterval(poll, 2500);
+}
+
+function renderInvoiceCapture(capture, index) {
+  const summary = capture.summary || "Photo saved to Invoices folder.";
+  const meta = [
+    formatInvoiceCaptureTime(capture.created_at),
+    capture.file_name || null,
+    capture.content_size ? formatFileSize(capture.content_size) : null,
+  ].filter(Boolean).join(" | ");
+  const extractionNote = capture.extraction_error
+    ? `<div class="invoice-note">${escapeHtml(capture.extraction_error)}</div>`
+    : "";
+
+  return `
+    <li>
+      <article class="invoice-capture">
+        <a class="invoice-thumb-link" href="${escapeHtml(capture.image_url || "#")}" target="_blank" rel="noreferrer">
+          <img class="invoice-thumb" src="${escapeHtml(capture.image_url || "")}" alt="${escapeHtml(capture.file_name || `Invoice ${index + 1}`)}" loading="lazy" />
+        </a>
+        <div class="invoice-copy">
+          <span class="invoice-title">Receipt ${index + 1}</span>
+          <span class="invoice-meta">${escapeHtml(meta || "Stored in Invoices folder")}</span>
+          <div class="invoice-summary">${escapeHtml(summary)}</div>
+          ${extractionNote}
+        </div>
+      </article>
+    </li>
+  `;
+}
+
+function formatInvoiceCaptureTime(value) {
+  if (!value) {
+    return "Unknown upload time";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return parsed.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (!size) {
+    return "";
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function escapeHtml(s) {

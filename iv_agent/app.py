@@ -3,12 +3,14 @@ import json
 import io
 import os
 import socket
+import base64
+import binascii
 import urllib.error
 import urllib.request
 from contextlib import ExitStack
 from datetime import datetime
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, url_for
 from flask_cors import CORS
 
 try:
@@ -31,6 +33,7 @@ try:
     from .storage import (
         make_profile_store,
         make_report_store,
+        make_invoice_capture_store,
         materialize_binary_reference,
         resolve_profile_file_path,
     )
@@ -54,6 +57,7 @@ except ImportError:
     from storage import (
         make_profile_store,
         make_report_store,
+        make_invoice_capture_store,
         materialize_binary_reference,
         resolve_profile_file_path,
     )
@@ -243,6 +247,10 @@ def build_report_preview_path(report_record: dict) -> str:
 
 def get_report_store():
     return make_report_store(OUTPUT_DIR)
+
+
+def get_invoice_store():
+    return make_invoice_capture_store(OUTPUT_DIR)
 
 
 def resolve_report_record(
@@ -812,10 +820,14 @@ def api_send_report():
         return json_error("Failed to send report", 500)
 
 
-INVOICES: dict[str, list[dict]] = {}
-
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6").strip()
+INVOICE_MIME_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 INVOICE_PROMPT = (
     "Extract structured fields from this receipt/invoice image. "
@@ -828,107 +840,181 @@ INVOICE_PROMPT = (
     '{"error": "not_a_receipt"}'
 )
 
-SCAN_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Add invoice</title>
-<style>
-body{font-family:system-ui;max-width:480px;margin:0 auto;padding:24px 16px;background:#faf7f5;color:#1a1a1a}
-h2{margin:0 0 16px}
-.btn{display:block;font-size:18px;padding:14px 18px;width:100%;margin:10px 0;border:1px solid #d8b2ae;border-radius:10px;background:#fff;cursor:pointer;text-align:center;box-sizing:border-box}
-.btn.primary{background:#b10806;color:#fff;border-color:#b10806}
-.btn[disabled]{opacity:.55;cursor:default}
-#status{margin-top:16px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:13px;color:#333;background:#fff;border:1px solid #eee;border-radius:8px;padding:12px;min-height:24px}
-#preview{margin-top:12px;max-width:100%;border-radius:8px;display:none;border:1px solid #eee}
-input[type=file]{display:none}
-</style></head><body>
-<h2>Add invoice</h2>
-<label class="btn primary" id="capture-label">Take photo of receipt
-  <input id="file" type="file" accept="image/*" capture="environment">
-</label>
-<img id="preview" />
-<div id="status">Ready.</div>
-<script>
-const sid=__SID__;
-const status=document.getElementById("status");
-const preview=document.getElementById("preview");
-const label=document.getElementById("capture-label");
 
-async function downscale(file, maxDim=1600, quality=0.85){
-  const bmp = await createImageBitmap(file);
-  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
-  const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
-  const canvas = document.createElement("canvas");
-  canvas.width = w; canvas.height = h;
-  canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
-  const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", quality));
-  return blob;
-}
+def build_invoice_image_path(capture_record: dict) -> str:
+    return (
+        f"/api/invoices/{capture_record['sid']}/files/"
+        f"{capture_record['invoice_id']}/{capture_record['file_name']}"
+    )
 
-function blobToBase64(blob){
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",")[1]);
-    r.onerror = reject;
-    r.readAsDataURL(blob);
-  });
-}
 
-document.getElementById("file").addEventListener("change", async (e) => {
-  const f = e.target.files[0]; if(!f) return;
-  label.setAttribute("disabled","");
-  status.textContent = "Processing image...";
-  preview.src = URL.createObjectURL(f);
-  preview.style.display = "block";
-  try {
-    const jpeg = await downscale(f);
-    const b64 = await blobToBase64(jpeg);
-    status.textContent = "Reading receipt with AI...";
-    const r = await fetch("/api/invoices/" + sid + "/extract", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({image_base64: b64, mime: "image/jpeg"})
-    });
-    const j = await r.json();
-    if(!r.ok){ status.textContent = "Failed: " + (j.error || r.statusText); return; }
-    const f2 = j.fields || {};
-    const lines = [
-      "Merchant: " + (f2.merchant || "?"),
-      "Date: " + (f2.date || "?"),
-      "Total: " + (f2.total != null ? f2.total + " " + (f2.currency || "") : "?"),
-      f2.invoice_number ? "Invoice #: " + f2.invoice_number : null,
-      f2.vat != null ? "VAT: " + f2.vat : null,
-      "Confidence: " + (f2.confidence || "?"),
-    ].filter(Boolean);
-    status.textContent = "Added!\\n\\n" + lines.join("\\n");
-  } catch(err){
-    status.textContent = "Error: " + err.message;
-  } finally {
-    label.removeAttribute("disabled");
-    e.target.value = "";
-  }
-});
-</script></body></html>"""
+def parse_invoice_capture_payload(payload: dict) -> tuple[bytes, str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body is required")
+
+    image_b64 = str(payload.get("image_base64", "")).strip()
+    mime = str(payload.get("mime", "image/jpeg")).strip() or "image/jpeg"
+    if not image_b64:
+        raise ValueError("image_base64 is required")
+    if mime not in INVOICE_MIME_EXTENSIONS:
+        raise ValueError("unsupported mime")
+
+    try:
+        image_bytes = base64.b64decode(image_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Invalid base64 image payload") from exc
+
+    if not image_bytes:
+        raise ValueError("Image payload is empty")
+
+    file_name = os.path.basename(str(payload.get("file_name", "")).strip())
+    if not file_name:
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        file_name = f"invoice_{timestamp}{INVOICE_MIME_EXTENSIONS[mime]}"
+    elif "." not in file_name:
+        file_name = f"{file_name}{INVOICE_MIME_EXTENSIONS[mime]}"
+
+    return image_bytes, mime, file_name
+
+
+def normalize_invoice_fields(fields: dict) -> dict:
+    normalized = {
+        "merchant": (fields.get("merchant") or "").strip() or None,
+        "date": (fields.get("date") or "").strip() or None,
+        "total": fields.get("total"),
+        "currency": (fields.get("currency") or "").strip() or None,
+        "invoice_number": (fields.get("invoice_number") or "").strip() or None,
+        "vat": fields.get("vat"),
+        "confidence": (fields.get("confidence") or "").strip() or None,
+    }
+    return normalized
+
+
+def serialize_invoice_capture(capture_record: dict) -> dict:
+    fields = capture_record.get("fields") or None
+    summary = _format_invoice(fields) if fields else None
+    return {
+        "invoice_id": capture_record["invoice_id"],
+        "sid": capture_record["sid"],
+        "file_name": capture_record["file_name"],
+        "folder_path": capture_record.get("folder_path"),
+        "created_at": capture_record.get("created_at"),
+        "content_type": capture_record.get("content_type"),
+        "content_size": capture_record.get("content_size"),
+        "fields": fields,
+        "summary": summary,
+        "extraction_error": capture_record.get("extraction_error"),
+        "image_url": build_invoice_image_path(capture_record),
+    }
+
+
+def capture_invoice(sid: str, payload: dict):
+    image_bytes, mime, file_name = parse_invoice_capture_payload(payload)
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    invoice_store = get_invoice_store()
+
+    normalized_fields = None
+    extraction_error = None
+    try:
+        extracted_fields = _call_claude_vision(image_b64, mime)
+        if extracted_fields.get("error") == "not_a_receipt":
+            extraction_error = "Image does not look like a receipt"
+        else:
+            normalized_fields = normalize_invoice_fields(extracted_fields)
+            if (
+                not normalized_fields["merchant"]
+                and normalized_fields["total"] is None
+                and not normalized_fields["date"]
+            ):
+                normalized_fields = None
+                extraction_error = "Could not extract any fields from image"
+    except RuntimeError as exc:
+        logger.warning("Invoice extraction failed, storing raw capture only: %s", exc)
+        extraction_error = str(exc)
+    except Exception as exc:
+        logger.exception("Unexpected invoice extraction error")
+        extraction_error = f"extraction failed: {exc}"
+
+    capture_record = invoice_store.save_capture(
+        sid=sid,
+        file_name=file_name,
+        content=image_bytes,
+        content_type=mime,
+        fields=normalized_fields,
+        extraction_error=extraction_error,
+    )
+    serialized_capture = serialize_invoice_capture(capture_record)
+    capture_count = len(invoice_store.list_captures(sid))
+    response = jsonify(
+        {
+            "ok": True,
+            "stored": True,
+            "count": capture_count,
+            "capture": serialized_capture,
+            "fields": serialized_capture["fields"] or {},
+            "extraction_error": serialized_capture.get("extraction_error"),
+        }
+    )
+    response.status_code = 201
+    return response
 
 
 @app.get("/api/invoices/<sid>/scan-url")
 def api_invoice_scan_url(sid: str):
-    base = request.host_url.rstrip("/")
-    return jsonify({"scan_url": f"{base}/scan/{sid}"})
+    camera_url = url_for("camera_page", sid=sid, _external=True)
+    return jsonify({"scan_url": camera_url, "camera_url": camera_url})
+
+
+@app.get("/camera")
+def camera_page():
+    return send_from_directory(app.static_folder, "camera.html")
+
+
+@app.get("/camera/<sid>")
+def camera_page_with_sid(sid: str):
+    return redirect(url_for("camera_page", sid=sid), code=302)
 
 
 @app.get("/scan/<sid>")
 def scan_page(sid: str):
-    INVOICES.setdefault(sid, [])
-    return SCAN_HTML.replace("__SID__", json.dumps(sid))
+    return redirect(url_for("camera_page", sid=sid), code=302)
 
 
 @app.get("/api/invoices/<sid>")
 def api_invoices_get(sid: str):
-    items = INVOICES.get(sid, [])
+    try:
+        items = get_invoice_store().list_captures(sid)
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    serialized_captures = [serialize_invoice_capture(item) for item in items]
     return jsonify({
-        "invoices": [_format_invoice(it) for it in items],
-        "fields": items,
+        "invoices": [capture["summary"] or capture["file_name"] for capture in serialized_captures],
+        "fields": [capture["fields"] or {} for capture in serialized_captures],
+        "captures": serialized_captures,
     })
+
+
+@app.get("/api/invoices/<sid>/files/<invoice_id>/<path:filename>")
+def api_invoice_file(sid: str, invoice_id: str, filename: str):
+    try:
+        capture_record = get_invoice_store().get_capture(sid=sid, invoice_id=invoice_id)
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    if not capture_record:
+        return json_error("Invoice file not found", 404)
+    if os.path.basename(filename) != capture_record["file_name"]:
+        return json_error("Invoice file not found", 404)
+    try:
+        image_bytes, content_type = get_invoice_store().read_capture_bytes(capture_record)
+    except FileNotFoundError:
+        return json_error("Invoice file not found", 404)
+
+    return send_file(
+        io.BytesIO(image_bytes),
+        mimetype=content_type or capture_record.get("content_type") or "image/jpeg",
+        as_attachment=False,
+        download_name=capture_record["file_name"],
+    )
 
 
 def _format_invoice(fields: dict) -> str:
@@ -1006,50 +1092,29 @@ def _call_claude_vision(image_b64: str, mime: str) -> dict:
 
 @app.post("/api/invoices/<sid>/extract")
 def api_invoices_extract(sid: str):
-    payload = request.get_json(silent=True) or {}
-    image_b64 = str(payload.get("image_base64", "")).strip()
-    mime = str(payload.get("mime", "image/jpeg")).strip() or "image/jpeg"
-    if not image_b64:
-        return json_error("image_base64 is required", 400)
-    if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
-        return json_error("unsupported mime", 400)
-
     try:
-        fields = _call_claude_vision(image_b64, mime)
-    except RuntimeError as exc:
-        logger.error("Invoice extraction failed: %s", exc)
-        return json_error(str(exc), 502)
+        return capture_invoice(sid, request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return json_error(str(exc), 400)
     except Exception as exc:
-        logger.exception("Unexpected invoice extraction error")
-        return json_error(f"extraction failed: {exc}", 500)
+        logger.exception("Unexpected invoice capture error")
+        return json_error(f"Failed to store invoice capture: {exc}", 500)
 
-    if fields.get("error") == "not_a_receipt":
-        return json_error("Image does not look like a receipt", 422)
 
-    normalized = {
-        "merchant": (fields.get("merchant") or "").strip() or None,
-        "date": (fields.get("date") or "").strip() or None,
-        "total": fields.get("total"),
-        "currency": (fields.get("currency") or "").strip() or None,
-        "invoice_number": (fields.get("invoice_number") or "").strip() or None,
-        "vat": fields.get("vat"),
-        "confidence": (fields.get("confidence") or "").strip() or None,
-    }
-
-    if not normalized["merchant"] and normalized["total"] is None and not normalized["date"]:
-        return json_error("Could not extract any fields from image", 422)
-
-    INVOICES.setdefault(sid, []).append(normalized)
-    return jsonify({"ok": True, "fields": normalized, "count": len(INVOICES[sid])})
+@app.post("/api/invoices/<sid>/capture")
+def api_invoices_capture(sid: str):
+    try:
+        return capture_invoice(sid, request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except Exception as exc:
+        logger.exception("Unexpected invoice capture error")
+        return json_error(f"Failed to store invoice capture: {exc}", 500)
 
 
 @app.post("/api/invoices/<sid>")
 def api_invoices_post(sid: str):
-    text = str((request.get_json(silent=True) or {}).get("text", "")).strip()
-    if not text:
-        return json_error("empty", 400)
-    INVOICES.setdefault(sid, []).append({"merchant": text, "date": None, "total": None})
-    return jsonify({"ok": True, "count": len(INVOICES[sid])})
+    return json_error("Use the camera capture flow to add invoices", 400)
 
 
 if __name__ == "__main__":

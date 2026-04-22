@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IV-Helper Camera</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      color-scheme: light;
+      --bg-top: #fff6f2;
+      --bg-bottom: #f4f7fb;
+      --surface: rgba(255, 255, 255, 0.92);
+      --line: rgba(123, 93, 91, 0.14);
+      --text-main: #1f2937;
+      --text-soft: #5a6472;
+      --accent: #b10806;
+      --accent-strong: #7f0302;
+      --shadow: 0 24px 60px rgba(68, 39, 37, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Inter", sans-serif;
+      color: var(--text-main);
+      background:
+        radial-gradient(circle at top left, rgba(177, 8, 6, 0.08), transparent 34%),
+        linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+      padding: 20px 14px 28px;
+    }
+
+    .shell {
+      width: min(100%, 520px);
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(20px);
+      padding: 22px 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 2rem;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--text-soft);
+      line-height: 1.5;
+    }
+
+    .meta-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .meta-chip {
+      display: grid;
+      gap: 2px;
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid rgba(123, 93, 91, 0.12);
+    }
+
+    .meta-chip strong {
+      font-size: 0.8rem;
+      color: var(--text-main);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .meta-chip span {
+      font-size: 0.95rem;
+      color: var(--text-soft);
+      word-break: break-word;
+    }
+
+    .button {
+      display: block;
+      width: 100%;
+      padding: 16px 18px;
+      border: 0;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+      color: #fff;
+      font: inherit;
+      font-size: 1rem;
+      font-weight: 700;
+      text-align: center;
+      cursor: pointer;
+      transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+      box-shadow: 0 16px 30px rgba(177, 8, 6, 0.18);
+    }
+
+    .button:active {
+      transform: translateY(1px);
+    }
+
+    .button[disabled] {
+      opacity: 0.62;
+      cursor: default;
+      box-shadow: none;
+    }
+
+    .button-secondary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 13px 16px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(123, 93, 91, 0.16);
+      background: #fff;
+      color: var(--text-main);
+      font: inherit;
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    .preview-wrap {
+      overflow: hidden;
+      border-radius: 24px;
+      border: 1px solid rgba(123, 93, 91, 0.12);
+      background: rgba(255, 255, 255, 0.84);
+      min-height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .preview-wrap img {
+      width: 100%;
+      display: none;
+      object-fit: cover;
+      max-height: 360px;
+    }
+
+    .preview-empty {
+      padding: 32px 18px;
+      text-align: center;
+      color: var(--text-soft);
+      font-size: 0.95rem;
+      line-height: 1.55;
+    }
+
+    .status {
+      white-space: pre-wrap;
+      padding: 16px;
+      border-radius: 20px;
+      background: #fff;
+      border: 1px solid rgba(123, 93, 91, 0.12);
+      color: var(--text-main);
+      font-size: 0.94rem;
+      line-height: 1.55;
+      min-height: 74px;
+    }
+
+    .status.error {
+      border-color: rgba(177, 8, 6, 0.22);
+      background: #fff2f0;
+    }
+
+    .actions {
+      display: grid;
+      gap: 12px;
+    }
+
+    @media (max-width: 520px) {
+      body {
+        padding-inline: 12px;
+      }
+
+      .panel {
+        padding: 20px 16px;
+        border-radius: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="panel">
+      <p class="eyebrow">IV-Helper</p>
+      <h1>Open Camera</h1>
+      <p>Take a photo of the invoice or receipt. The image is uploaded back into the web app and stored in your <strong>Invoices</strong> folder.</p>
+      <div class="meta-grid">
+        <div class="meta-chip">
+          <strong>Session</strong>
+          <span id="sid-value">Waiting for link...</span>
+        </div>
+        <div class="meta-chip">
+          <strong>Upload Target</strong>
+          <span id="folder-value">Invoices</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="preview-wrap">
+        <div id="preview-empty" class="preview-empty">No image selected yet. On most phones the button below opens the rear camera directly.</div>
+        <img id="preview-image" alt="Invoice preview" />
+      </div>
+    </section>
+
+    <section class="panel actions">
+      <label class="button" id="capture-button">
+        Take Photo
+        <input id="file-input" type="file" accept="image/*" capture="environment" />
+      </label>
+      <a class="button-secondary" href="/" id="back-link">Back To IV-Helper</a>
+      <div id="status" class="status">Ready.</div>
+    </section>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const sid = (params.get("sid") || "").trim();
+    const sidValue = document.getElementById("sid-value");
+    const folderValue = document.getElementById("folder-value");
+    const status = document.getElementById("status");
+    const previewImage = document.getElementById("preview-image");
+    const previewEmpty = document.getElementById("preview-empty");
+    const captureButton = document.getElementById("capture-button");
+    const fileInput = document.getElementById("file-input");
+
+    sidValue.textContent = sid || "Missing";
+    folderValue.textContent = sid ? `Invoices/${sid}` : "Invoices";
+
+    function setStatus(message, isError = false) {
+      status.textContent = message;
+      status.classList.toggle("error", Boolean(isError));
+    }
+
+    function showPreview(file) {
+      previewEmpty.style.display = "none";
+      previewImage.style.display = "block";
+      previewImage.src = URL.createObjectURL(file);
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function loadImage(file) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = dataUrl;
+      });
+    }
+
+    async function downscaleToJpeg(file, maxDim = 1800, quality = 0.88) {
+      if ("createImageBitmap" in window) {
+        try {
+          const bitmap = await createImageBitmap(file);
+          const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+          const width = Math.round(bitmap.width * scale);
+          const height = Math.round(bitmap.height * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+          return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+        } catch (error) {
+          // Fall back to Image() based resize below.
+        }
+      }
+
+      const image = await loadImage(file);
+      const scale = Math.min(1, maxDim / Math.max(image.width, image.height));
+      const width = Math.round(image.width * scale);
+      const height = Math.round(image.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+      return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    }
+
+    function formatSuccessMessage(payload) {
+      const capture = payload.capture || {};
+      const fields = capture.fields || payload.fields || {};
+      const lines = [
+        `Saved to ${capture.folder_path || "Invoices"}`,
+        capture.file_name ? `File: ${capture.file_name}` : null,
+        fields.merchant ? `Merchant: ${fields.merchant}` : null,
+        fields.date ? `Date: ${fields.date}` : null,
+        fields.total != null ? `Total: ${fields.total} ${fields.currency || ""}`.trim() : null,
+        fields.invoice_number ? `Invoice #: ${fields.invoice_number}` : null,
+        fields.vat != null ? `VAT: ${fields.vat}` : null,
+        fields.confidence ? `Confidence: ${fields.confidence}` : null,
+        payload.extraction_error ? `AI note: ${payload.extraction_error}` : null,
+      ].filter(Boolean);
+      return lines.join("\n");
+    }
+
+    if (!sid) {
+      captureButton.setAttribute("disabled", "");
+      fileInput.disabled = true;
+      setStatus("This camera link is missing its invoice session. Re-open it from the QR code inside IV-Helper.", true);
+    }
+
+    fileInput.addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file || !sid) {
+        return;
+      }
+
+      captureButton.setAttribute("disabled", "");
+      showPreview(file);
+      setStatus("Processing image...");
+
+      try {
+        const jpeg = await downscaleToJpeg(file);
+        const imageBase64 = await blobToBase64(jpeg);
+        setStatus("Uploading to Invoices folder...");
+
+        const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/capture`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image_base64: imageBase64,
+            mime: "image/jpeg",
+            file_name: file.name || "",
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || response.statusText || "Upload failed");
+        }
+
+        setStatus(formatSuccessMessage(payload));
+      } catch (error) {
+        setStatus(`Upload failed: ${error.message}`, true);
+      } finally {
+        captureButton.removeAttribute("disabled");
+        event.target.value = "";
+      }
+    });
+  </script>
+</body>
+</html>

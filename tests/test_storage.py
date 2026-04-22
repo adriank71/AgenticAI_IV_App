@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 from iv_agent.calendar_manager import JsonEventStore, PostgresEventStore
 from iv_agent.migrate_local_data import migrate_local_data
-from iv_agent.storage import PostgresProfileStore, PostgresReportStore
+from iv_agent.storage import LocalInvoiceCaptureStore, PostgresProfileStore, PostgresReportStore
 
 
 @contextmanager
@@ -103,6 +103,35 @@ class CaptureProfileStore:
 
 
 class StorageTests(unittest.TestCase):
+    def test_local_invoice_capture_store_persists_image_and_metadata(self):
+        with workspace_tempdir() as temp_dir:
+            store = LocalInvoiceCaptureStore(temp_dir)
+
+            saved = store.save_capture(
+                sid="session123",
+                file_name="receipt.jpg",
+                content=b"\xff\xd8\xff",
+                content_type="image/jpeg",
+                fields={"merchant": "Cafe Example", "total": 12.4, "currency": "CHF"},
+                extraction_error=None,
+            )
+
+            self.assertEqual(saved["sid"], "session123")
+            self.assertEqual(saved["folder_path"], "Invoices/session123")
+            self.assertTrue(saved["storage_key"].endswith("_receipt.jpg"))
+
+            listed = store.list_captures("session123")
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["invoice_id"], saved["invoice_id"])
+            self.assertEqual(listed[0]["fields"]["merchant"], "Cafe Example")
+
+            fetched = store.get_capture(sid="session123", invoice_id=saved["invoice_id"])
+            self.assertEqual(fetched["file_name"], "receipt.jpg")
+
+            image_bytes, content_type = store.read_capture_bytes(fetched)
+            self.assertEqual(image_bytes, b"\xff\xd8\xff")
+            self.assertEqual(content_type, "image/jpeg")
+
     def test_postgres_profile_store_reads_json_payload(self):
         cursor = RecordingCursor(fetchone_results=[{"payload": {"insured_name": "Max Muster"}}])
         store = PostgresProfileStore(

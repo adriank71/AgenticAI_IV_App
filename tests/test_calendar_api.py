@@ -68,6 +68,42 @@ class FakeReportStore:
         return b"%PDF-1.4\n", "application/pdf"
 
 
+class FakeInvoiceStore:
+    def __init__(self):
+        self.captures = []
+
+    def save_capture(self, **kwargs):
+        record = {
+            "invoice_id": f"inv-{len(self.captures) + 1}",
+            "sid": kwargs["sid"],
+            "file_name": kwargs["file_name"],
+            "storage_backend": "blob",
+            "storage_key": f"Invoices/{kwargs['sid']}/inv-{len(self.captures) + 1}_{kwargs['file_name']}",
+            "storage_url": "https://blob.example/private/invoice.jpg",
+            "content_type": kwargs["content_type"],
+            "content_size": len(kwargs["content"]),
+            "fields": kwargs.get("fields"),
+            "extraction_error": kwargs.get("extraction_error"),
+            "folder_path": f"Invoices/{kwargs['sid']}",
+            "created_at": "2026-04-22T12:00:00+00:00",
+            "updated_at": "2026-04-22T12:00:00+00:00",
+        }
+        self.captures.append(record)
+        return record
+
+    def list_captures(self, sid):
+        return [capture for capture in self.captures if capture["sid"] == sid]
+
+    def get_capture(self, *, sid, invoice_id):
+        for capture in self.captures:
+            if capture["sid"] == sid and capture["invoice_id"] == invoice_id:
+                return capture
+        return None
+
+    def read_capture_bytes(self, capture):
+        return b"\xff\xd8\xff", capture.get("content_type") or "image/jpeg"
+
+
 class CalendarManagerTests(unittest.TestCase):
     def test_add_events_supports_weekly_repetition_and_breakdown_totals(self):
         with isolated_calendar_storage():
@@ -391,6 +427,42 @@ class CalendarApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "application/pdf")
+
+    def test_invoice_capture_stores_image_even_when_extraction_fails(self):
+        client = app_module.app.test_client()
+        fake_invoice_store = FakeInvoiceStore()
+
+        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+            app_module, "_call_claude_vision", side_effect=RuntimeError("anthropic unavailable")
+        ):
+            response = client.post(
+                "/api/invoices/session123/capture",
+                json={
+                    "image_base64": "/9j/",
+                    "mime": "image/jpeg",
+                    "file_name": "phone.jpg",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertTrue(payload["stored"])
+        self.assertEqual(payload["capture"]["folder_path"], "Invoices/session123")
+        self.assertEqual(payload["capture"]["file_name"], "phone.jpg")
+        self.assertEqual(payload["extraction_error"], "anthropic unavailable")
+        self.assertEqual(len(fake_invoice_store.captures), 1)
+
+    def test_scan_url_uses_camera_route_and_scan_redirects(self):
+        client = app_module.app.test_client()
+
+        scan_response = client.get("/api/invoices/session123/scan-url")
+        self.assertEqual(scan_response.status_code, 200)
+        scan_payload = scan_response.get_json()
+        self.assertIn("/camera?sid=session123", scan_payload["camera_url"])
+
+        redirect_response = client.get("/scan/session123")
+        self.assertEqual(redirect_response.status_code, 302)
+        self.assertIn("/camera?sid=session123", redirect_response.headers["Location"])
 
 
 if __name__ == "__main__":

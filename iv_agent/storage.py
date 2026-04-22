@@ -49,6 +49,29 @@ class ReportStore(Protocol):
         ...
 
 
+class InvoiceCaptureStore(Protocol):
+    def save_capture(
+        self,
+        *,
+        sid: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+        fields: dict[str, Any] | None = None,
+        extraction_error: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def list_captures(self, sid: str) -> list[dict[str, Any]]:
+        ...
+
+    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
+        ...
+
+    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
+        ...
+
+
 class AssetStore(Protocol):
     @property
     def backend_name(self) -> str:
@@ -84,6 +107,17 @@ def sanitize_profile_id(profile_id: str | None) -> str:
     return safe_profile_id
 
 
+def sanitize_invoice_sid(sid: str | None) -> str:
+    candidate = str(sid or "").strip()
+    if not candidate:
+        raise ValueError("Invalid invoice session id")
+
+    safe_sid = "".join(ch for ch in candidate if ch.isalnum() or ch in ("-", "_"))
+    if safe_sid != candidate:
+        raise ValueError("Invalid invoice session id")
+    return safe_sid
+
+
 def resolve_profile_file_path(default_profile_path: str, profile_dir: str, profile_id: str | None = None) -> str:
     normalized_profile_id = sanitize_profile_id(profile_id)
     if normalized_profile_id == DEFAULT_PROFILE_ID:
@@ -115,6 +149,15 @@ def _report_asset_backend() -> str:
     if normalized == "blob":
         return "blob"
     return "blob" if os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip() else "local"
+
+
+def _invoice_asset_backend() -> str:
+    normalized = str(os.environ.get("IV_AGENT_INVOICE_ASSET_BACKEND", "auto") or "auto").strip().lower()
+    if normalized == "local":
+        return "local"
+    if normalized == "blob":
+        return "blob"
+    return _report_asset_backend()
 
 
 def _load_psycopg():
@@ -672,6 +715,185 @@ class PostgresReportStore:
         )
 
 
+class LocalInvoiceCaptureStore:
+    def __init__(self, output_dir: str):
+        self._root_dir = os.path.join(output_dir, "Invoices")
+
+    def _session_dir(self, sid: str) -> str:
+        return os.path.join(self._root_dir, sanitize_invoice_sid(sid))
+
+    def _metadata_path(self, sid: str, invoice_id: str) -> str:
+        return os.path.join(self._session_dir(sid), f"{invoice_id}.json")
+
+    def save_capture(
+        self,
+        *,
+        sid: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+        fields: dict[str, Any] | None = None,
+        extraction_error: str | None = None,
+    ) -> dict[str, Any]:
+        safe_sid = sanitize_invoice_sid(sid)
+        safe_file_name = _sanitize_storage_name(file_name)
+        invoice_id = str(uuid.uuid4())
+        session_dir = self._session_dir(safe_sid)
+        os.makedirs(session_dir, exist_ok=True)
+
+        storage_path = os.path.join(session_dir, f"{invoice_id}_{safe_file_name}")
+        with open(storage_path, "wb") as file:
+            file.write(content)
+
+        record = {
+            "invoice_id": invoice_id,
+            "sid": safe_sid,
+            "file_name": safe_file_name,
+            "storage_backend": "local",
+            "storage_key": storage_path,
+            "storage_url": None,
+            "content_type": content_type,
+            "content_size": len(content),
+            "fields": fields or None,
+            "extraction_error": extraction_error or None,
+            "folder_path": f"Invoices/{safe_sid}",
+            "created_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        }
+
+        with open(self._metadata_path(safe_sid, invoice_id), "w", encoding="utf-8") as file:
+            json.dump(record, file, indent=2, ensure_ascii=False)
+
+        return record
+
+    def list_captures(self, sid: str) -> list[dict[str, Any]]:
+        session_dir = self._session_dir(sid)
+        if not os.path.isdir(session_dir):
+            return []
+
+        captures: list[dict[str, Any]] = []
+        for file_name in os.listdir(session_dir):
+            if not file_name.endswith(".json"):
+                continue
+            metadata_path = os.path.join(session_dir, file_name)
+            with open(metadata_path, "r", encoding="utf-8") as file:
+                captures.append(json.load(file))
+
+        captures.sort(key=lambda capture: str(capture.get("created_at", "")), reverse=True)
+        return captures
+
+    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
+        metadata_path = self._metadata_path(sid, invoice_id)
+        if not os.path.exists(metadata_path):
+            return None
+        with open(metadata_path, "r", encoding="utf-8") as file:
+            return json.load(file)
+
+    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
+        with open(capture["storage_key"], "rb") as file:
+            return file.read(), capture.get("content_type") or _guess_content_type(capture["storage_key"], "image/jpeg")
+
+
+class BlobInvoiceCaptureStore:
+    def __init__(self, token: str | None = None):
+        self._token = str(token or os.environ.get("BLOB_READ_WRITE_TOKEN", "")).strip()
+        if not self._token:
+            raise RuntimeError("BLOB_READ_WRITE_TOKEN is required for Blob storage.")
+        self._prefix = str(os.environ.get("IV_AGENT_INVOICES_BLOB_PREFIX", "Invoices") or "Invoices").strip("/")
+
+    def _client(self):
+        BlobClient, _ = _load_vercel_blob()
+        return BlobClient(token=self._token)
+
+    def _session_prefix(self, sid: str) -> str:
+        safe_sid = sanitize_invoice_sid(sid)
+        return "/".join(part for part in (self._prefix, safe_sid) if part)
+
+    def _metadata_key(self, sid: str, invoice_id: str) -> str:
+        return f"{self._session_prefix(sid)}/{invoice_id}.json"
+
+    def save_capture(
+        self,
+        *,
+        sid: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+        fields: dict[str, Any] | None = None,
+        extraction_error: str | None = None,
+    ) -> dict[str, Any]:
+        safe_sid = sanitize_invoice_sid(sid)
+        safe_file_name = _sanitize_storage_name(file_name)
+        invoice_id = str(uuid.uuid4())
+        storage_key = f"{self._session_prefix(safe_sid)}/{invoice_id}_{safe_file_name}"
+        client = self._client()
+
+        uploaded_blob = client.put(
+            storage_key,
+            content,
+            access="private",
+            content_type=content_type,
+            overwrite=True,
+        )
+        record = {
+            "invoice_id": invoice_id,
+            "sid": safe_sid,
+            "file_name": safe_file_name,
+            "storage_backend": "blob",
+            "storage_key": uploaded_blob.pathname,
+            "storage_url": uploaded_blob.url,
+            "content_type": uploaded_blob.content_type or content_type,
+            "content_size": len(content),
+            "fields": fields or None,
+            "extraction_error": extraction_error or None,
+            "folder_path": self._session_prefix(safe_sid),
+            "created_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        }
+        client.put(
+            self._metadata_key(safe_sid, invoice_id),
+            json.dumps(record, ensure_ascii=False).encode("utf-8"),
+            access="private",
+            content_type="application/json",
+            overwrite=True,
+        )
+        return record
+
+    def list_captures(self, sid: str) -> list[dict[str, Any]]:
+        client = self._client()
+        prefix = f"{self._session_prefix(sid)}/"
+        captures: list[dict[str, Any]] = []
+
+        for blob in client.iter_objects(prefix=prefix):
+            if not str(blob.pathname).endswith(".json"):
+                continue
+            metadata = client.get(blob.pathname, access="private")
+            if metadata.status_code != 200:
+                continue
+            captures.append(json.loads(metadata.content.decode("utf-8")))
+
+        captures.sort(key=lambda capture: str(capture.get("created_at", "")), reverse=True)
+        return captures
+
+    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
+        metadata_key = self._metadata_key(sid, invoice_id)
+        client = self._client()
+        try:
+            metadata = client.get(metadata_key, access="private")
+        except Exception:
+            return None
+        if metadata.status_code != 200:
+            return None
+        return json.loads(metadata.content.decode("utf-8"))
+
+    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
+        client = self._client()
+        blob = client.get(capture["storage_key"], access="private")
+        if blob.status_code != 200:
+            raise FileNotFoundError(capture["storage_key"])
+        return blob.content, blob.content_type or capture.get("content_type") or "image/jpeg"
+
+
 def make_profile_store(default_profile_path: str, profile_dir: str) -> ProfileStore:
     if _database_backend_enabled():
         return PostgresProfileStore(os.environ["DATABASE_URL"].strip())
@@ -690,3 +912,10 @@ def make_report_store(output_dir: str) -> ReportStore:
     if _database_backend_enabled():
         return PostgresReportStore(os.environ["DATABASE_URL"].strip(), asset_store=asset_store)
     return JsonReportStore(output_dir, asset_store=asset_store)
+
+
+def make_invoice_capture_store(output_dir: str) -> InvoiceCaptureStore:
+    backend = _invoice_asset_backend()
+    if backend == "blob":
+        return BlobInvoiceCaptureStore()
+    return LocalInvoiceCaptureStore(output_dir)
