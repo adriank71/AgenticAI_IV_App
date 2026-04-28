@@ -827,6 +827,7 @@ INVOICE_MIME_EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "application/pdf": ".pdf",
 }
 
 INVOICE_PROMPT = (
@@ -893,18 +894,22 @@ def normalize_invoice_fields(fields: dict) -> dict:
 def serialize_invoice_capture(capture_record: dict) -> dict:
     fields = capture_record.get("fields") or None
     summary = _format_invoice(fields) if fields else None
+    content_type = capture_record.get("content_type")
     return {
         "invoice_id": capture_record["invoice_id"],
         "sid": capture_record["sid"],
         "file_name": capture_record["file_name"],
         "folder_path": capture_record.get("folder_path"),
         "created_at": capture_record.get("created_at"),
-        "content_type": capture_record.get("content_type"),
+        "content_type": content_type,
         "content_size": capture_record.get("content_size"),
         "fields": fields,
         "summary": summary,
         "extraction_error": capture_record.get("extraction_error"),
+        "storage_backend": capture_record.get("storage_backend"),
         "image_url": build_invoice_image_path(capture_record),
+        "file_url": build_invoice_image_path(capture_record),
+        "previewable": str(content_type or "").startswith("image/"),
     }
 
 
@@ -915,26 +920,26 @@ def capture_invoice(sid: str, payload: dict):
 
     normalized_fields = None
     extraction_error = None
-    try:
-        extracted_fields = _call_claude_vision(image_b64, mime)
-        if extracted_fields.get("error") == "not_a_receipt":
-            extraction_error = "Image does not look like a receipt"
-        else:
-            normalized_fields = normalize_invoice_fields(extracted_fields)
-            if (
-                not normalized_fields["merchant"]
-                and normalized_fields["total"] is None
-                and not normalized_fields["date"]
-            ):
-                normalized_fields = None
-                extraction_error = "Could not extract any fields from image"
-    except RuntimeError as exc:
-        logger.warning("Invoice extraction failed, storing raw capture only: %s", exc)
-        extraction_error = str(exc)
-    except Exception as exc:
-        logger.exception("Unexpected invoice extraction error")
-        extraction_error = f"extraction failed: {exc}"
-
+    if mime.startswith("image/"):
+        try:
+            extracted_fields = _call_claude_vision(image_b64, mime)
+            if extracted_fields.get("error") == "not_a_receipt":
+                extraction_error = "Image does not look like a receipt"
+            else:
+                normalized_fields = normalize_invoice_fields(extracted_fields)
+                if (
+                    not normalized_fields["merchant"]
+                    and normalized_fields["total"] is None
+                    and not normalized_fields["date"]
+                ):
+                    normalized_fields = None
+                    extraction_error = "Could not extract any fields from image"
+        except RuntimeError as exc:
+            logger.warning("Invoice extraction failed, storing raw capture only: %s", exc)
+            extraction_error = str(exc)
+        except Exception as exc:
+            logger.exception("Unexpected invoice extraction error")
+            extraction_error = f"extraction failed: {exc}"
     capture_record = invoice_store.save_capture(
         sid=sid,
         file_name=file_name,

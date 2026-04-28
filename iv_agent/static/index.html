@@ -38,7 +38,7 @@
         </button>
         <button class="nav-link" type="button" data-view-target="reports">
           <span class="material-symbols-outlined">folder_shared</span>
-          <span>Admin Hub</span>
+          <span>File Storage</span>
         </button>
       </nav>
 
@@ -235,34 +235,51 @@
 
         <section id="view-reports" class="app-view" data-view="reports">
           <div class="reports-shell">
-            <article class="reports-card glass-panel">
-              <p class="eyebrow">Last Generated File</p>
-              <h2 id="reports-file-name" class="reports-main">No report generated yet</h2>
-              <p id="reports-file-meta" class="muted-copy">Generate your first PDF to see it here.</p>
-            </article>
-            <article class="reports-card glass-panel">
-              <p class="section-title">Report Actions</p>
-              <p class="muted-copy">Create, preview, download, and send Assistenzbeitrag forms with one flow.</p>
-              <div class="reports-actions">
-                <button id="reports-generate-btn" class="primary-button" type="button">Generate New Report</button>
-                <button id="reports-open-calendar-btn" class="secondary-button" type="button">Check Calendar Hours</button>
-              </div>
-            </article>
             <article class="reports-card glass-panel invoices-card">
-              <div class="invoices-header">
-                <div>
-                  <p class="section-title">Add Invoices</p>
-                  <p class="muted-copy">Scan the QR with your phone or open the camera route directly, then capture the receipt inside the web app.</p>
-                  <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
-                </div>
-                <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add invoice" />
+              <div class="storage-options" aria-label="Document upload options">
+                <section id="invoice-drop-zone" class="storage-option drop-option" tabindex="0" role="button" aria-label="Upload documents by drag and drop">
+                  <div class="storage-option-label">Option 1</div>
+                  <div class="storage-option-icon">
+                    <span class="material-symbols-outlined">upload_file</span>
+                  </div>
+                  <div>
+                    <p class="section-title">Drag and Drop</p>
+                    <p class="muted-copy">Drop PDFs or receipt images here, or choose files from this device.</p>
+                  </div>
+                  <input id="invoice-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf" multiple />
+                  <button id="invoice-file-button" class="secondary-button" type="button">Choose documents</button>
+                  <p id="invoice-upload-status" class="upload-status" role="status">Ready for upload</p>
+                </section>
+
+                <section class="storage-option qr-option" aria-label="Scan with phone QR code">
+                  <div class="storage-option-label">Option 2</div>
+                  <div>
+                    <p class="section-title">Phone QR Scan</p>
+                    <p class="muted-copy">Scan this QR code with your phone, then capture receipts with the camera route.</p>
+                    <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+                  </div>
+                  <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add invoice" />
+                </section>
               </div>
-              <div class="invoices-list-wrap">
-                <button id="invoices-toggle" class="invoices-toggle" type="button" aria-expanded="false">
-                  <span>Invoices (<span id="invoices-count">0</span>)</span>
-                  <span class="invoices-chevron" aria-hidden="true">&#9662;</span>
-                </button>
-                <ul id="invoices-list" class="invoices-list hidden"></ul>
+
+              <div class="document-database">
+                <div class="document-database-header">
+                  <div>
+                    <p class="section-title">Document Database</p>
+                    <p class="muted-copy">All stored documents, sorted by newest date first.</p>
+                  </div>
+                  <span class="document-count"><span id="invoices-count">0</span><span id="invoices-count-label">documents</span></span>
+                </div>
+                <div class="document-table" role="table" aria-label="Stored invoice documents">
+                  <div class="document-row document-head" role="row">
+                    <span role="columnheader">Document</span>
+                    <span role="columnheader">Date</span>
+                    <span role="columnheader">Size</span>
+                    <span role="columnheader">Storage</span>
+                    <span role="columnheader">Open</span>
+                  </div>
+                  <div id="invoices-list" class="document-list"></div>
+                </div>
               </div>
             </article>
           </div>

@@ -452,6 +452,32 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["extraction_error"], "anthropic unavailable")
         self.assertEqual(len(fake_invoice_store.captures), 1)
 
+    def test_invoice_capture_accepts_pdf_without_vision_extraction(self):
+        client = app_module.app.test_client()
+        fake_invoice_store = FakeInvoiceStore()
+
+        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+            app_module, "_call_claude_vision"
+        ) as vision_mock:
+            response = client.post(
+                "/api/invoices/session123/capture",
+                json={
+                    "image_base64": "JVBERi0xLjQK",
+                    "mime": "application/pdf",
+                    "file_name": "invoice.pdf",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertTrue(payload["stored"])
+        self.assertEqual(payload["capture"]["content_type"], "application/pdf")
+        self.assertEqual(payload["capture"]["file_name"], "invoice.pdf")
+        self.assertFalse(payload["capture"]["previewable"])
+        self.assertEqual(payload["capture"]["storage_backend"], "blob")
+        self.assertIsNone(payload["extraction_error"])
+        vision_mock.assert_not_called()
+
     def test_scan_url_uses_camera_route_and_scan_redirects(self):
         client = app_module.app.test_client()
 

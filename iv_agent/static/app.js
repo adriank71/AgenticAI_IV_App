@@ -32,7 +32,7 @@ const appViewTitleMap = {
   dashboard: "Dashboard",
   calendar: "Calendar",
   adviser: "IV-Adviser",
-  reports: "Admin Hub",
+  reports: "File Storage",
 };
 
 const state = {
@@ -117,17 +117,12 @@ const elements = {
   activeViewTitle: document.getElementById("active-view-title"),
   calendarToolbar: document.getElementById("calendar-toolbar"),
   defaultToolbar: document.getElementById("default-toolbar"),
-  sidebarAddEvent: document.getElementById("sidebar-add-event"),
   dashboardHoursValue: document.getElementById("dashboard-hours-value"),
   dashboardEventsValue: document.getElementById("dashboard-events-value"),
   dashboardAssistantValue: document.getElementById("dashboard-assistant-value"),
   dashboardReportLabel: document.getElementById("dashboard-report-label"),
   dashboardOpenCalendar: document.getElementById("dashboard-open-calendar"),
   dashboardOpenChat: document.getElementById("dashboard-open-chat"),
-  reportsFileName: document.getElementById("reports-file-name"),
-  reportsFileMeta: document.getElementById("reports-file-meta"),
-  reportsGenerateButton: document.getElementById("reports-generate-btn"),
-  reportsOpenCalendarButton: document.getElementById("reports-open-calendar-btn"),
   adviserForm: document.getElementById("adviser-form"),
   adviserInput: document.getElementById("adviser-input"),
   adviserSendButton: document.getElementById("adviser-send"),
@@ -543,28 +538,6 @@ async function refreshDashboardData() {
   }
 }
 
-function updateReportsSummary() {
-  if (!elements.reportsFileName || !elements.reportsFileMeta) {
-    return;
-  }
-
-  if (!state.generatedReports.length) {
-    elements.reportsFileName.textContent = "No report generated yet";
-    elements.reportsFileMeta.textContent = "Generate your first PDF to see it here.";
-    return;
-  }
-
-  if (state.generatedReports.length === 1) {
-    const [report] = state.generatedReports;
-    elements.reportsFileName.textContent = report.fileName;
-    elements.reportsFileMeta.textContent = `Month ${report.month} is ready for download and send.`;
-    return;
-  }
-
-  elements.reportsFileName.textContent = `${state.generatedReports.length} reports generated`;
-  elements.reportsFileMeta.textContent = `Month ${state.generatedReports[0].month} has multiple generated report files.`;
-}
-
 function getMonthsInRange(startDate, endDateExclusive) {
   const monthKeys = [];
   const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
@@ -746,11 +719,6 @@ async function switchAppView(viewName) {
 
   if (viewName === "dashboard") {
     await refreshDashboardData();
-    return;
-  }
-
-  if (viewName === "reports") {
-    updateReportsSummary();
     return;
   }
 
@@ -1217,7 +1185,6 @@ async function submitReportForm(event) {
       setReportStatus("No report was generated.", "error");
     }
 
-    updateReportsSummary();
   } catch (error) {
     setReportStatus(error.message || "Failed to generate report.", "error");
   } finally {
@@ -1795,13 +1762,6 @@ function bindEvents() {
   }
   elements.generateReport.addEventListener("click", () => openReportModal(elements.generateReport));
 
-  if (elements.sidebarAddEvent) {
-    elements.sidebarAddEvent.addEventListener("click", async () => {
-      await switchAppView("calendar");
-      openAddEventModal(elements.sidebarAddEvent);
-    });
-  }
-
   if (elements.dashboardOpenCalendar) {
     elements.dashboardOpenCalendar.addEventListener("click", () => {
       switchAppView("calendar").catch(() => {});
@@ -1811,16 +1771,6 @@ function bindEvents() {
   if (elements.dashboardOpenChat) {
     elements.dashboardOpenChat.addEventListener("click", () => {
       switchAppView("adviser").catch(() => {});
-    });
-  }
-
-  if (elements.reportsGenerateButton) {
-    elements.reportsGenerateButton.addEventListener("click", () => openReportModal(elements.reportsGenerateButton));
-  }
-
-  if (elements.reportsOpenCalendarButton) {
-    elements.reportsOpenCalendarButton.addEventListener("click", () => {
-      switchAppView("calendar").catch(() => {});
     });
   }
 
@@ -1857,18 +1807,21 @@ async function initialize() {
   setSelectedReportTypes(state.selectedReportTypes);
   setChatPending(false);
   syncEndTimeWithStart(true);
-  updateReportsSummary();
   initInvoices();
   await switchAppView(state.activeAppView);
 }
 
 function initInvoices() {
   const qrImg = document.getElementById("invoices-qr");
-  const toggle = document.getElementById("invoices-toggle");
   const list = document.getElementById("invoices-list");
   const count = document.getElementById("invoices-count");
+  const countLabel = document.getElementById("invoices-count-label");
   const cameraLink = document.getElementById("invoices-camera-link");
-  if (!qrImg || !toggle || !list || !count) return;
+  const dropZone = document.getElementById("invoice-drop-zone");
+  const fileInput = document.getElementById("invoice-file-input");
+  const fileButton = document.getElementById("invoice-file-button");
+  const uploadStatus = document.getElementById("invoice-upload-status");
+  if (!qrImg || !list || !count) return;
 
   let sid = localStorage.getItem("invoices_sid");
   if (!sid) {
@@ -1880,7 +1833,7 @@ function initInvoices() {
     .then((r) => r.json())
     .then((data) => {
       const url = data.camera_url || data.scan_url;
-      qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=8&data=${encodeURIComponent(url)}`;
+      qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=420x420&margin=8&data=${encodeURIComponent(url)}`;
       qrImg.title = url;
       if (cameraLink) {
         cameraLink.href = url;
@@ -1889,11 +1842,97 @@ function initInvoices() {
     })
     .catch(() => {});
 
-  toggle.addEventListener("click", () => {
-    const expanded = toggle.getAttribute("aria-expanded") === "true";
-    toggle.setAttribute("aria-expanded", String(!expanded));
-    list.classList.toggle("hidden", expanded);
-  });
+  function setUploadStatus(message, variant = "") {
+    if (!uploadStatus) {
+      return;
+    }
+    uploadStatus.textContent = message;
+    uploadStatus.dataset.variant = variant;
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        resolve(result.includes(",") ? result.split(",").pop() : result);
+      };
+      reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList || []).filter((file) =>
+      file.type.startsWith("image/") || file.type === "application/pdf"
+    );
+
+    if (!files.length) {
+      setUploadStatus("Only images and PDFs are supported.", "error");
+      return;
+    }
+
+    setUploadStatus(`Uploading ${files.length} document${files.length === 1 ? "" : "s"}...`);
+
+    try {
+      for (const file of files) {
+        const imageBase64 = await fileToBase64(file);
+        const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/capture`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image_base64: imageBase64,
+            mime: file.type || "application/octet-stream",
+            file_name: file.name,
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `Upload failed for ${file.name}`);
+        }
+      }
+
+      setUploadStatus("Upload saved to storage.", "success");
+      await poll();
+    } catch (error) {
+      setUploadStatus(error.message || "Upload failed.", "error");
+    } finally {
+      if (fileInput) {
+        fileInput.value = "";
+      }
+    }
+  }
+
+  if (fileButton && fileInput) {
+    fileButton.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+  }
+
+  if (dropZone) {
+    ["dragenter", "dragover"].forEach((eventName) => {
+      dropZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        dropZone.classList.add("is-dragging");
+      });
+    });
+
+    ["dragleave", "drop"].forEach((eventName) => {
+      dropZone.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        dropZone.classList.remove("is-dragging");
+      });
+    });
+
+    dropZone.addEventListener("drop", (event) => uploadFiles(event.dataTransfer.files));
+    dropZone.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (fileInput) {
+          fileInput.click();
+        }
+      }
+    });
+  }
 
   async function poll() {
     try {
@@ -1901,8 +1940,11 @@ function initInvoices() {
       const data = await r.json();
       const items = data.captures || [];
       count.textContent = String(items.length);
+      if (countLabel) {
+        countLabel.textContent = items.length === 1 ? "document" : "documents";
+      }
       if (!items.length) {
-        list.innerHTML = `<li class="invoices-empty">No invoices yet. Scan the QR or open the /camera link on your phone.</li>`;
+        list.innerHTML = `<div class="documents-empty">No documents yet. Upload files on the left or scan the QR code on the right.</div>`;
         return;
       }
       list.innerHTML = items
@@ -1917,30 +1959,34 @@ function initInvoices() {
 }
 
 function renderInvoiceCapture(capture, index) {
-  const summary = capture.summary || "Photo saved to Invoices folder.";
-  const meta = [
-    formatInvoiceCaptureTime(capture.created_at),
-    capture.file_name || null,
-    capture.content_size ? formatFileSize(capture.content_size) : null,
-  ].filter(Boolean).join(" | ");
+  const isImage = String(capture.content_type || "").startsWith("image/");
+  const fileUrl = capture.file_url || capture.image_url || "#";
+  const summary = capture.summary || (isImage ? "Receipt image saved to storage." : "Document saved to storage.");
+  const storageLabel = capture.storage_backend === "blob" ? "Vercel Blob" : capture.storage_backend || "Local";
   const extractionNote = capture.extraction_error
     ? `<div class="invoice-note">${escapeHtml(capture.extraction_error)}</div>`
     : "";
+  const preview = isImage
+    ? `<img class="document-thumb" src="${escapeHtml(fileUrl)}" alt="${escapeHtml(capture.file_name || `Document ${index + 1}`)}" loading="lazy" />`
+    : `<span class="document-file-icon material-symbols-outlined">picture_as_pdf</span>`;
 
   return `
-    <li>
-      <article class="invoice-capture">
-        <a class="invoice-thumb-link" href="${escapeHtml(capture.image_url || "#")}" target="_blank" rel="noreferrer">
-          <img class="invoice-thumb" src="${escapeHtml(capture.image_url || "")}" alt="${escapeHtml(capture.file_name || `Invoice ${index + 1}`)}" loading="lazy" />
+    <article class="document-row" role="row">
+      <div class="document-name-cell" role="cell">
+        <a class="document-thumb-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">
+          ${preview}
         </a>
-        <div class="invoice-copy">
-          <span class="invoice-title">Receipt ${index + 1}</span>
-          <span class="invoice-meta">${escapeHtml(meta || "Stored in Invoices folder")}</span>
+        <div class="document-copy">
+          <span class="invoice-title">${escapeHtml(capture.file_name || `Document ${index + 1}`)}</span>
           <div class="invoice-summary">${escapeHtml(summary)}</div>
           ${extractionNote}
         </div>
-      </article>
-    </li>
+      </div>
+      <span role="cell">${escapeHtml(formatInvoiceCaptureTime(capture.created_at))}</span>
+      <span role="cell">${escapeHtml(formatFileSize(capture.content_size) || "-")}</span>
+      <span role="cell"><span class="storage-badge">${escapeHtml(storageLabel)}</span></span>
+      <span role="cell"><a class="document-open-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">Open</a></span>
+    </article>
   `;
 }
 
