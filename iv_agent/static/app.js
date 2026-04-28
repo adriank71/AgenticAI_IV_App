@@ -32,13 +32,54 @@ const appViewTitleMap = {
   dashboard: "Dashboard",
   calendar: "Calendar",
   adviser: "IV-Adviser",
+  community: "Community",
   reports: "File Storage",
 };
+
+const communityChannelTitleMap = {
+  daily: "Daily Support",
+  reimbursement: "Reimbursements",
+  therapy: "School & Therapy",
+};
+
+const communityStorageKey = "iv_helper_parent_community";
+
+const communitySeedMessages = [
+  {
+    id: "seed-1",
+    channel: "daily",
+    author: "Mara",
+    text: "We finally found a calm morning routine before therapy appointments. Preparing the bag the night before made the biggest difference.",
+    timestamp: "2026-04-28T07:35:00.000Z",
+  },
+  {
+    id: "seed-2",
+    channel: "daily",
+    author: "Jonas",
+    text: "Today was heavy, but our assistant stayed fifteen minutes longer so I could finish the IV call without rushing.",
+    timestamp: "2026-04-28T09:10:00.000Z",
+  },
+  {
+    id: "seed-3",
+    channel: "reimbursement",
+    author: "Lea",
+    text: "For transport receipts, I add the clinic address to the calendar note right away. It saves time when I prepare the monthly report.",
+    timestamp: "2026-04-27T16:45:00.000Z",
+  },
+  {
+    id: "seed-4",
+    channel: "therapy",
+    author: "Noah",
+    text: "Our school meeting went better after we brought a one-page therapy summary. The teacher could scan it quickly before discussing support hours.",
+    timestamp: "2026-04-27T13:20:00.000Z",
+  },
+];
 
 const state = {
   currentMonth: formatMonth(new Date()),
   currentView: "timeGridWeek",
   activeAppView: "dashboard",
+  activeCommunityChannel: "daily",
   calendar: null,
   loadingCount: 0,
   errorTimer: null,
@@ -53,6 +94,7 @@ const state = {
   chatHistory: [],
   chatPending: false,
   chatAbortController: null,
+  communityMessages: [],
 };
 
 const elements = {
@@ -129,6 +171,14 @@ const elements = {
   adviserCancelButton: document.getElementById("adviser-cancel"),
   chatThread: document.getElementById("chat-thread"),
   chatChips: document.querySelectorAll(".chat-chip"),
+  communityThread: document.getElementById("community-thread"),
+  communityForm: document.getElementById("community-form"),
+  communityInput: document.getElementById("community-input"),
+  communityNameInput: document.getElementById("community-name"),
+  communitySendButton: document.getElementById("community-send"),
+  communityChannelButtons: document.querySelectorAll("[data-community-channel]"),
+  communityTopicTitle: document.getElementById("community-topic-title"),
+  communityCount: document.getElementById("community-count"),
 };
 
 function formatMonth(date) {
@@ -724,6 +774,13 @@ async function switchAppView(viewName) {
 
   if (viewName === "adviser" && elements.adviserInput) {
     elements.adviserInput.focus();
+  }
+
+  if (viewName === "community") {
+    renderCommunityMessages();
+    if (elements.communityInput) {
+      elements.communityInput.focus();
+    }
   }
 }
 
@@ -1688,6 +1745,141 @@ async function handleAdviserSubmit(event) {
   await submitAdviserPrompt(prompt);
 }
 
+function loadCommunityMessages() {
+  try {
+    const savedMessages = JSON.parse(localStorage.getItem(communityStorageKey) || "[]");
+    if (Array.isArray(savedMessages)) {
+      state.communityMessages = [...communitySeedMessages, ...savedMessages].filter((message) =>
+        message && message.id && message.channel && message.author && message.text
+      );
+      return;
+    }
+  } catch (error) {
+    /* Fall back to seeded messages. */
+  }
+
+  state.communityMessages = [...communitySeedMessages];
+}
+
+function saveCommunityMessages() {
+  const userMessages = state.communityMessages.filter((message) => !String(message.id).startsWith("seed-"));
+  localStorage.setItem(communityStorageKey, JSON.stringify(userMessages));
+}
+
+function formatCommunityTime(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function scrollCommunityToBottom() {
+  if (!elements.communityThread) {
+    return;
+  }
+
+  elements.communityThread.scrollTop = elements.communityThread.scrollHeight;
+}
+
+function renderCommunityMessages() {
+  if (!elements.communityThread) {
+    return;
+  }
+
+  const channelMessages = state.communityMessages
+    .filter((message) => message.channel === state.activeCommunityChannel)
+    .sort((left, right) => new Date(left.timestamp) - new Date(right.timestamp));
+
+  if (elements.communityTopicTitle) {
+    elements.communityTopicTitle.textContent =
+      communityChannelTitleMap[state.activeCommunityChannel] || "Community";
+  }
+  if (elements.communityCount) {
+    elements.communityCount.textContent = `${channelMessages.length} ${channelMessages.length === 1 ? "post" : "posts"}`;
+  }
+
+  elements.communityThread.innerHTML = "";
+  channelMessages.forEach((message) => {
+    const item = document.createElement("article");
+    item.className = `community-message${message.isOwn ? " is-own" : ""}`;
+
+    const avatar = document.createElement("div");
+    avatar.className = "community-avatar";
+    avatar.textContent = String(message.author || "?").trim().slice(0, 1).toUpperCase();
+
+    const bubble = document.createElement("div");
+    bubble.className = "community-bubble";
+
+    const header = document.createElement("div");
+    header.className = "community-message-header";
+
+    const author = document.createElement("strong");
+    author.textContent = message.isOwn ? `${message.author} (you)` : message.author;
+
+    const time = document.createElement("span");
+    time.textContent = formatCommunityTime(message.timestamp);
+
+    const body = document.createElement("p");
+    body.textContent = message.text;
+
+    header.appendChild(author);
+    header.appendChild(time);
+    bubble.appendChild(header);
+    bubble.appendChild(body);
+    item.appendChild(avatar);
+    item.appendChild(bubble);
+    elements.communityThread.appendChild(item);
+  });
+
+  scrollCommunityToBottom();
+}
+
+function setCommunityChannel(channel) {
+  if (!communityChannelTitleMap[channel]) {
+    return;
+  }
+
+  state.activeCommunityChannel = channel;
+  elements.communityChannelButtons.forEach((button) => {
+    const isActive = button.dataset.communityChannel === channel;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+  renderCommunityMessages();
+}
+
+function handleCommunitySubmit(event) {
+  event.preventDefault();
+  if (!elements.communityInput) {
+    return;
+  }
+
+  const text = elements.communityInput.value.trim();
+  if (!text) {
+    return;
+  }
+
+  const author = (elements.communityNameInput && elements.communityNameInput.value.trim()) || "You";
+  state.communityMessages.push({
+    id: `local-${Date.now()}`,
+    channel: state.activeCommunityChannel,
+    author,
+    text,
+    timestamp: new Date().toISOString(),
+    isOwn: true,
+  });
+  elements.communityInput.value = "";
+  saveCommunityMessages();
+  renderCommunityMessages();
+}
+
 function bindEvents() {
   document.getElementById("prev-month").addEventListener("click", () => navigatePeriod(-1));
   document.getElementById("next-month").addEventListener("click", () => navigatePeriod(1));
@@ -1713,6 +1905,16 @@ function bindEvents() {
       submitAdviserPrompt(button.dataset.chatPrompt || "").catch(() => {});
     });
   });
+
+  elements.communityChannelButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setCommunityChannel(button.dataset.communityChannel || "daily");
+    });
+  });
+
+  if (elements.communityForm) {
+    elements.communityForm.addEventListener("submit", handleCommunitySubmit);
+  }
 
   if (elements.allDayInput) {
     elements.allDayInput.addEventListener("change", toggleAllDayFields);
@@ -1803,6 +2005,8 @@ async function initialize() {
   syncMonthUi();
   updateViewButtons();
   seedFormDefaults();
+  loadCommunityMessages();
+  setCommunityChannel(state.activeCommunityChannel);
   bindEvents();
   setSelectedReportTypes(state.selectedReportTypes);
   setChatPending(false);

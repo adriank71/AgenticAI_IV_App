@@ -2456,6 +2456,227 @@ body {
   text-transform: uppercase;
 }
 
+.community-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  min-height: calc(100vh - 140px);
+  padding: 12px 16px 6px;
+}
+
+.community-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #dfe2ea;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.community-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px;
+  border-bottom: 1px solid #e5e7ee;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(255, 244, 243, 0.86));
+}
+
+.community-title {
+  margin: 5px 0 0;
+  color: #1e2127;
+  font-size: 1.55rem;
+  line-height: 1.1;
+}
+
+.community-thread {
+  flex: 1;
+  min-height: 360px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 16px;
+  scrollbar-width: thin;
+  scrollbar-color: #ddb7b3 transparent;
+}
+
+.community-message {
+  max-width: 78%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.community-message.is-own {
+  justify-self: end;
+  flex-direction: row-reverse;
+}
+
+.community-avatar {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--md3-primary);
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.community-message.is-own .community-avatar {
+  background: #e8eaef;
+  color: #30333a;
+}
+
+.community-bubble {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #e4e7ef;
+  border-radius: 16px;
+  background: #f8f9fc;
+}
+
+.community-message.is-own .community-bubble {
+  background: #ffffff;
+  border-color: #efd1ce;
+}
+
+.community-message-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  color: #696f7d;
+  font-size: 0.78rem;
+}
+
+.community-message-header strong {
+  color: var(--md3-primary);
+}
+
+.community-message-header span {
+  white-space: nowrap;
+}
+
+.community-bubble p {
+  margin: 0;
+  color: #252932;
+  line-height: 1.45;
+}
+
+.community-composer {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid #e1e4ec;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.community-name-field {
+  display: grid;
+  gap: 6px;
+  color: #6b7280;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.community-name-field input,
+.community-message-field input {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid #d7dce5;
+  border-radius: 14px;
+  background: #ffffff;
+  color: var(--text-main);
+}
+
+.community-name-field input {
+  padding: 0 12px;
+}
+
+.community-message-field {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.community-message-field input {
+  flex: 1;
+  padding: 0 14px;
+}
+
+.community-sidebar {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.community-card {
+  padding: 16px;
+  border: 1px solid #dde0e8;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.community-channel-list,
+.community-care-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.community-channel {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #384050;
+  cursor: pointer;
+}
+
+.community-channel:hover {
+  background: #fff4f3;
+  color: var(--md3-primary);
+}
+
+.community-channel.is-active {
+  border-color: #efc7c3;
+  background: #fff2f1;
+  color: var(--md3-primary);
+  font-weight: 700;
+}
+
+.community-care-list {
+  padding: 0;
+  list-style: none;
+}
+
+.community-care-list li {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 10px;
+  color: #4f5663;
+  line-height: 1.4;
+}
+
+.community-care-list .material-symbols-outlined {
+  color: var(--md3-primary);
+}
+
 .reports-card {
   border: 1px solid #dde0e8;
 }
@@ -2603,6 +2824,14 @@ body {
   .chat-row {
     max-width: 90%;
   }
+
+  .community-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .community-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 860px) {
@@ -2666,6 +2895,39 @@ body {
 
   .chat-row {
     max-width: 100%;
+  }
+
+  .community-shell {
+    min-height: calc(100vh - 128px);
+    padding: 8px 0 0;
+  }
+
+  .community-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .community-thread {
+    min-height: 340px;
+    padding: 12px;
+  }
+
+  .community-message {
+    max-width: 100%;
+  }
+
+  .community-composer,
+  .community-sidebar {
+    grid-template-columns: 1fr;
+  }
+
+  .community-message-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .community-message-field .primary-button {
+    width: 100%;
   }
 
   .chat-input-wrap {

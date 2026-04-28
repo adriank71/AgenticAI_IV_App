@@ -40,6 +40,10 @@
           <span class="material-symbols-outlined">folder_shared</span>
           <span>File Storage</span>
         </button>
+        <button class="nav-link" type="button" data-view-target="community">
+          <span class="material-symbols-outlined">groups</span>
+          <span>Community</span>
+        </button>
       </nav>
 
       <div class="app-nav-footer">
@@ -230,6 +234,64 @@
               </button>
             </form>
             <p class="adviser-footnote">IV-Helper AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
+          </div>
+        </section>
+
+        <section id="view-community" class="app-view" data-view="community">
+          <div class="community-shell">
+            <section class="community-main glass-panel">
+              <div class="community-header">
+                <div>
+                  <p class="eyebrow">Parent Community</p>
+                  <h2 id="community-topic-title" class="community-title">Daily Support</h2>
+                </div>
+                <span id="community-count" class="status-pill">0 posts</span>
+              </div>
+
+              <div id="community-thread" class="community-thread" aria-live="polite"></div>
+
+              <form id="community-form" class="community-composer glass-panel">
+                <label class="community-name-field">
+                  <span>Your name</span>
+                  <input id="community-name" type="text" maxlength="40" value="You" aria-label="Your display name" />
+                </label>
+                <div class="community-message-field">
+                  <input id="community-input" type="text" maxlength="420" placeholder="Share an update with other parents..." aria-label="Community message" />
+                  <button id="community-send" class="primary-button send-button" type="submit" aria-label="Send community message">
+                    <span class="material-symbols-outlined">send</span>
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <aside class="community-sidebar">
+              <section class="community-card glass-panel">
+                <p class="section-title">Channels</p>
+                <div class="community-channel-list" role="group" aria-label="Community channels">
+                  <button class="community-channel is-active" type="button" data-community-channel="daily">
+                    <span class="material-symbols-outlined">favorite</span>
+                    <span>Daily Support</span>
+                  </button>
+                  <button class="community-channel" type="button" data-community-channel="reimbursement">
+                    <span class="material-symbols-outlined">receipt_long</span>
+                    <span>Reimbursements</span>
+                  </button>
+                  <button class="community-channel" type="button" data-community-channel="therapy">
+                    <span class="material-symbols-outlined">school</span>
+                    <span>School & Therapy</span>
+                  </button>
+                </div>
+              </section>
+
+              <section class="community-card community-guidelines glass-panel">
+                <p class="section-title">Community Care</p>
+                <ul class="community-care-list">
+                  <li><span class="material-symbols-outlined">shield_person</span><span>Keep names and case numbers private.</span></li>
+                  <li><span class="material-symbols-outlined">volunteer_activism</span><span>Share practical support and lived experience.</span></li>
+                  <li><span class="material-symbols-outlined">verified_user</span><span>Confirm official deadlines with IV staff.</span></li>
+                </ul>
+              </section>
+            </aside>
           </div>
         </section>
 
