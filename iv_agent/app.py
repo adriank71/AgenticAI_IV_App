@@ -37,7 +37,14 @@ try:
         materialize_binary_reference,
         resolve_profile_file_path,
     )
-    from .voice_calendar_agent import MAX_AUDIO_BYTES, build_voice_calendar_draft, _extract_text_response, _get_openai_client
+    from .voice_calendar_agent import (
+        MAX_AUDIO_BYTES,
+        MissingOpenAIConfigurationError,
+        build_voice_calendar_draft,
+        openai_configuration_status,
+        _extract_text_response,
+        _get_openai_client,
+    )
     from . import reminders as reminders_module
     from .reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 except ImportError:
@@ -64,7 +71,14 @@ except ImportError:
         materialize_binary_reference,
         resolve_profile_file_path,
     )
-    from voice_calendar_agent import MAX_AUDIO_BYTES, build_voice_calendar_draft, _extract_text_response, _get_openai_client
+    from voice_calendar_agent import (
+        MAX_AUDIO_BYTES,
+        MissingOpenAIConfigurationError,
+        build_voice_calendar_draft,
+        openai_configuration_status,
+        _extract_text_response,
+        _get_openai_client,
+    )
     import reminders as reminders_module
     from reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 
@@ -127,6 +141,13 @@ def json_error(message: str, status_code: int):
     response = jsonify({"error": message})
     response.status_code = status_code
     return response
+
+
+def ai_configuration_error():
+    return json_error(
+        "AI is not configured on this server. Add OPENAI_API_KEY in Vercel Project Settings -> Environment Variables, then redeploy.",
+        503,
+    )
 
 
 def utc_now() -> datetime:
@@ -677,6 +698,18 @@ def api_export_month():
         return json_error(str(exc), 400)
 
 
+@app.get("/api/ai/status")
+def api_ai_status():
+    status = openai_configuration_status()
+    status["models"]["automation"] = (
+        os.environ.get("OPENAI_AUTOMATION_MODEL")
+        or os.environ.get("OPENAI_CALENDAR_AGENT_MODEL")
+        or "gpt-5.4-mini"
+    ).strip() or "gpt-5.4-mini"
+    status["models"]["vision"] = OPENAI_VISION_MODEL
+    return jsonify({"openai": status})
+
+
 @app.post("/api/chat")
 def api_chat():
     try:
@@ -718,6 +751,8 @@ def api_calendar_voice_draft():
         return jsonify(make_json_safe(draft_payload))
     except ValueError as exc:
         return json_error(str(exc), 400)
+    except MissingOpenAIConfigurationError:
+        return ai_configuration_error()
     except RuntimeError as exc:
         logger.error("voice calendar draft failed: %s", exc)
         return json_error(str(exc), 502)
@@ -1298,6 +1333,8 @@ def api_reminders_voice():
         })
     except ValueError as exc:
         return json_error(str(exc), 400)
+    except MissingOpenAIConfigurationError:
+        return ai_configuration_error()
     except RuntimeError as exc:
         logger.error("voice reminder draft failed: %s", exc)
         return json_error(str(exc), 502)

@@ -114,6 +114,7 @@ const state = {
   automationFinalTranscript: "",
   notificationsOpen: false,
   communityMessages: [],
+  aiStatus: null,
 };
 
 const elements = {
@@ -512,6 +513,53 @@ function showError(message) {
   state.errorTimer = window.setTimeout(() => {
     elements.errorBanner.classList.add("hidden");
   }, 4000);
+}
+
+function getOpenAiStatus() {
+  return state.aiStatus && state.aiStatus.openai ? state.aiStatus.openai : null;
+}
+
+function isOpenAiConfigured() {
+  const status = getOpenAiStatus();
+  return !status || status.configured !== false;
+}
+
+function openAiUnavailableMessage() {
+  return "AI is not configured on this server. Add OPENAI_API_KEY in Vercel and redeploy.";
+}
+
+function applyAiStatus() {
+  const configured = isOpenAiConfigured();
+  const message = openAiUnavailableMessage();
+
+  [elements.voiceComposerButton, elements.automationVoiceButton].forEach((button) => {
+    if (!button) {
+      return;
+    }
+    button.disabled = !configured;
+    button.title = configured ? button.getAttribute("aria-label") || "" : message;
+  });
+
+  if (!configured) {
+    if (elements.voiceComposerStatus) {
+      elements.voiceComposerStatus.textContent = message;
+    }
+    if (elements.automationVoiceStatus) {
+      elements.automationVoiceStatus.textContent = message;
+    }
+  }
+}
+
+async function refreshAiStatus() {
+  try {
+    state.aiStatus = await apiFetch("/api/ai/status", {
+      showLoading: false,
+      suppressErrorBanner: true,
+    });
+  } catch (error) {
+    state.aiStatus = null;
+  }
+  applyAiStatus();
 }
 
 function updateViewButtons() {
@@ -1147,7 +1195,7 @@ function setVoiceComposerState(target, mode) {
   const icon = ctx.button.querySelector(".voice-composer-icon");
   ctx.button.classList.toggle("is-recording", mode === "recording");
   ctx.button.classList.toggle("is-processing", mode === "processing");
-  ctx.button.disabled = mode === "processing";
+  ctx.button.disabled = mode === "processing" || !isOpenAiConfigured();
   if (ctx.card) {
     ctx.card.classList.toggle("is-recording", mode === "recording");
     ctx.card.classList.toggle("is-processing", mode === "processing");
@@ -1168,6 +1216,8 @@ function setVoiceComposerState(target, mode) {
       ctx.statusEl.textContent = ctx.recordingStatus;
     } else if (mode === "processing") {
       ctx.statusEl.textContent = ctx.processingStatus;
+    } else if (!isOpenAiConfigured()) {
+      ctx.statusEl.textContent = openAiUnavailableMessage();
     } else {
       ctx.statusEl.textContent = ctx.idleStatus;
     }
@@ -1271,6 +1321,12 @@ function getPreferredAudioMimeType() {
 }
 
 async function startVoiceRecording(target) {
+  if (!isOpenAiConfigured()) {
+    showError(openAiUnavailableMessage());
+    applyAiStatus();
+    return;
+  }
+
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
     showError("Voice recording is not supported in this browser.");
     return;
@@ -1339,6 +1395,10 @@ async function submitVoiceRecording(target, chunks, mimeType) {
 }
 
 async function submitEventVoiceRecording(chunks, mimeType) {
+  if (!isOpenAiConfigured()) {
+    throw new Error(openAiUnavailableMessage());
+  }
+
   const audioBlob = new Blob(chunks, { type: mimeType || "audio/webm" });
   if (!audioBlob.size) {
     throw new Error("No voice recording was captured.");
@@ -2540,6 +2600,10 @@ async function submitAutomationForm(event) {
 }
 
 async function submitAutomationVoiceRecording(chunks, mimeType) {
+  if (!isOpenAiConfigured()) {
+    throw new Error(openAiUnavailableMessage());
+  }
+
   const audioBlob = new Blob(chunks, { type: mimeType || "audio/webm" });
   if (!audioBlob.size) {
     throw new Error("No voice recording was captured.");
@@ -2756,6 +2820,7 @@ async function initialize() {
   setChatPending(false);
   syncEndTimeWithStart(true);
   initInvoices();
+  await refreshAiStatus();
   await switchAppView(state.activeAppView);
   tickAutomationsLazy();
   refreshAutomations().catch(() => {});

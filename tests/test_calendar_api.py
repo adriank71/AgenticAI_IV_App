@@ -564,6 +564,46 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "audio is required")
         draft_mock.assert_not_called()
 
+    def test_ai_status_does_not_expose_secret_value(self):
+        client = app_module.app.test_client()
+
+        with patch.object(
+            app_module,
+            "openai_configuration_status",
+            return_value={
+                "configured": True,
+                "required_environment_variable": "OPENAI_API_KEY",
+                "server_only": True,
+                "models": {"calendar": "gpt-5.4-mini", "transcription": "whisper-1"},
+            },
+        ):
+            response = client.get("/api/ai/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload_text = response.get_data(as_text=True)
+        payload = response.get_json()
+        self.assertTrue(payload["openai"]["configured"])
+        self.assertTrue(payload["openai"]["server_only"])
+        self.assertIn("required_environment_variable", payload["openai"])
+        self.assertNotIn("sk-", payload_text)
+
+    def test_voice_calendar_draft_returns_service_unavailable_when_openai_key_is_missing(self):
+        client = app_module.app.test_client()
+
+        with patch.object(
+            app_module,
+            "build_voice_calendar_draft",
+            side_effect=voice_calendar_agent.MissingOpenAIConfigurationError("missing key"),
+        ):
+            response = client.post(
+                "/api/calendar/voice/draft",
+                data={"audio": (io.BytesIO(b"webm audio"), "calendar-voice.webm")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("OPENAI_API_KEY", response.get_json()["error"])
+
     def test_voice_calendar_draft_returns_gateway_error_for_agent_failure(self):
         client = app_module.app.test_client()
 

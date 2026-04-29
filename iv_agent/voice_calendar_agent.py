@@ -17,12 +17,32 @@ ASSISTANT_HOUR_FIELDS = (
 )
 
 
+class MissingOpenAIConfigurationError(RuntimeError):
+    pass
+
+
 def _resolve_openai_api_key() -> str:
     for key_name in ("OPENAI_API_KEY", "OPEN_AI_KEY", "OPENAI_KEY"):
         value = os.environ.get(key_name, "").strip()
         if value:
             return value
     return ""
+
+
+def is_openai_configured() -> bool:
+    return bool(_resolve_openai_api_key())
+
+
+def openai_configuration_status() -> dict:
+    return {
+        "configured": is_openai_configured(),
+        "required_environment_variable": "OPENAI_API_KEY",
+        "server_only": True,
+        "models": {
+            "calendar": DEFAULT_EVENT_AGENT_MODEL,
+            "transcription": DEFAULT_TRANSCRIPTION_MODEL,
+        },
+    }
 
 
 EVENT_DRAFT_SCHEMA = {
@@ -115,7 +135,9 @@ def _get_openai_client(client=None):
 
     api_key = _resolve_openai_api_key()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set on the server")
+        raise MissingOpenAIConfigurationError(
+            "AI is not configured on this server. Set OPENAI_API_KEY as a server-side environment variable."
+        )
 
     try:
         from openai import OpenAI
