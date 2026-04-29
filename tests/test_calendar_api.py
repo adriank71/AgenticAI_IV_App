@@ -494,6 +494,14 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(redirect_response.status_code, 302)
         self.assertIn("/camera?sid=session123", redirect_response.headers["Location"])
 
+    def test_json_endpoints_reject_non_object_payloads(self):
+        client = app_module.app.test_client()
+
+        response = client.post("/api/reports/send", json=[])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "JSON body is required")
+
     def test_voice_calendar_draft_returns_ai_event_draft(self):
         client = app_module.app.test_client()
         fake_payload = {

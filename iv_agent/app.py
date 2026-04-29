@@ -8,7 +8,7 @@ import binascii
 import urllib.error
 import urllib.request
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, url_for
 from flask_cors import CORS
@@ -127,6 +127,25 @@ def json_error(message: str, status_code: int):
     response = jsonify({"error": message})
     response.status_code = status_code
     return response
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_timestamp() -> str:
+    return utc_now().isoformat().replace("+00:00", "Z")
+
+
+def get_json_payload(*, required: bool = False) -> dict:
+    payload = request.get_json(silent=True)
+    if payload is None:
+        if required:
+            raise ValueError("JSON body is required")
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body is required")
+    return payload
 
 
 def format_webhook_error_detail(raw_detail: bytes | str) -> str:
@@ -480,6 +499,77 @@ def parse_report_types(payload: dict) -> list[str]:
     return normalized
 
 
+def generate_assistenz_report(
+    month: str,
+    profile_payload: dict,
+    *,
+    profile_id: str | None = None,
+    triggered_by_reminder: str | None = None,
+) -> dict:
+    output_filename = f"Assistenzbeitrag_{month}.pdf"
+    total_hours = get_assistant_hours(month)
+    assistant_breakdown = get_assistant_hours_breakdown(month)
+    dual_template_paths = resolve_dual_template_paths()
+
+    with ExitStack() as exit_stack:
+        if dual_template_paths:
+            stundenblatt_template_path = exit_stack.enter_context(
+                materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
+            )
+            rechnung_template_path = exit_stack.enter_context(
+                materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
+            )
+            report_bytes = fill_assistenz_dual_form_auto_bytes(
+                stundenblatt_template_pdf_path=stundenblatt_template_path,
+                rechnung_template_pdf_path=rechnung_template_path,
+                month=month,
+                profile_data=profile_payload,
+                preview=False,
+            )
+            gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
+        else:
+            template_path = exit_stack.enter_context(
+                materialize_binary_reference(resolve_template_path(), suffix=".pdf")
+            )
+            report_bytes = fill_assistenz_form_auto_bytes(
+                template_pdf_path=template_path,
+                month=month,
+                profile_data=profile_payload,
+                preview=False,
+            )
+            gross_amount = round(total_hours * STANDARD_RATE, 2)
+
+    metadata = {
+        "assistant_hours": total_hours,
+        "assistant_breakdown": assistant_breakdown,
+        "gross_amount_chf": f"{gross_amount:.2f}",
+    }
+    if triggered_by_reminder:
+        metadata["triggered_by_reminder"] = triggered_by_reminder
+
+    stored_report = get_report_store().save_report(
+        month=month,
+        report_type="assistenzbeitrag",
+        file_name=output_filename,
+        content=report_bytes,
+        profile_id=profile_id,
+        metadata=metadata,
+    )
+
+    return {
+        "report_id": stored_report["report_id"],
+        "type": "assistenzbeitrag",
+        "label": "Assistenzbeitraege report",
+        "file_name": stored_report["file_name"],
+        "download_url": build_report_download_path(stored_report),
+        "preview_url": build_report_preview_path(stored_report),
+        "year": int(month.split("-")[0]),
+        "assistant_hours": total_hours,
+        "assistant_breakdown": assistant_breakdown,
+        "gross_amount_chf": f"{gross_amount:.2f}",
+    }
+
+
 def parse_chat_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("JSON body is required")
@@ -496,7 +586,7 @@ def parse_chat_payload(payload: dict) -> dict:
         "history": history[-20:],
         "source": "iv-helper-web",
         "path": N8N_CHAT_WEBHOOK_PATH,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": utc_timestamp(),
     }
 
 
@@ -527,7 +617,7 @@ def api_get_events():
 @app.post("/api/events")
 def api_add_event():
     try:
-        payload = parse_event_payload(request.get_json(silent=True))
+        payload = parse_event_payload(get_json_payload(required=True))
         created_events = add_events(**payload)
         response = jsonify(
             {
@@ -552,7 +642,7 @@ def api_delete_event(event_id: str):
 @app.put("/api/events/<event_id>")
 def api_update_event(event_id: str):
     try:
-        payload = parse_event_payload(request.get_json(silent=True))
+        payload = parse_event_payload(get_json_payload(required=True))
         payload.pop("recurrence", None)
         payload.pop("repeat_count", None)
         updated_event = update_event(event_id=event_id, **payload)
@@ -590,7 +680,7 @@ def api_export_month():
 @app.post("/api/chat")
 def api_chat():
     try:
-        chat_payload = parse_chat_payload(request.get_json(silent=True))
+        chat_payload = parse_chat_payload(get_json_payload(required=True))
         webhook_response = trigger_chat_webhook(chat_payload)
         return jsonify({"webhook_response": make_json_safe(webhook_response)})
     except ValueError as exc:
@@ -639,77 +729,17 @@ def api_calendar_voice_draft():
 @app.post("/api/reports/generate")
 def api_generate_report():
     try:
-        payload = request.get_json(silent=True) or {}
+        payload = get_json_payload()
         month = parse_month(str(payload.get("month", "")).strip())
         report_types = parse_report_types(payload)
         raw_profile_id = payload.get("profile_id")
         profile_id = str(raw_profile_id).strip() if raw_profile_id is not None else None
         profile_payload = load_profile_payload(profile_id or None)
-        report_store = get_report_store()
         generated_reports = []
         unavailable_reports = []
 
         if "assistenzbeitrag" in report_types:
-            output_filename = f"Assistenzbeitrag_{month}.pdf"
-            total_hours = get_assistant_hours(month)
-            assistant_breakdown = get_assistant_hours_breakdown(month)
-            dual_template_paths = resolve_dual_template_paths()
-
-            with ExitStack() as exit_stack:
-                if dual_template_paths:
-                    stundenblatt_template_path = exit_stack.enter_context(
-                        materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
-                    )
-                    rechnung_template_path = exit_stack.enter_context(
-                        materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
-                    )
-                    report_bytes = fill_assistenz_dual_form_auto_bytes(
-                        stundenblatt_template_pdf_path=stundenblatt_template_path,
-                        rechnung_template_pdf_path=rechnung_template_path,
-                        month=month,
-                        profile_data=profile_payload,
-                        preview=False,
-                    )
-                    gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
-                else:
-                    template_path = exit_stack.enter_context(
-                        materialize_binary_reference(resolve_template_path(), suffix=".pdf")
-                    )
-                    report_bytes = fill_assistenz_form_auto_bytes(
-                        template_pdf_path=template_path,
-                        month=month,
-                        profile_data=profile_payload,
-                        preview=False,
-                    )
-                    gross_amount = round(total_hours * STANDARD_RATE, 2)
-
-            stored_report = report_store.save_report(
-                month=month,
-                report_type="assistenzbeitrag",
-                file_name=output_filename,
-                content=report_bytes,
-                profile_id=profile_id,
-                metadata={
-                    "assistant_hours": total_hours,
-                    "assistant_breakdown": assistant_breakdown,
-                    "gross_amount_chf": f"{gross_amount:.2f}",
-                },
-            )
-
-            generated_reports.append(
-                {
-                    "report_id": stored_report["report_id"],
-                    "type": "assistenzbeitrag",
-                    "label": "Assistenzbeitraege report",
-                    "file_name": stored_report["file_name"],
-                    "download_url": build_report_download_path(stored_report),
-                    "preview_url": build_report_preview_path(stored_report),
-                    "year": int(month.split("-")[0]),
-                    "assistant_hours": total_hours,
-                    "assistant_breakdown": assistant_breakdown,
-                    "gross_amount_chf": f"{gross_amount:.2f}",
-                }
-            )
+            generated_reports.append(generate_assistenz_report(month, profile_payload, profile_id=profile_id))
 
         if "transportkostenabrechnung" in report_types:
             unavailable_reports.append(
@@ -807,7 +837,7 @@ def api_view_report(filename: str):
 @app.post("/api/reports/send")
 def api_send_report():
     try:
-        payload = request.get_json(silent=True) or {}
+        payload = get_json_payload()
         month = parse_month(str(payload.get("month", "")).strip())
         report_id = str(payload.get("report_id", "") or "").strip() or None
         file_name = str(payload.get("file_name", "")).strip()
@@ -909,7 +939,7 @@ def parse_invoice_capture_payload(payload: dict) -> tuple[bytes, str, str]:
 
     file_name = os.path.basename(str(payload.get("file_name", "")).strip())
     if not file_name:
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         file_name = f"invoice_{timestamp}{INVOICE_MIME_EXTENSIONS[mime]}"
     elif "." not in file_name:
         file_name = f"{file_name}{INVOICE_MIME_EXTENSIONS[mime]}"
@@ -1117,7 +1147,7 @@ def _call_openai_vision(image_b64: str, mime: str) -> dict:
 @app.post("/api/invoices/<sid>/extract")
 def api_invoices_extract(sid: str):
     try:
-        return capture_invoice(sid, request.get_json(silent=True) or {})
+        return capture_invoice(sid, get_json_payload(required=True))
     except ValueError as exc:
         return json_error(str(exc), 400)
     except Exception as exc:
@@ -1128,7 +1158,7 @@ def api_invoices_extract(sid: str):
 @app.post("/api/invoices/<sid>/capture")
 def api_invoices_capture(sid: str):
     try:
-        return capture_invoice(sid, request.get_json(silent=True) or {})
+        return capture_invoice(sid, get_json_payload(required=True))
     except ValueError as exc:
         return json_error(str(exc), 400)
     except Exception as exc:
@@ -1149,55 +1179,13 @@ def _execute_reminder_action(reminder: dict) -> tuple[bool, str]:
     if action == "generate_assistenzbeitrag":
         try:
             now_iso = reminder.get("next_run_at") or ""
-            month_value = now_iso[:7] if now_iso and len(now_iso) >= 7 else datetime.utcnow().strftime("%Y-%m")
+            month_value = now_iso[:7] if now_iso and len(now_iso) >= 7 else utc_now().strftime("%Y-%m")
             parse_month(month_value)
             profile_payload = load_profile_payload(None)
-            report_store = get_report_store()
-            output_filename = f"Assistenzbeitrag_{month_value}.pdf"
-            total_hours = get_assistant_hours(month_value)
-            assistant_breakdown = get_assistant_hours_breakdown(month_value)
-            dual_template_paths = resolve_dual_template_paths()
-
-            with ExitStack() as exit_stack:
-                if dual_template_paths:
-                    stundenblatt_template_path = exit_stack.enter_context(
-                        materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
-                    )
-                    rechnung_template_path = exit_stack.enter_context(
-                        materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
-                    )
-                    report_bytes = fill_assistenz_dual_form_auto_bytes(
-                        stundenblatt_template_pdf_path=stundenblatt_template_path,
-                        rechnung_template_pdf_path=rechnung_template_path,
-                        month=month_value,
-                        profile_data=profile_payload,
-                        preview=False,
-                    )
-                    gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
-                else:
-                    template_path = exit_stack.enter_context(
-                        materialize_binary_reference(resolve_template_path(), suffix=".pdf")
-                    )
-                    report_bytes = fill_assistenz_form_auto_bytes(
-                        template_pdf_path=template_path,
-                        month=month_value,
-                        profile_data=profile_payload,
-                        preview=False,
-                    )
-                    gross_amount = round(total_hours * STANDARD_RATE, 2)
-
-            report_store.save_report(
-                month=month_value,
-                report_type="assistenzbeitrag",
-                file_name=output_filename,
-                content=report_bytes,
-                profile_id=None,
-                metadata={
-                    "assistant_hours": total_hours,
-                    "assistant_breakdown": assistant_breakdown,
-                    "gross_amount_chf": f"{gross_amount:.2f}",
-                    "triggered_by_reminder": reminder.get("id"),
-                },
+            generate_assistenz_report(
+                month_value,
+                profile_payload,
+                triggered_by_reminder=str(reminder.get("id") or "") or None,
             )
             return True, f"Generated Assistenzbeitrag for {month_value}"
         except Exception as exc:
@@ -1215,7 +1203,7 @@ def api_list_reminders():
 @app.post("/api/reminders")
 def api_create_reminder():
     try:
-        payload = request.get_json(silent=True) or {}
+        payload = get_json_payload()
         reminder = reminders_module.create_reminder(payload)
         response = jsonify({"reminder": reminder})
         response.status_code = 201
