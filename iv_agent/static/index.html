@@ -80,12 +80,20 @@
               <span class="material-symbols-outlined">chevron_right</span>
             </button>
           </div>
-          <button class="icon-button" type="button" aria-label="Settings">
-            <span class="material-symbols-outlined">settings</span>
-          </button>
-          <button class="icon-button" type="button" aria-label="Notifications">
-            <span class="material-symbols-outlined">notifications</span>
-          </button>
+          <div class="notification-wrap">
+            <button id="open-notifications-popover" class="icon-button" type="button" aria-label="Notifications" aria-expanded="false" aria-controls="notifications-popover" title="Notifications">
+              <span class="material-symbols-outlined">notifications</span>
+              <span id="automations-pill" class="topbar-pill hidden" aria-hidden="true">0</span>
+            </button>
+            <div id="notifications-popover" class="notifications-popover hidden" role="dialog" aria-label="Notifications">
+              <div class="notifications-header">
+                <p class="section-title">Notifications</p>
+              </div>
+              <div id="notifications-list" class="notifications-list">
+                <p class="muted-copy">No notifications right now.</p>
+              </div>
+            </div>
+          </div>
           <button id="open-add-modal" class="primary-button" type="button">New Event</button>
         </div>
 
@@ -148,22 +156,6 @@
             </main>
 
             <aside class="sidebar">
-              <section class="sidebar-card hours-card glass-panel">
-                <p class="eyebrow">Metric Overview</p>
-                <div class="hours-inline">
-                  <div id="hours-value" class="hours-value">0.00</div>
-                  <span class="hours-unit">HOURS</span>
-                </div>
-                <p class="muted-copy">Logged this month</p>
-                <div class="capacity-row">
-                  <span class="section-title">Clinical Capacity</span>
-                  <span id="focus-count-pill" class="status-pill">0 tasks</span>
-                </div>
-                <div class="capacity-bar">
-                  <span style="width: 82%;"></span>
-                </div>
-              </section>
-
               <section class="sidebar-card focus-card glass-panel">
                 <div class="focus-card-header">
                   <p class="section-title">Today's Focus</p>
@@ -176,6 +168,22 @@
               <section class="sidebar-card actions-card glass-panel">
                 <button id="open-export-modal" class="secondary-button" type="button">Export Month Plan</button>
                 <button id="generate-report" class="primary-button" type="button">Generate Report</button>
+              </section>
+
+              <section class="sidebar-card automations-card glass-panel">
+                <div class="automations-card-header">
+                  <p class="section-title">Automations</p>
+                  <button id="open-automations-card" class="ghost-button" type="button" aria-label="Open automations panel">
+                    <span class="material-symbols-outlined">tune</span>
+                  </button>
+                </div>
+                <div id="automation-summary" class="automation-summary">
+                  <p class="muted-copy">No automations yet. Tap the dial to add one.</p>
+                </div>
+                <button id="quick-add-automation" class="secondary-button" type="button">
+                  <span class="material-symbols-outlined">add</span>
+                  <span>New automation</span>
+                </button>
               </section>
 
               <section class="sidebar-card legend-card glass-panel">
@@ -357,15 +365,38 @@
         <h2 id="add-modal-title">Add Event</h2>
         <button class="modal-close" type="button" data-close-modal="add-modal" aria-label="Close">&times;</button>
       </div>
+      <section id="voice-composer" class="voice-composer" aria-label="Voice event composer">
+        <button id="voice-composer-button" class="voice-composer-button" type="button" aria-label="Hold to dictate event" title="Hold to dictate event">
+          <span class="voice-pulse" aria-hidden="true"></span>
+          <span class="voice-pulse voice-pulse--delay" aria-hidden="true"></span>
+          <span class="voice-composer-icon material-symbols-outlined">mic</span>
+        </button>
+        <div class="voice-composer-body">
+          <p id="voice-composer-status" class="voice-composer-status">Tap to dictate — e.g. "Tomorrow 9 to 12 Körperpflege"</p>
+          <div id="voice-composer-bars" class="voice-composer-bars" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <p id="voice-composer-transcript" class="voice-composer-transcript" aria-live="polite"></p>
+        </div>
+      </section>
+      <div id="voice-draft-preview" class="voice-draft-preview hidden" role="status">
+        <p id="voice-draft-transcript" class="voice-draft-transcript"></p>
+        <p id="voice-draft-status" class="voice-draft-status"></p>
+      </div>
       <form id="add-event-form" class="modal-form">
-        <label id="event-date-field">
-          <span>Date</span>
-          <input id="event-date" name="date" type="date" required />
-        </label>
-        <label id="event-all-day-field" class="checkbox-row">
-          <input id="event-all-day" name="all_day" type="checkbox" />
-          <span>All-day reminder / note</span>
-        </label>
+        <div class="form-row form-row--split">
+          <label id="event-date-field">
+            <span>Date</span>
+            <input id="event-date" name="date" type="date" required />
+          </label>
+          <label id="event-all-day-field" class="all-day-toggle">
+            <input id="event-all-day" name="all_day" type="checkbox" />
+            <span class="all-day-toggle-pill">
+              <span class="all-day-toggle-dot"></span>
+              <span class="all-day-toggle-label">All-day</span>
+            </span>
+          </label>
+        </div>
         <div id="event-time-fields" class="recurrence-grid">
           <label>
             <span>Start time</span>
@@ -519,6 +550,112 @@
         <button id="generate-new-report" class="secondary-button" type="button">Generate New PDF</button>
         <button id="send-report" class="primary-button" type="button">Send Report</button>
       </div>
+    </div>
+  </div>
+
+  <div id="automations-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="automations-modal-title">
+    <div class="modal-backdrop" data-close-modal="automations-modal"></div>
+    <div class="modal-panel automations-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="automations-modal-title">Automations & Reminders</h2>
+          <p class="modal-subtitle">Schedule reminders or auto-fill reports. Voice-controlled.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="automations-modal" aria-label="Close">&times;</button>
+      </div>
+
+      <section class="automation-voice-card" aria-label="Describe an automation">
+        <button id="automation-voice-button" class="voice-composer-button" type="button" aria-label="Hold to dictate automation" title="Hold to dictate automation">
+          <span class="voice-pulse" aria-hidden="true"></span>
+          <span class="voice-pulse voice-pulse--delay" aria-hidden="true"></span>
+          <span class="voice-composer-icon material-symbols-outlined">graphic_eq</span>
+        </button>
+        <div class="voice-composer-body">
+          <p id="automation-voice-status" class="voice-composer-status">Try: "Remind me on the last day of every month and prepare the Assistenzbeitrag"</p>
+          <div id="automation-voice-bars" class="voice-composer-bars" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <p id="automation-voice-transcript" class="voice-composer-transcript" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <div class="automation-presets" role="group" aria-label="Quick presets">
+        <button class="automation-preset" type="button" data-preset="month_end_report">
+          <span class="material-symbols-outlined">event_repeat</span>
+          <span class="automation-preset-text">
+            <strong>Month-end report</strong>
+            <span>Auto-generate Assistenzbeitrag on the last day</span>
+          </span>
+        </button>
+        <button class="automation-preset" type="button" data-preset="weekly_review">
+          <span class="material-symbols-outlined">checklist</span>
+          <span class="automation-preset-text">
+            <strong>Weekly review</strong>
+            <span>Sunday evening — review missing entries</span>
+          </span>
+        </button>
+        <button class="automation-preset" type="button" data-preset="custom_reminder">
+          <span class="material-symbols-outlined">add_alert</span>
+          <span class="automation-preset-text">
+            <strong>Custom reminder</strong>
+            <span>Pick date, time, and message</span>
+          </span>
+        </button>
+      </div>
+
+      <form id="automation-form" class="modal-form automation-form">
+        <label>
+          <span>Title</span>
+          <input id="automation-title" name="title" type="text" maxlength="120" required placeholder="e.g. Monthly report ready" />
+        </label>
+        <div class="recurrence-grid">
+          <label>
+            <span>Action</span>
+            <select id="automation-action" name="action">
+              <option value="notify">Notify only</option>
+              <option value="generate_assistenzbeitrag">Generate Assistenzbeitrag report</option>
+            </select>
+          </label>
+          <label>
+            <span>Schedule</span>
+            <select id="automation-schedule" name="schedule">
+              <option value="month_end">Last day of month</option>
+              <option value="weekly_sun">Every Sunday</option>
+              <option value="weekly_mon">Every Monday</option>
+              <option value="daily">Every day</option>
+              <option value="once">One-time on date</option>
+            </select>
+          </label>
+        </div>
+        <div id="automation-date-row" class="recurrence-grid hidden-field">
+          <label>
+            <span>Date</span>
+            <input id="automation-date" name="run_date" type="date" />
+          </label>
+          <label>
+            <span>Time (24h)</span>
+            <input id="automation-time" name="run_time" type="time" value="09:00" />
+          </label>
+        </div>
+        <label>
+          <span>Note (optional)</span>
+          <textarea id="automation-note" name="note" rows="2" maxlength="400" placeholder="Optional message shown when the reminder fires"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="automations-modal">Cancel</button>
+          <button id="submit-automation" class="primary-button" type="submit">Save automation</button>
+        </div>
+      </form>
+
+      <section class="automation-list-section">
+        <div class="automation-list-header">
+          <p class="section-title">Active automations</p>
+          <span id="automation-count" class="status-pill">0</span>
+        </div>
+        <div id="automation-list" class="automation-list">
+          <p class="muted-copy">No automations yet. Use voice or pick a preset above.</p>
+        </div>
+      </section>
     </div>
   </div>
 

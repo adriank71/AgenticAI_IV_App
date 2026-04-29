@@ -94,6 +94,25 @@ const state = {
   chatHistory: [],
   chatPending: false,
   chatAbortController: null,
+  voiceRecorder: null,
+  voiceStream: null,
+  voiceChunks: [],
+  voiceProcessing: false,
+  voiceLiveRecognition: null,
+  voiceInterimTranscript: "",
+  voiceFinalTranscript: "",
+  voiceContextTarget: "event",
+  automations: [],
+  automationsLoaded: false,
+  automationDraftMode: "month_end_report",
+  automationVoiceRecorder: null,
+  automationVoiceStream: null,
+  automationVoiceChunks: [],
+  automationVoiceProcessing: false,
+  automationLiveRecognition: null,
+  automationInterimTranscript: "",
+  automationFinalTranscript: "",
+  notificationsOpen: false,
   communityMessages: [],
 };
 
@@ -165,6 +184,36 @@ const elements = {
   dashboardReportLabel: document.getElementById("dashboard-report-label"),
   dashboardOpenCalendar: document.getElementById("dashboard-open-calendar"),
   dashboardOpenChat: document.getElementById("dashboard-open-chat"),
+  voiceComposer: document.getElementById("voice-composer"),
+  voiceComposerButton: document.getElementById("voice-composer-button"),
+  voiceComposerStatus: document.getElementById("voice-composer-status"),
+  voiceComposerTranscript: document.getElementById("voice-composer-transcript"),
+  voiceDraftPreview: document.getElementById("voice-draft-preview"),
+  voiceDraftTranscript: document.getElementById("voice-draft-transcript"),
+  voiceDraftStatus: document.getElementById("voice-draft-status"),
+  automationsModal: document.getElementById("automations-modal"),
+  notificationButton: document.getElementById("open-notifications-popover"),
+  notificationsPopover: document.getElementById("notifications-popover"),
+  notificationsList: document.getElementById("notifications-list"),
+  openAutomationsCardButton: document.getElementById("open-automations-card"),
+  quickAddAutomationButton: document.getElementById("quick-add-automation"),
+  automationsPill: document.getElementById("automations-pill"),
+  automationVoiceCard: document.querySelector(".automation-voice-card"),
+  automationVoiceButton: document.getElementById("automation-voice-button"),
+  automationVoiceStatus: document.getElementById("automation-voice-status"),
+  automationVoiceTranscript: document.getElementById("automation-voice-transcript"),
+  automationForm: document.getElementById("automation-form"),
+  automationTitleInput: document.getElementById("automation-title"),
+  automationActionInput: document.getElementById("automation-action"),
+  automationScheduleInput: document.getElementById("automation-schedule"),
+  automationDateRow: document.getElementById("automation-date-row"),
+  automationDateInput: document.getElementById("automation-date"),
+  automationTimeInput: document.getElementById("automation-time"),
+  automationNoteInput: document.getElementById("automation-note"),
+  automationPresetButtons: document.querySelectorAll("[data-preset]"),
+  automationList: document.getElementById("automation-list"),
+  automationCountPill: document.getElementById("automation-count"),
+  automationSummary: document.getElementById("automation-summary"),
   adviserForm: document.getElementById("adviser-form"),
   adviserInput: document.getElementById("adviser-input"),
   adviserSendButton: document.getElementById("adviser-send"),
@@ -277,7 +326,7 @@ function syncEndTimeWithStart(forceUpdate = false) {
   }
 }
 
-function toggleAllDayFields() {
+function toggleAllDayFields(allowEmptyTime = false) {
   const isAllDay = Boolean(elements.allDayInput && elements.allDayInput.checked);
   if (elements.timeFields) {
     elements.timeFields.classList.toggle("hidden-field", isAllDay);
@@ -286,7 +335,7 @@ function toggleAllDayFields() {
     elements.timeInput.disabled = isAllDay;
     if (isAllDay) {
       elements.timeInput.value = "";
-    } else if (!elements.timeInput.value) {
+    } else if (!elements.timeInput.value && !allowEmptyTime) {
       elements.timeInput.value = "09:00";
     }
   }
@@ -294,7 +343,7 @@ function toggleAllDayFields() {
     elements.endTimeInput.disabled = isAllDay;
     if (isAllDay) {
       elements.endTimeInput.value = "";
-    } else {
+    } else if (!allowEmptyTime || elements.timeInput.value) {
       syncEndTimeWithStart(true);
     }
   }
@@ -491,6 +540,9 @@ function syncMonthUi() {
 }
 
 async function refreshHours() {
+  if (!elements.hoursValue) {
+    return;
+  }
   const data = await apiFetch(`/api/hours?month=${encodeURIComponent(state.currentMonth)}`);
   elements.hoursValue.textContent = Number(data.total_hours).toFixed(2);
 }
@@ -502,7 +554,9 @@ function renderFocusSummary(events) {
     .sort((left, right) => left.time.localeCompare(right.time));
 
   const taskText = `${todayEvents.length} ${todayEvents.length === 1 ? "task" : "tasks"}`;
-  elements.focusCountPill.textContent = todayEvents.length >= 3 ? `${taskText} | High attention` : taskText;
+  if (elements.focusCountPill) {
+    elements.focusCountPill.textContent = todayEvents.length >= 3 ? `${taskText} | High attention` : taskText;
+  }
 
   elements.focusList.innerHTML = "";
   if (!todayEvents.length) {
@@ -926,17 +980,29 @@ function resetEventFormMode() {
   if (elements.transportAddressInput) {
     elements.transportAddressInput.value = "";
   }
+  if (elements.voiceDraftPreview) {
+    elements.voiceDraftPreview.classList.add("hidden");
+  }
+  if (elements.voiceDraftTranscript) {
+    elements.voiceDraftTranscript.textContent = "";
+  }
+  if (elements.voiceDraftStatus) {
+    elements.voiceDraftStatus.textContent = "";
+  }
+  resetVoiceTranscriptBuffers("event");
+  setVoiceComposerState("event", "idle");
   toggleAllDayFields();
   toggleAssistantFields();
 }
 
-function populateEventForm(eventData) {
-  elements.dateInput.value = eventData.date || `${state.currentMonth}-01`;
+function populateEventForm(eventData, options = {}) {
+  const preserveEmptyFields = Boolean(options.preserveEmptyFields);
+  elements.dateInput.value = eventData.date || (preserveEmptyFields ? "" : `${state.currentMonth}-01`);
   if (elements.allDayInput) {
     elements.allDayInput.checked = Boolean(eventData.all_day);
   }
-  elements.timeInput.value = eventData.time || "09:00";
-  elements.endTimeInput.value = eventData.end_time || addMinutesToTime(elements.timeInput.value, 30);
+  elements.timeInput.value = eventData.time || (preserveEmptyFields ? "" : "09:00");
+  elements.endTimeInput.value = eventData.end_time || (elements.timeInput.value ? addMinutesToTime(elements.timeInput.value, 30) : "");
   elements.categoryField.value = eventData.category || "assistant";
   elements.titleInput.value = eventData.title || "";
   elements.notesInput.value = eventData.notes || "";
@@ -957,7 +1023,7 @@ function populateEventForm(eventData) {
 
   elements.recurrenceField.value = "none";
   elements.repeatCountField.value = "0";
-  toggleAllDayFields();
+  toggleAllDayFields(preserveEmptyFields);
   toggleAssistantFields();
   toggleRepeatCountField();
 }
@@ -1045,6 +1111,318 @@ async function submitAddEvent(event) {
   resetEventFormMode();
   closeModal("add-modal");
   await refreshCalendarData();
+}
+
+function getVoiceContext(target) {
+  if (target === "automation") {
+    return {
+      target: "automation",
+      card: elements.automationVoiceCard,
+      button: elements.automationVoiceButton,
+      statusEl: elements.automationVoiceStatus,
+      transcriptEl: elements.automationVoiceTranscript,
+      idleStatus: 'Try: "Remind me on the last day of every month and prepare the Assistenzbeitrag"',
+      recordingStatus: "Listening… tap mic again to stop",
+      processingStatus: "Sending to OpenAI...",
+    };
+  }
+  return {
+    target: "event",
+    card: elements.voiceComposer,
+    button: elements.voiceComposerButton,
+    statusEl: elements.voiceComposerStatus,
+    transcriptEl: elements.voiceComposerTranscript,
+    idleStatus: 'Tap to dictate — e.g. "Tomorrow 9 to 12 Körperpflege"',
+    recordingStatus: "Listening… tap mic again to stop",
+    processingStatus: "Transcribing & extracting fields…",
+  };
+}
+
+function setVoiceComposerState(target, mode) {
+  const ctx = getVoiceContext(target);
+  if (!ctx.button) {
+    return;
+  }
+
+  const icon = ctx.button.querySelector(".voice-composer-icon");
+  ctx.button.classList.toggle("is-recording", mode === "recording");
+  ctx.button.classList.toggle("is-processing", mode === "processing");
+  ctx.button.disabled = mode === "processing";
+  if (ctx.card) {
+    ctx.card.classList.toggle("is-recording", mode === "recording");
+    ctx.card.classList.toggle("is-processing", mode === "processing");
+  }
+
+  if (icon) {
+    if (mode === "recording") {
+      icon.textContent = "stop_circle";
+    } else if (mode === "processing") {
+      icon.textContent = "auto_awesome";
+    } else {
+      icon.textContent = ctx.target === "automation" ? "graphic_eq" : "mic";
+    }
+  }
+
+  if (ctx.statusEl) {
+    if (mode === "recording") {
+      ctx.statusEl.textContent = ctx.recordingStatus;
+    } else if (mode === "processing") {
+      ctx.statusEl.textContent = ctx.processingStatus;
+    } else {
+      ctx.statusEl.textContent = ctx.idleStatus;
+    }
+  }
+}
+
+function setVoiceTranscript(target, text, isInterim) {
+  const ctx = getVoiceContext(target);
+  if (!ctx.transcriptEl) {
+    return;
+  }
+  ctx.transcriptEl.textContent = text || "";
+  ctx.transcriptEl.classList.toggle("is-interim", Boolean(isInterim));
+}
+
+function startLiveTranscription(target) {
+  const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionImpl) {
+    return null;
+  }
+  try {
+    const recognition = new SpeechRecognitionImpl();
+    recognition.lang = navigator.language || "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.addEventListener("result", (event) => {
+      let finalText = target === "automation" ? state.automationFinalTranscript : state.voiceFinalTranscript;
+      let interimText = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const fragment = result[0]?.transcript || "";
+        if (result.isFinal) {
+          finalText = `${finalText} ${fragment}`.trim();
+        } else {
+          interimText = `${interimText} ${fragment}`.trim();
+        }
+      }
+      if (target === "automation") {
+        state.automationFinalTranscript = finalText;
+        state.automationInterimTranscript = interimText;
+      } else {
+        state.voiceFinalTranscript = finalText;
+        state.voiceInterimTranscript = interimText;
+      }
+      const combined = `${finalText} ${interimText}`.trim();
+      setVoiceTranscript(target, combined, !finalText && Boolean(interimText));
+    });
+
+    recognition.addEventListener("error", () => {
+      // Silent fail — backend still returns the authoritative transcript.
+    });
+
+    recognition.start();
+    return recognition;
+  } catch (error) {
+    return null;
+  }
+}
+
+function stopLiveTranscription(target) {
+  if (target === "automation") {
+    if (state.automationLiveRecognition) {
+      try { state.automationLiveRecognition.stop(); } catch (e) { /* ignore */ }
+      state.automationLiveRecognition = null;
+    }
+  } else if (state.voiceLiveRecognition) {
+    try { state.voiceLiveRecognition.stop(); } catch (e) { /* ignore */ }
+    state.voiceLiveRecognition = null;
+  }
+}
+
+function resetVoiceTranscriptBuffers(target) {
+  if (target === "automation") {
+    state.automationFinalTranscript = "";
+    state.automationInterimTranscript = "";
+  } else {
+    state.voiceFinalTranscript = "";
+    state.voiceInterimTranscript = "";
+  }
+  setVoiceTranscript(target, "", false);
+}
+
+function stopVoiceStream(target) {
+  const streamKey = target === "automation" ? "automationVoiceStream" : "voiceStream";
+  if (!state[streamKey]) {
+    return;
+  }
+  state[streamKey].getTracks().forEach((track) => track.stop());
+  state[streamKey] = null;
+}
+
+function getPreferredAudioMimeType() {
+  if (window.MediaRecorder && MediaRecorder.isTypeSupported("audio/webm")) {
+    return "audio/webm";
+  }
+  if (window.MediaRecorder && MediaRecorder.isTypeSupported("audio/mp4")) {
+    return "audio/mp4";
+  }
+  return "";
+}
+
+async function startVoiceRecording(target) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+    showError("Voice recording is not supported in this browser.");
+    return;
+  }
+
+  const recorderKey = target === "automation" ? "automationVoiceRecorder" : "voiceRecorder";
+  const streamKey = target === "automation" ? "automationVoiceStream" : "voiceStream";
+  const chunksKey = target === "automation" ? "automationVoiceChunks" : "voiceChunks";
+  const recogKey = target === "automation" ? "automationLiveRecognition" : "voiceLiveRecognition";
+
+  try {
+    state[chunksKey] = [];
+    state[streamKey] = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = getPreferredAudioMimeType();
+    const recorderOptions = mimeType ? { mimeType } : {};
+    const recorder = new MediaRecorder(state[streamKey], recorderOptions);
+    state[recorderKey] = recorder;
+
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data && event.data.size > 0) {
+        state[chunksKey].push(event.data);
+      }
+    });
+
+    recorder.addEventListener("stop", () => {
+      const chunks = [...state[chunksKey]];
+      const recordingType = state[recorderKey] ? state[recorderKey].mimeType : mimeType || "audio/webm";
+      state[recorderKey] = null;
+      state[chunksKey] = [];
+      stopVoiceStream(target);
+      stopLiveTranscription(target);
+      submitVoiceRecording(target, chunks, recordingType).catch((error) => {
+        showError(error.message || "Voice request failed.");
+        setVoiceComposerState(target, "idle");
+      });
+    });
+
+    resetVoiceTranscriptBuffers(target);
+    state[recogKey] = startLiveTranscription(target);
+    recorder.start();
+    setVoiceComposerState(target, "recording");
+  } catch (error) {
+    stopVoiceStream(target);
+    stopLiveTranscription(target);
+    state[recorderKey] = null;
+    setVoiceComposerState(target, "idle");
+    showError(error.message || "Could not start voice recording.");
+  }
+}
+
+function stopVoiceRecording(target) {
+  const recorderKey = target === "automation" ? "automationVoiceRecorder" : "voiceRecorder";
+  const recorder = state[recorderKey];
+  if (!recorder || recorder.state === "inactive") {
+    return;
+  }
+  recorder.stop();
+  setVoiceComposerState(target, "processing");
+}
+
+async function submitVoiceRecording(target, chunks, mimeType) {
+  if (target === "automation") {
+    return submitAutomationVoiceRecording(chunks, mimeType);
+  }
+  return submitEventVoiceRecording(chunks, mimeType);
+}
+
+async function submitEventVoiceRecording(chunks, mimeType) {
+  const audioBlob = new Blob(chunks, { type: mimeType || "audio/webm" });
+  if (!audioBlob.size) {
+    throw new Error("No voice recording was captured.");
+  }
+
+  const formData = new FormData();
+  const extension = audioBlob.type.includes("mp4") ? "mp4" : "webm";
+  formData.append("audio", audioBlob, `calendar-voice.${extension}`);
+  formData.append("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin");
+  formData.append("now", new Date().toISOString());
+
+  state.voiceProcessing = true;
+  setVoiceComposerState("event", "processing");
+  try {
+    const response = await fetch("/api/calendar/voice/draft", {
+      method: "POST",
+      body: formData,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || "Voice calendar request failed.");
+    }
+    applyVoiceDraftToOpenModal(payload);
+  } finally {
+    state.voiceProcessing = false;
+    setVoiceComposerState("event", "idle");
+  }
+}
+
+function applyVoiceDraftToOpenModal(payload) {
+  const draft = payload && payload.draft ? payload.draft : {};
+  populateEventForm(draft, { preserveEmptyFields: true });
+
+  const transcript = String(payload.transcript || "").trim();
+  const missingFields = Array.isArray(payload.missing_fields) ? payload.missing_fields : [];
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+
+  if (transcript) {
+    setVoiceTranscript("event", transcript, false);
+  }
+
+  if (elements.voiceDraftPreview) {
+    elements.voiceDraftPreview.classList.remove("hidden");
+  }
+  if (elements.voiceDraftTranscript) {
+    elements.voiceDraftTranscript.textContent = transcript ? `Transcript: ${transcript}` : "";
+  }
+  if (elements.voiceDraftStatus) {
+    const statusParts = [];
+    if (missingFields.length) {
+      statusParts.push(`Needs review: ${missingFields.join(", ")}`);
+    }
+    if (warnings.length) {
+      statusParts.push(warnings.join(" "));
+    }
+    elements.voiceDraftStatus.textContent = statusParts.join(" ");
+  }
+}
+
+function handleEventVoiceButtonClick() {
+  if (state.voiceProcessing) {
+    return;
+  }
+  if (state.voiceRecorder && state.voiceRecorder.state === "recording") {
+    stopVoiceRecording("event");
+    return;
+  }
+  startVoiceRecording("event").catch((error) => {
+    showError(error.message || "Could not start voice recording.");
+  });
+}
+
+function handleAutomationVoiceButtonClick() {
+  if (state.automationVoiceProcessing) {
+    return;
+  }
+  const recorder = state.automationVoiceRecorder;
+  if (recorder && recorder.state === "recording") {
+    stopVoiceRecording("automation");
+    return;
+  }
+  startVoiceRecording("automation").catch((error) => {
+    showError(error.message || "Could not start voice recording.");
+  });
 }
 
 async function openExportModal() {
@@ -1330,10 +1708,18 @@ function handleDocumentClick(event) {
   if (!clickInsidePopover && !clickInsideEvent) {
     closeDeletePopover();
   }
+  const clickInsideNotifications = event.target.closest(".notification-wrap");
+  if (!clickInsideNotifications) {
+    closeNotificationsPopover();
+  }
 }
 
 function handleKeydown(event) {
   if (event.key === "Escape") {
+    if (state.notificationsOpen) {
+      closeNotificationsPopover();
+      return;
+    }
     if (state.activeModalId) {
       closeModal(state.activeModalId);
       return;
@@ -1880,12 +2266,370 @@ function handleCommunitySubmit(event) {
   renderCommunityMessages();
 }
 
+/* ====================== Automations & Reminders ========================= */
+
+const AUTOMATION_PRESETS = {
+  month_end_report: {
+    title: "Generate Assistenzbeitrag at month-end",
+    schedule: "month_end",
+    action: "generate_assistenzbeitrag",
+    note: "Auto-generate the Assistenzbeitrag PDF on the last day of every month.",
+  },
+  weekly_review: {
+    title: "Weekly entry review",
+    schedule: "weekly_sun",
+    action: "notify",
+    note: "Sunday evening reminder — review missing assistant entries for the week.",
+  },
+  custom_reminder: {
+    title: "",
+    schedule: "once",
+    action: "notify",
+    note: "",
+  },
+};
+
+const AUTOMATION_SCHEDULE_LABELS = {
+  month_end: "Last day of every month",
+  weekly_sun: "Every Sunday",
+  weekly_mon: "Every Monday",
+  daily: "Every day",
+  once: "One-time",
+};
+
+const AUTOMATION_ACTION_LABELS = {
+  notify: "Reminder",
+  generate_assistenzbeitrag: "Generate Assistenzbeitrag",
+};
+
+function applyAutomationPreset(presetKey) {
+  const preset = AUTOMATION_PRESETS[presetKey];
+  if (!preset) return;
+  state.automationDraftMode = presetKey;
+  if (elements.automationTitleInput) elements.automationTitleInput.value = preset.title;
+  if (elements.automationScheduleInput) elements.automationScheduleInput.value = preset.schedule;
+  if (elements.automationActionInput) elements.automationActionInput.value = preset.action;
+  if (elements.automationNoteInput) elements.automationNoteInput.value = preset.note;
+  toggleAutomationDateRow();
+  if (elements.automationTitleInput) elements.automationTitleInput.focus();
+}
+
+function toggleAutomationDateRow() {
+  if (!elements.automationDateRow || !elements.automationScheduleInput) return;
+  const isOnce = elements.automationScheduleInput.value === "once";
+  elements.automationDateRow.classList.toggle("hidden-field", !isOnce);
+}
+
+async function openAutomationsModal(triggerElement) {
+  resetAutomationForm();
+  await refreshAutomations();
+  openModal("automations-modal", triggerElement || document.activeElement);
+}
+
+function resetAutomationForm() {
+  if (elements.automationForm) elements.automationForm.reset();
+  if (elements.automationActionInput) elements.automationActionInput.value = "notify";
+  if (elements.automationScheduleInput) elements.automationScheduleInput.value = "month_end";
+  if (elements.automationTimeInput) elements.automationTimeInput.value = "09:00";
+  toggleAutomationDateRow();
+  resetVoiceTranscriptBuffers("automation");
+  setVoiceComposerState("automation", "idle");
+}
+
+async function refreshAutomations() {
+  try {
+    const data = await apiFetch("/api/reminders");
+    state.automations = Array.isArray(data.reminders) ? data.reminders : [];
+    state.automationsLoaded = true;
+    renderAutomations();
+  } catch (error) {
+    state.automationsLoaded = true;
+    renderAutomations();
+  }
+}
+
+function renderAutomations() {
+  const items = state.automations || [];
+  if (elements.automationCountPill) {
+    elements.automationCountPill.textContent = String(items.length);
+  }
+  if (elements.automationsPill) {
+    elements.automationsPill.textContent = String(items.length);
+    elements.automationsPill.classList.toggle("hidden", items.length === 0);
+  }
+  renderAutomationList(items);
+  renderAutomationSummary(items);
+  renderNotifications(items);
+}
+
+function closeNotificationsPopover() {
+  state.notificationsOpen = false;
+  if (elements.notificationsPopover) {
+    elements.notificationsPopover.classList.add("hidden");
+  }
+  if (elements.notificationButton) {
+    elements.notificationButton.setAttribute("aria-expanded", "false");
+  }
+}
+
+async function toggleNotificationsPopover() {
+  if (!elements.notificationsPopover || !elements.notificationButton) {
+    return;
+  }
+  if (state.notificationsOpen) {
+    closeNotificationsPopover();
+    return;
+  }
+  if (!state.automationsLoaded) {
+    await refreshAutomations();
+  } else {
+    renderNotifications(state.automations || []);
+  }
+  state.notificationsOpen = true;
+  elements.notificationsPopover.classList.remove("hidden");
+  elements.notificationButton.setAttribute("aria-expanded", "true");
+}
+
+function renderNotifications(items) {
+  if (!elements.notificationsList) {
+    return;
+  }
+  const notifications = (items || []).filter((item) => item.status !== "completed").slice(0, 5);
+  if (!notifications.length) {
+    elements.notificationsList.innerHTML = '<p class="muted-copy">No notifications right now.</p>';
+    return;
+  }
+  elements.notificationsList.innerHTML = "";
+  notifications.forEach((item) => {
+    const node = document.createElement("article");
+    node.className = "notification-item";
+    node.innerHTML = `
+      <span class="notification-icon material-symbols-outlined">${item.action === "generate_assistenzbeitrag" ? "description" : "notifications_active"}</span>
+      <div class="notification-body">
+        <span class="notification-title">${escapeHtml(item.title || "Reminder")}</span>
+        <span class="notification-meta">${escapeHtml(formatNotificationMeta(item))}</span>
+      </div>`;
+    elements.notificationsList.appendChild(node);
+  });
+}
+
+function formatNotificationMeta(item) {
+  const nextRun = item.next_run_at ? `Next: ${formatAutomationDate(item.next_run_at)}` : "No scheduled time";
+  const note = item.note ? ` - ${item.note}` : "";
+  return `${nextRun}${note}`;
+}
+
+function renderAutomationList(items) {
+  if (!elements.automationList) return;
+  if (!items.length) {
+    elements.automationList.innerHTML = '<p class="muted-copy">No automations yet. Use voice or pick a preset above.</p>';
+    return;
+  }
+  elements.automationList.innerHTML = "";
+  items.forEach((item) => {
+    elements.automationList.appendChild(buildAutomationItemNode(item));
+  });
+}
+
+function renderAutomationSummary(items) {
+  if (!elements.automationSummary) return;
+  if (!items.length) {
+    elements.automationSummary.innerHTML = '<p class="muted-copy">No automations yet. Tap the dial to add one.</p>';
+    return;
+  }
+  const top = items.slice(0, 3);
+  elements.automationSummary.innerHTML = "";
+  top.forEach((item) => {
+    const node = document.createElement("div");
+    node.className = "automation-summary-item";
+    node.innerHTML = `
+      <span class="material-symbols-outlined">${item.action === "generate_assistenzbeitrag" ? "description" : "alarm"}</span>
+      <div>
+        <div>${escapeHtml(item.title || "(untitled)")}</div>
+        <div class="automation-summary-item-meta">${escapeHtml(formatAutomationMeta(item))}</div>
+      </div>`;
+    elements.automationSummary.appendChild(node);
+  });
+}
+
+function buildAutomationItemNode(item) {
+  const node = document.createElement("div");
+  node.className = "automation-item";
+  node.innerHTML = `
+    <span class="automation-item-icon material-symbols-outlined">${item.action === "generate_assistenzbeitrag" ? "description" : "notifications_active"}</span>
+    <div class="automation-item-body">
+      <span class="automation-item-title">${escapeHtml(item.title || "(untitled)")}</span>
+      <span class="automation-item-meta">${escapeHtml(formatAutomationMeta(item))}</span>
+    </div>
+    <div class="automation-item-actions">
+      <button type="button" data-automation-action="run" title="Run now"><span class="material-symbols-outlined">play_arrow</span></button>
+      <button type="button" class="danger" data-automation-action="delete" title="Delete"><span class="material-symbols-outlined">delete</span></button>
+    </div>`;
+  node.querySelectorAll("[data-automation-action]").forEach((button) => {
+    button.addEventListener("click", () => handleAutomationItemAction(button.dataset.automationAction, item.id));
+  });
+  return node;
+}
+
+function formatAutomationMeta(item) {
+  const scheduleLabel = AUTOMATION_SCHEDULE_LABELS[item.schedule] || item.schedule;
+  const actionLabel = AUTOMATION_ACTION_LABELS[item.action] || item.action;
+  const nextRun = item.next_run_at ? ` • Next: ${formatAutomationDate(item.next_run_at)}` : "";
+  const time = item.run_time ? ` ${item.run_time}` : "";
+  return `${actionLabel} · ${scheduleLabel}${time}${nextRun}`;
+}
+
+function formatAutomationDate(value) {
+  try {
+    return new Date(value).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) {
+    return String(value);
+  }
+}
+
+async function handleAutomationItemAction(action, id) {
+  if (!id) return;
+  if (action === "delete") {
+    if (!window.confirm("Delete this automation?")) return;
+    try {
+      await apiFetch(`/api/reminders/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await refreshAutomations();
+    } catch (error) {
+      // showError already shown by apiFetch
+    }
+    return;
+  }
+  if (action === "run") {
+    try {
+      const result = await apiFetch(`/api/reminders/${encodeURIComponent(id)}/run`, { method: "POST" });
+      if (result && result.message) {
+        showError(result.message);
+      }
+      await refreshAutomations();
+    } catch (error) {
+      // ignore — error already shown
+    }
+  }
+}
+
+async function submitAutomationForm(event) {
+  event.preventDefault();
+  if (!elements.automationTitleInput || !elements.automationTitleInput.value.trim()) {
+    showError("Title is required");
+    return;
+  }
+  const payload = {
+    title: elements.automationTitleInput.value.trim(),
+    action: elements.automationActionInput ? elements.automationActionInput.value : "notify",
+    schedule: elements.automationScheduleInput ? elements.automationScheduleInput.value : "month_end",
+    note: elements.automationNoteInput ? elements.automationNoteInput.value.trim() : "",
+    run_time: elements.automationTimeInput ? elements.automationTimeInput.value : "09:00",
+    run_date: elements.automationDateInput ? elements.automationDateInput.value : "",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin",
+  };
+  try {
+    await apiFetch("/api/reminders", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    resetAutomationForm();
+    await refreshAutomations();
+  } catch (error) {
+    // ignore — error shown
+  }
+}
+
+async function submitAutomationVoiceRecording(chunks, mimeType) {
+  const audioBlob = new Blob(chunks, { type: mimeType || "audio/webm" });
+  if (!audioBlob.size) {
+    throw new Error("No voice recording was captured.");
+  }
+  const formData = new FormData();
+  const extension = audioBlob.type.includes("mp4") ? "mp4" : "webm";
+  formData.append("audio", audioBlob, `automation-voice.${extension}`);
+  formData.append("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin");
+  formData.append("now", new Date().toISOString());
+  state.automationVoiceProcessing = true;
+  setVoiceComposerState("automation", "processing");
+  try {
+    const response = await fetch("/api/reminders/voice", {
+      method: "POST",
+      body: formData,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || "Voice automation request failed.");
+    }
+    if (payload.transcript) {
+      setVoiceTranscript("automation", payload.transcript, false);
+    }
+    if (payload.draft) {
+      const draft = payload.draft;
+      if (elements.automationTitleInput && draft.title) elements.automationTitleInput.value = draft.title;
+      if (elements.automationActionInput && draft.action) elements.automationActionInput.value = draft.action;
+      if (elements.automationScheduleInput && draft.schedule) elements.automationScheduleInput.value = draft.schedule;
+      if (elements.automationNoteInput && draft.note) elements.automationNoteInput.value = draft.note;
+      if (elements.automationTimeInput && draft.run_time) elements.automationTimeInput.value = draft.run_time;
+      if (elements.automationDateInput && draft.run_date) elements.automationDateInput.value = draft.run_date;
+      toggleAutomationDateRow();
+    }
+    if (payload.created) {
+      await refreshAutomations();
+    }
+    if (elements.automationVoiceStatus) {
+      elements.automationVoiceStatus.textContent = payload.created
+        ? "Saved automatically — review below."
+        : "Draft prefilled. Adjust and save.";
+    }
+  } finally {
+    state.automationVoiceProcessing = false;
+    setVoiceComposerState("automation", "idle");
+  }
+}
+
+async function tickAutomationsLazy() {
+  try {
+    await apiFetch("/api/reminders/tick", { method: "POST" });
+  } catch (error) {
+    // silent — tick errors should not disturb UI
+  }
+}
+
 function bindEvents() {
   document.getElementById("prev-month").addEventListener("click", () => navigatePeriod(-1));
   document.getElementById("next-month").addEventListener("click", () => navigatePeriod(1));
   const openAddModalButton = document.getElementById("open-add-modal");
   if (openAddModalButton) {
     openAddModalButton.addEventListener("click", (event) => openAddEventModal(event.currentTarget));
+  }
+  if (elements.voiceComposerButton) {
+    elements.voiceComposerButton.addEventListener("click", handleEventVoiceButtonClick);
+  }
+  if (elements.automationVoiceButton) {
+    elements.automationVoiceButton.addEventListener("click", handleAutomationVoiceButtonClick);
+  }
+  if (elements.notificationButton) {
+    elements.notificationButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleNotificationsPopover().catch(() => {});
+    });
+  }
+  if (elements.openAutomationsCardButton) {
+    elements.openAutomationsCardButton.addEventListener("click", () => openAutomationsModal(elements.openAutomationsCardButton));
+  }
+  if (elements.quickAddAutomationButton) {
+    elements.quickAddAutomationButton.addEventListener("click", () => openAutomationsModal(elements.quickAddAutomationButton));
+  }
+  if (elements.automationForm) {
+    elements.automationForm.addEventListener("submit", submitAutomationForm);
+  }
+  if (elements.automationScheduleInput) {
+    elements.automationScheduleInput.addEventListener("change", toggleAutomationDateRow);
+  }
+  if (elements.automationPresetButtons) {
+    elements.automationPresetButtons.forEach((button) => {
+      button.addEventListener("click", () => applyAutomationPreset(button.dataset.preset));
+    });
   }
   document.getElementById("open-export-modal").addEventListener("click", openExportModal);
   document.getElementById("copy-export").addEventListener("click", copyExportSummary);
@@ -2013,6 +2757,8 @@ async function initialize() {
   syncEndTimeWithStart(true);
   initInvoices();
   await switchAppView(state.activeAppView);
+  tickAutomationsLazy();
+  refreshAutomations().catch(() => {});
 }
 
 function initInvoices() {

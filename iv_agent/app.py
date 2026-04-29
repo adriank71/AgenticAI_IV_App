@@ -37,6 +37,9 @@ try:
         materialize_binary_reference,
         resolve_profile_file_path,
     )
+    from .voice_calendar_agent import MAX_AUDIO_BYTES, build_voice_calendar_draft, _extract_text_response, _get_openai_client
+    from . import reminders as reminders_module
+    from .reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 except ImportError:
     from calendar_manager import (
         ASSISTANT_HOUR_FIELDS,
@@ -61,6 +64,9 @@ except ImportError:
         materialize_binary_reference,
         resolve_profile_file_path,
     )
+    from voice_calendar_agent import MAX_AUDIO_BYTES, build_voice_calendar_draft, _extract_text_response, _get_openai_client
+    import reminders as reminders_module
+    from reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
@@ -600,6 +606,36 @@ def api_chat():
         return json_error(f"Failed to process chat request: {exc}", 500)
 
 
+@app.post("/api/calendar/voice/draft")
+def api_calendar_voice_draft():
+    try:
+        audio_file = request.files.get("audio")
+        if not audio_file:
+            return json_error("audio is required", 400)
+
+        audio_bytes = audio_file.read()
+        if not audio_bytes:
+            return json_error("audio is required", 400)
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            return json_error("audio must be 25 MB or smaller", 413)
+
+        draft_payload = build_voice_calendar_draft(
+            audio_bytes,
+            audio_file.filename or "calendar-voice.webm",
+            timezone_name=request.form.get("timezone"),
+            now_value=request.form.get("now"),
+        )
+        return jsonify(make_json_safe(draft_payload))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except RuntimeError as exc:
+        logger.error("voice calendar draft failed: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.exception("Unexpected voice calendar draft error: %s", exc)
+        return json_error("Failed to process voice calendar request", 500)
+
+
 @app.post("/api/reports/generate")
 def api_generate_report():
     try:
@@ -820,8 +856,11 @@ def api_send_report():
         return json_error("Failed to send report", 500)
 
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6").strip()
+OPENAI_VISION_MODEL = (
+    os.environ.get("OPENAI_VISION_MODEL")
+    or os.environ.get("OPENAI_CALENDAR_AGENT_MODEL")
+    or "gpt-5.4-mini"
+).strip() or "gpt-5.4-mini"
 INVOICE_MIME_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -922,7 +961,7 @@ def capture_invoice(sid: str, payload: dict):
     extraction_error = None
     if mime.startswith("image/"):
         try:
-            extracted_fields = _call_claude_vision(image_b64, mime)
+            extracted_fields = _call_openai_vision(image_b64, mime)
             if extracted_fields.get("error") == "not_a_receipt":
                 extraction_error = "Image does not look like a receipt"
             else:
@@ -1039,44 +1078,24 @@ def _format_invoice(fields: dict) -> str:
     return "\n".join(parts)
 
 
-def _call_claude_vision(image_b64: str, mime: str) -> dict:
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set on the server")
-
-    body = json.dumps({
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 400,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": image_b64}},
-                {"type": "text", "text": INVOICE_PROMPT},
-            ],
-        }],
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=body,
-        headers={
-            "content-type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
+def _call_openai_vision(image_b64: str, mime: str) -> dict:
+    openai_client = _get_openai_client()
+    response = openai_client.responses.create(
+        model=OPENAI_VISION_MODEL,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": INVOICE_PROMPT},
+                    {"type": "input_image", "image_url": f"data:{mime};base64,{image_b64}"},
+                ],
+            }
+        ],
+        max_output_tokens=400,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = format_webhook_error_detail(exc.read())
-        raise RuntimeError(f"Claude API error {exc.code}: {detail or 'no body'}") from exc
-
-    parsed = json.loads(raw.decode("utf-8"))
-    blocks = parsed.get("content") or []
-    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+    text = _extract_text_response(response)
     if not text:
-        raise RuntimeError("Empty response from Claude")
+        raise RuntimeError("Empty response from OpenAI")
 
     text = text.strip()
     if text.startswith("```"):
@@ -1087,10 +1106,10 @@ def _call_claude_vision(image_b64: str, mime: str) -> dict:
     try:
         fields = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Claude returned non-JSON: {text[:200]}") from exc
+        raise RuntimeError(f"OpenAI returned non-JSON: {text[:200]}") from exc
 
     if not isinstance(fields, dict):
-        raise RuntimeError("Claude returned non-object")
+        raise RuntimeError("OpenAI returned non-object")
 
     return fields
 
@@ -1120,6 +1139,183 @@ def api_invoices_capture(sid: str):
 @app.post("/api/invoices/<sid>")
 def api_invoices_post(sid: str):
     return json_error("Use the camera capture flow to add invoices", 400)
+
+
+def _execute_reminder_action(reminder: dict) -> tuple[bool, str]:
+    action = reminder.get("action") or "notify"
+    if action == "notify":
+        return True, reminder.get("note") or reminder.get("title") or "Reminder fired"
+
+    if action == "generate_assistenzbeitrag":
+        try:
+            now_iso = reminder.get("next_run_at") or ""
+            month_value = now_iso[:7] if now_iso and len(now_iso) >= 7 else datetime.utcnow().strftime("%Y-%m")
+            parse_month(month_value)
+            profile_payload = load_profile_payload(None)
+            report_store = get_report_store()
+            output_filename = f"Assistenzbeitrag_{month_value}.pdf"
+            total_hours = get_assistant_hours(month_value)
+            assistant_breakdown = get_assistant_hours_breakdown(month_value)
+            dual_template_paths = resolve_dual_template_paths()
+
+            with ExitStack() as exit_stack:
+                if dual_template_paths:
+                    stundenblatt_template_path = exit_stack.enter_context(
+                        materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
+                    )
+                    rechnung_template_path = exit_stack.enter_context(
+                        materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
+                    )
+                    report_bytes = fill_assistenz_dual_form_auto_bytes(
+                        stundenblatt_template_pdf_path=stundenblatt_template_path,
+                        rechnung_template_pdf_path=rechnung_template_path,
+                        month=month_value,
+                        profile_data=profile_payload,
+                        preview=False,
+                    )
+                    gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
+                else:
+                    template_path = exit_stack.enter_context(
+                        materialize_binary_reference(resolve_template_path(), suffix=".pdf")
+                    )
+                    report_bytes = fill_assistenz_form_auto_bytes(
+                        template_pdf_path=template_path,
+                        month=month_value,
+                        profile_data=profile_payload,
+                        preview=False,
+                    )
+                    gross_amount = round(total_hours * STANDARD_RATE, 2)
+
+            report_store.save_report(
+                month=month_value,
+                report_type="assistenzbeitrag",
+                file_name=output_filename,
+                content=report_bytes,
+                profile_id=None,
+                metadata={
+                    "assistant_hours": total_hours,
+                    "assistant_breakdown": assistant_breakdown,
+                    "gross_amount_chf": f"{gross_amount:.2f}",
+                    "triggered_by_reminder": reminder.get("id"),
+                },
+            )
+            return True, f"Generated Assistenzbeitrag for {month_value}"
+        except Exception as exc:
+            logger.exception("Reminder action failed")
+            return False, f"Action failed: {exc}"
+
+    return False, f"Unsupported action: {action}"
+
+
+@app.get("/api/reminders")
+def api_list_reminders():
+    return jsonify({"reminders": reminders_module.list_reminders()})
+
+
+@app.post("/api/reminders")
+def api_create_reminder():
+    try:
+        payload = request.get_json(silent=True) or {}
+        reminder = reminders_module.create_reminder(payload)
+        response = jsonify({"reminder": reminder})
+        response.status_code = 201
+        return response
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except Exception as exc:
+        logger.exception("Failed to create reminder")
+        return json_error(f"Failed to create reminder: {exc}", 500)
+
+
+@app.delete("/api/reminders/<reminder_id>")
+def api_delete_reminder(reminder_id: str):
+    if reminders_module.delete_reminder(reminder_id):
+        return jsonify({"deleted": True, "id": reminder_id})
+    return json_error("Reminder not found", 404)
+
+
+@app.post("/api/reminders/<reminder_id>/run")
+def api_run_reminder(reminder_id: str):
+    reminder = reminders_module.get_reminder(reminder_id)
+    if not reminder:
+        return json_error("Reminder not found", 404)
+    success, message = _execute_reminder_action(reminder)
+    updated = reminders_module.mark_run(reminder_id, success=success, message=message)
+    return jsonify({
+        "ok": success,
+        "message": message,
+        "reminder": updated,
+    })
+
+
+@app.route("/api/reminders/tick", methods=["GET", "POST"])
+def api_tick_reminders():
+    due_items = reminders_module.due_reminders()
+    fired = []
+    for reminder in due_items:
+        success, message = _execute_reminder_action(reminder)
+        updated = reminders_module.mark_run(reminder["id"], success=success, message=message)
+        fired.append({
+            "id": reminder["id"],
+            "ok": success,
+            "message": message,
+            "reminder": updated,
+        })
+    return jsonify({"fired_count": len(fired), "fired": fired})
+
+
+@app.post("/api/reminders/voice")
+def api_reminders_voice():
+    try:
+        audio_file = request.files.get("audio")
+        timezone_name = request.form.get("timezone")
+        now_value = request.form.get("now")
+        text_value = request.form.get("text")
+
+        if audio_file:
+            audio_bytes = audio_file.read()
+            if not audio_bytes:
+                return json_error("audio is required", 400)
+            if len(audio_bytes) > MAX_AUDIO_BYTES:
+                return json_error("audio must be 25 MB or smaller", 413)
+            draft_payload = build_reminder_draft_from_audio(
+                audio_bytes,
+                audio_file.filename or "automation-voice.webm",
+                timezone_name=timezone_name,
+                now_value=now_value,
+            )
+        elif text_value:
+            draft_payload = build_reminder_draft_from_text(
+                text_value,
+                timezone_name=timezone_name,
+                now_value=now_value,
+            )
+        else:
+            return json_error("audio or text is required", 400)
+
+        created_record = None
+        draft = draft_payload.get("draft")
+        if isinstance(draft, dict):
+            try:
+                created_record = reminders_module.create_reminder(draft)
+            except ValueError as exc:
+                draft_payload["error"] = str(exc)
+
+        return jsonify({
+            "transcript": draft_payload.get("transcript", ""),
+            "draft": draft_payload.get("draft"),
+            "created": created_record is not None,
+            "reminder": created_record,
+            "error": draft_payload.get("error"),
+        })
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except RuntimeError as exc:
+        logger.error("voice reminder draft failed: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.exception("Unexpected voice reminder error")
+        return json_error(f"Failed to process voice reminder: {exc}", 500)
 
 
 if __name__ == "__main__":

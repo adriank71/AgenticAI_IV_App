@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
   "Flask",
   "flask-cors",
+  "openai",
   "pypdf",
   "psycopg[binary]",
   "vercel",

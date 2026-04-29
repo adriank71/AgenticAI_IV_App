@@ -1,13 +1,17 @@
 import json
+import io
 import os
 import shutil
 import unittest
 import uuid
+from types import SimpleNamespace
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from iv_agent import app as app_module
 from iv_agent import calendar_manager
+from iv_agent import reminders_agent
+from iv_agent import voice_calendar_agent
 
 
 @contextmanager
@@ -433,7 +437,7 @@ class CalendarApiTests(unittest.TestCase):
         fake_invoice_store = FakeInvoiceStore()
 
         with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
-            app_module, "_call_claude_vision", side_effect=RuntimeError("anthropic unavailable")
+            app_module, "_call_openai_vision", side_effect=RuntimeError("openai unavailable")
         ):
             response = client.post(
                 "/api/invoices/session123/capture",
@@ -449,7 +453,7 @@ class CalendarApiTests(unittest.TestCase):
         self.assertTrue(payload["stored"])
         self.assertEqual(payload["capture"]["folder_path"], "Invoices/session123")
         self.assertEqual(payload["capture"]["file_name"], "phone.jpg")
-        self.assertEqual(payload["extraction_error"], "anthropic unavailable")
+        self.assertEqual(payload["extraction_error"], "openai unavailable")
         self.assertEqual(len(fake_invoice_store.captures), 1)
 
     def test_invoice_capture_accepts_pdf_without_vision_extraction(self):
@@ -457,7 +461,7 @@ class CalendarApiTests(unittest.TestCase):
         fake_invoice_store = FakeInvoiceStore()
 
         with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
-            app_module, "_call_claude_vision"
+            app_module, "_call_openai_vision"
         ) as vision_mock:
             response = client.post(
                 "/api/invoices/session123/capture",
@@ -489,6 +493,228 @@ class CalendarApiTests(unittest.TestCase):
         redirect_response = client.get("/scan/session123")
         self.assertEqual(redirect_response.status_code, 302)
         self.assertIn("/camera?sid=session123", redirect_response.headers["Location"])
+
+    def test_voice_calendar_draft_returns_ai_event_draft(self):
+        client = app_module.app.test_client()
+        fake_payload = {
+            "transcript": "Tomorrow at 10 therapy appointment",
+            "draft": {
+                "date": "2026-04-29",
+                "time": "10:00",
+                "end_time": "10:30",
+                "all_day": False,
+                "category": "other",
+                "title": "Therapy appointment",
+                "notes": "Transcript: Tomorrow at 10 therapy appointment",
+                "hours": 0.0,
+                "assistant_hours": {
+                    "koerperpflege": 0.0,
+                    "mahlzeiten_eingeben": 0.0,
+                    "mahlzeiten_zubereiten": 0.0,
+                    "begleitung_therapie": 0.0,
+                },
+                "transport_mode": "",
+                "transport_kilometers": 0.0,
+                "transport_address": "",
+                "recurrence": "none",
+                "repeat_count": 0,
+            },
+            "missing_fields": [],
+            "confidence": 0.9,
+            "warnings": [],
+        }
+
+        with patch.object(app_module, "build_voice_calendar_draft", return_value=fake_payload) as draft_mock:
+            response = client.post(
+                "/api/calendar/voice/draft",
+                data={
+                    "audio": (io.BytesIO(b"webm audio"), "calendar-voice.webm"),
+                    "timezone": "Europe/Berlin",
+                    "now": "2026-04-28T12:00:00+02:00",
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["transcript"], fake_payload["transcript"])
+        self.assertEqual(payload["draft"]["title"], "Therapy appointment")
+        self.assertEqual(app_module.parse_event_payload(payload["draft"])["date"], "2026-04-29")
+        draft_mock.assert_called_once()
+
+    def test_voice_calendar_draft_requires_audio(self):
+        client = app_module.app.test_client()
+
+        with patch.object(app_module, "build_voice_calendar_draft") as draft_mock:
+            response = client.post(
+                "/api/calendar/voice/draft",
+                data={"timezone": "Europe/Berlin"},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "audio is required")
+        draft_mock.assert_not_called()
+
+    def test_voice_calendar_draft_returns_gateway_error_for_agent_failure(self):
+        client = app_module.app.test_client()
+
+        with patch.object(app_module, "build_voice_calendar_draft", side_effect=RuntimeError("OpenAI unavailable")):
+            response = client.post(
+                "/api/calendar/voice/draft",
+                data={"audio": (io.BytesIO(b"webm audio"), "calendar-voice.webm")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("OpenAI unavailable", response.get_json()["error"])
+
+    def test_voice_calendar_draft_can_return_missing_fields_without_saving(self):
+        client = app_module.app.test_client()
+        fake_payload = {
+            "transcript": "Add therapy sometime next week",
+            "draft": {
+                "date": "",
+                "time": "",
+                "end_time": "",
+                "all_day": False,
+                "category": "other",
+                "title": "Therapy",
+                "notes": "Transcript: Add therapy sometime next week",
+                "hours": 0.0,
+                "assistant_hours": {
+                    "koerperpflege": 0.0,
+                    "mahlzeiten_eingeben": 0.0,
+                    "mahlzeiten_zubereiten": 0.0,
+                    "begleitung_therapie": 0.0,
+                },
+                "transport_mode": "",
+                "transport_kilometers": 0.0,
+                "transport_address": "",
+                "recurrence": "none",
+                "repeat_count": 0,
+            },
+            "missing_fields": ["date", "time", "end_time"],
+            "confidence": 0.35,
+            "warnings": ["Date and time were not clear."],
+        }
+
+        with patch.object(app_module, "build_voice_calendar_draft", return_value=fake_payload), patch.object(
+            app_module, "add_events"
+        ) as add_events_mock:
+            response = client.post(
+                "/api/calendar/voice/draft",
+                data={"audio": (io.BytesIO(b"webm audio"), "calendar-voice.webm")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["missing_fields"], ["date", "time", "end_time"])
+        add_events_mock.assert_not_called()
+
+
+class VoiceCalendarAgentTests(unittest.TestCase):
+    def test_build_voice_calendar_draft_uses_mocked_openai_client(self):
+        response_json = json.dumps(
+            {
+                "draft": {
+                    "date": "2026-04-29",
+                    "time": "11:00",
+                    "end_time": "12:00",
+                    "all_day": False,
+                    "category": "assistant",
+                    "title": "Morning support",
+                    "notes": "",
+                    "hours": 1.0,
+                    "assistant_hours": {
+                        "koerperpflege": 1.0,
+                        "mahlzeiten_eingeben": 0.0,
+                        "mahlzeiten_zubereiten": 0.0,
+                        "begleitung_therapie": 0.0,
+                    },
+                    "transport_mode": "",
+                    "transport_kilometers": 0.0,
+                    "transport_address": "",
+                    "recurrence": "none",
+                    "repeat_count": 0,
+                },
+                "missing_fields": [],
+                "confidence": 0.88,
+                "warnings": [],
+            }
+        )
+
+        class FakeTranscriptions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(text="Tomorrow at 11 morning support for one hour")
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(output_text=response_json)
+
+        fake_transcriptions = FakeTranscriptions()
+        fake_responses = FakeResponses()
+        fake_client = SimpleNamespace(
+            audio=SimpleNamespace(transcriptions=fake_transcriptions),
+            responses=fake_responses,
+        )
+
+        payload = voice_calendar_agent.build_voice_calendar_draft(
+            b"webm audio",
+            "calendar-voice.webm",
+            timezone_name="Europe/Berlin",
+            now_value="2026-04-28T12:00:00+02:00",
+            client=fake_client,
+        )
+
+        self.assertEqual(fake_transcriptions.kwargs["model"], "whisper-1")
+        self.assertEqual(payload["transcript"], "Tomorrow at 11 morning support for one hour")
+        self.assertEqual(payload["draft"]["category"], "assistant")
+        self.assertEqual(payload["draft"]["hours"], 1.0)
+
+
+class ReminderAgentTests(unittest.TestCase):
+    def test_build_reminder_draft_from_text_uses_openai_tool_call(self):
+        tool_args = {
+            "title": "Generate Assistenzbeitrag at month-end",
+            "action": "generate_assistenzbeitrag",
+            "schedule": "month_end",
+            "run_time": "09:00",
+            "note": "Prepare monthly Assistenzbeitrag",
+        }
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return SimpleNamespace(
+                    output=[
+                        SimpleNamespace(
+                            type="function_call",
+                            name="create_reminder",
+                            arguments=json.dumps(tool_args),
+                        )
+                    ]
+                )
+
+        fake_responses = FakeResponses()
+        fake_client = SimpleNamespace(responses=fake_responses)
+
+        payload = reminders_agent.build_reminder_draft_from_text(
+            "Remind me at the end of every month and prepare the Assistenzbeitrag",
+            timezone_name="Europe/Berlin",
+            now_value="2026-04-29T12:00:00+02:00",
+            client=fake_client,
+        )
+
+        self.assertEqual(payload["transcript"], "Remind me at the end of every month and prepare the Assistenzbeitrag")
+        self.assertEqual(payload["draft"]["action"], "generate_assistenzbeitrag")
+        self.assertEqual(payload["draft"]["schedule"], "month_end")
+        self.assertEqual(payload["draft"]["timezone"], "Europe/Berlin")
+        self.assertEqual(fake_responses.kwargs["tools"][0]["name"], "create_reminder")
+        self.assertEqual(fake_responses.kwargs["tool_choice"]["name"], "create_reminder")
 
 
 if __name__ == "__main__":
