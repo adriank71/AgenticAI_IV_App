@@ -114,7 +114,8 @@ DEFAULT_TEMPLATE_CANDIDATES = (
     os.path.join(PROJECT_ROOT, "318.536_D_Rechnung_AB_01_2025_V1.pdf"),
     r"C:\Users\trxqz\Desktop\318.536_D_Rechnung_AB_01_2025_V1.pdf",
 )
-POSTGRES_TEMPLATE_PREFIX = "postgres-template:"
+TEMPLATE_STORE_PREFIX = "template-store:"
+POSTGRES_TEMPLATE_PREFIX = TEMPLATE_STORE_PREFIX
 N8N_WEBHOOK_URL = os.environ.get(
     "IV_AGENT_N8N_WEBHOOK_URL",
     "https://adrx.app.n8n.cloud/webhook/da1ab6f3-73d4-4eaa-9063-ebf8d0e6226f",
@@ -252,21 +253,21 @@ def get_template_store():
     return make_template_store()
 
 
-def postgres_template_reference(template_key: str) -> str | None:
+def template_store_reference(template_key: str) -> str | None:
     try:
         template_store = get_template_store()
         if template_store and template_store.get_template(template_key):
-            return f"{POSTGRES_TEMPLATE_PREFIX}{template_key}"
+            return f"{TEMPLATE_STORE_PREFIX}{template_key}"
     except Exception as exc:
-        logger.warning("Could not resolve Postgres template %s: %s", template_key, exc)
+        logger.warning("Could not resolve template %s from configured store: %s", template_key, exc)
     return None
 
 
 @contextmanager
 def materialize_template_reference(reference: str, *, suffix: str = ".pdf"):
     normalized_reference = str(reference or "").strip()
-    if normalized_reference.startswith(POSTGRES_TEMPLATE_PREFIX):
-        template_key = normalized_reference.removeprefix(POSTGRES_TEMPLATE_PREFIX)
+    if normalized_reference.startswith(TEMPLATE_STORE_PREFIX):
+        template_key = normalized_reference.removeprefix(TEMPLATE_STORE_PREFIX)
         template_store = get_template_store()
         if not template_store:
             raise FileNotFoundError(f"Template store is not configured for {template_key}")
@@ -288,7 +289,7 @@ def materialize_template_reference(reference: str, *, suffix: str = ".pdf"):
 
 
 def resolve_template_path() -> str:
-    db_reference = postgres_template_reference("assistenz_standard")
+    db_reference = template_store_reference("assistenz_standard")
     if db_reference:
         return db_reference
 
@@ -305,8 +306,8 @@ def resolve_template_path() -> str:
 
 
 def resolve_dual_template_paths() -> tuple[str, str] | None:
-    db_stundenblatt = postgres_template_reference("stundenblatt")
-    db_rechnung = postgres_template_reference("rechnung")
+    db_stundenblatt = template_store_reference("stundenblatt")
+    db_rechnung = template_store_reference("rechnung")
     if db_stundenblatt and db_rechnung:
         return db_stundenblatt, db_rechnung
 
@@ -319,6 +320,10 @@ def resolve_dual_template_paths() -> tuple[str, str] | None:
     if stundenblatt_path and rechnung_path:
         return stundenblatt_path, rechnung_path
     return None
+
+
+def resolve_transportkosten_template_path() -> str | None:
+    return template_store_reference("transportkosten")
 
 
 def load_profile_payload(profile_id: str | None) -> dict:

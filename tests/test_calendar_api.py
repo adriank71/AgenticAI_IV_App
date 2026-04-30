@@ -47,9 +47,9 @@ class FakeReportStore:
             "month": kwargs["month"],
             "type": kwargs["report_type"],
             "file_name": kwargs["file_name"],
-            "storage_backend": "blob",
+            "storage_backend": "supabase",
             "storage_key": f"reports/{report_id}",
-            "storage_url": "https://blob.example/report.pdf",
+            "storage_url": "supabase://iv-agent-reports/reports/report.pdf",
             "content_type": kwargs.get("content_type", "application/pdf"),
             "metadata": kwargs.get("metadata", {}),
         }
@@ -73,7 +73,7 @@ class FakeReportStore:
 
 
 class FakeInvoiceStore:
-    def __init__(self, backend_name="blob"):
+    def __init__(self, backend_name="supabase"):
         self.captures = []
         self.backend_name = backend_name
 
@@ -84,7 +84,7 @@ class FakeInvoiceStore:
             "file_name": kwargs["file_name"],
             "storage_backend": self.backend_name,
             "storage_key": f"Invoices/{kwargs['sid']}/inv-{len(self.captures) + 1}_{kwargs['file_name']}",
-            "storage_url": "https://blob.example/private/invoice.jpg",
+            "storage_url": "supabase://iv-agent-invoices/private/invoice.jpg",
             "content_type": kwargs["content_type"],
             "content_size": len(kwargs["content"]),
             "fields": kwargs.get("fields"),
@@ -399,21 +399,23 @@ class CalendarApiTests(unittest.TestCase):
         single_fill_mock.assert_not_called()
         self.assertEqual(payload["generated_reports"][0]["gross_amount_chf"], "157.50")
 
-    def test_dual_template_resolution_prefers_postgres_templates(self):
+    def test_template_resolution_prefers_configured_template_store(self):
         with patch.object(
             app_module,
             "get_template_store",
-            return_value=FakeTemplateStore({"stundenblatt", "rechnung"}),
+            return_value=FakeTemplateStore({"stundenblatt", "rechnung", "transportkosten"}),
         ):
-            resolved = app_module.resolve_dual_template_paths()
+            dual_templates = app_module.resolve_dual_template_paths()
+            transportkosten_template = app_module.resolve_transportkosten_template_path()
 
         self.assertEqual(
-            resolved,
+            dual_templates,
             (
                 f"{app_module.POSTGRES_TEMPLATE_PREFIX}stundenblatt",
                 f"{app_module.POSTGRES_TEMPLATE_PREFIX}rechnung",
             ),
         )
+        self.assertEqual(transportkosten_template, f"{app_module.POSTGRES_TEMPLATE_PREFIX}transportkosten")
 
     def test_send_report_accepts_report_id_and_omits_file_path(self):
         client = app_module.app.test_client()
@@ -512,13 +514,13 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["capture"]["content_type"], "application/pdf")
         self.assertEqual(payload["capture"]["file_name"], "invoice.pdf")
         self.assertFalse(payload["capture"]["previewable"])
-        self.assertEqual(payload["capture"]["storage_backend"], "blob")
+        self.assertEqual(payload["capture"]["storage_backend"], "supabase")
         self.assertIsNone(payload["extraction_error"])
         vision_mock.assert_not_called()
 
-    def test_invoice_capture_can_return_supabase_db_backend(self):
+    def test_invoice_capture_returns_supabase_backend(self):
         client = app_module.app.test_client()
-        fake_invoice_store = FakeInvoiceStore(backend_name="postgres")
+        fake_invoice_store = FakeInvoiceStore(backend_name="supabase")
 
         with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
             app_module, "_call_openai_vision", return_value={"merchant": "Cafe Example", "date": "2026-04-30", "total": 12.5, "currency": "CHF"}
@@ -534,7 +536,7 @@ class CalendarApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         payload = response.get_json()
-        self.assertEqual(payload["capture"]["storage_backend"], "postgres")
+        self.assertEqual(payload["capture"]["storage_backend"], "supabase")
         self.assertIn("/api/invoices/session123/files/inv-1/phone.jpg", payload["capture"]["file_url"])
 
     def test_scan_url_uses_camera_route_and_scan_redirects(self):

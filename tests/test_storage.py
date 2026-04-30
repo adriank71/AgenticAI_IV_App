@@ -1,14 +1,11 @@
-import json
 import os
 import shutil
 import unittest
 import uuid
 from contextlib import contextmanager
-from types import SimpleNamespace
+from unittest.mock import patch
 
-from iv_agent.calendar_manager import JsonEventStore, PostgresEventStore
-from iv_agent.migrate_blob_to_supabase import migrate_invoice_captures, migrate_templates
-from iv_agent.migrate_local_data import migrate_local_data
+from iv_agent.calendar_manager import PostgresEventStore
 from iv_agent.storage import (
     LocalInvoiceCaptureStore,
     PostgresAssetStore,
@@ -16,6 +13,12 @@ from iv_agent.storage import (
     PostgresProfileStore,
     PostgresReportStore,
     PostgresTemplateStore,
+    SupabaseStorageAssetStore,
+    SupabaseStorageInvoiceCaptureStore,
+    SupabaseStorageTemplateStore,
+    make_asset_store,
+    make_invoice_capture_store,
+    make_template_store,
 )
 
 
@@ -75,7 +78,7 @@ class RecordingConnection:
 
 
 class FakeAssetStore:
-    backend_name = "blob"
+    backend_name = "supabase"
 
     def __init__(self):
         self.saved = None
@@ -84,8 +87,8 @@ class FakeAssetStore:
         self.saved = kwargs
         return {
             "storage_key": "reports/rpt-1_Assistenzbeitrag_2026-04.pdf",
-            "storage_url": "https://blob.example/private/report.pdf",
-            "storage_download_url": "https://blob.example/private/report.pdf?download=1",
+            "storage_url": "supabase://iv-agent-reports/reports/report.pdf",
+            "storage_download_url": None,
             "content_type": kwargs["content_type"],
             "content_size": len(kwargs["content"]),
         }
@@ -94,54 +97,33 @@ class FakeAssetStore:
         return b"%PDF-1.4\n", "application/pdf"
 
 
-class CaptureEventStore:
-    def __init__(self):
-        self.events = None
+class FakeSupabaseBucket:
+    def __init__(self, objects, bucket):
+        self.objects = objects
+        self.bucket = bucket
 
-    def replace_all_events(self, events):
-        self.events = list(events)
-        return len(events)
+    def upload(self, *, path, file, file_options):
+        self.objects[(self.bucket, path)] = {
+            "content": bytes(file),
+            "options": dict(file_options),
+        }
 
-
-class CaptureProfileStore:
-    def __init__(self):
-        self.profiles = {}
-
-    def upsert_profile(self, profile_id, payload):
-        self.profiles[profile_id] = payload
+    def download(self, path):
+        return self.objects[(self.bucket, path)]["content"]
 
 
-class CaptureTemplateStore:
-    def __init__(self):
-        self.templates = {}
-
-    def upsert_template(self, **kwargs):
-        self.templates[kwargs["template_key"]] = kwargs
-
-
-class CaptureInvoiceStore:
-    def __init__(self):
-        self.records = []
-
-    def upsert_capture_record(self, record, *, content, overwrite=False):
-        if any(existing["invoice_id"] == record["invoice_id"] for existing in self.records):
-            return False
-        self.records.append({**record, "content": content})
-        return True
-
-
-class FakeBlobClient:
+class FakeSupabaseStorage:
     def __init__(self, objects):
         self.objects = objects
 
-    def get(self, key, access="private"):
-        content = self.objects[key]
-        return SimpleNamespace(status_code=200, content=content, content_type=None)
+    def from_(self, bucket):
+        return FakeSupabaseBucket(self.objects, bucket)
 
-    def iter_objects(self, prefix):
-        for key in sorted(self.objects):
-            if key.startswith(prefix):
-                yield SimpleNamespace(pathname=key)
+
+class FakeSupabaseClient:
+    def __init__(self):
+        self.objects = {}
+        self.storage = FakeSupabaseStorage(self.objects)
 
 
 class StorageTests(unittest.TestCase):
@@ -241,6 +223,25 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(report["type"], "assistenzbeitrag")
         self.assertEqual(asset_store.saved["month"], "2026-04")
         self.assertTrue(any("INSERT INTO reports" in query for query, _ in cursor.statements))
+
+    def test_postgres_report_store_can_read_migrated_postgres_asset(self):
+        cursor = RecordingCursor(fetchone_results=[{"content": b"%PDF-legacy\n", "content_type": "application/pdf"}])
+        store = PostgresReportStore(
+            "postgres://example",
+            asset_store=FakeAssetStore(),
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        content, content_type = store.read_report_bytes(
+            {
+                "storage_backend": "postgres",
+                "storage_key": "reports/legacy.pdf",
+                "storage_url": None,
+            }
+        )
+
+        self.assertEqual(content, b"%PDF-legacy\n")
+        self.assertEqual(content_type, "application/pdf")
 
     def test_postgres_template_store_upserts_and_reads_template_bytes(self):
         cursor = RecordingCursor(
@@ -358,91 +359,136 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(content_type, "application/pdf")
         self.assertTrue(any("CREATE TABLE IF NOT EXISTS asset_blobs" in query for query, _ in cursor.statements))
 
-    def test_blob_to_supabase_migration_imports_templates_and_invoice_captures(self):
-        invoice_metadata = {
-            "invoice_id": "inv-1",
-            "sid": "session123",
-            "file_name": "receipt.jpg",
-            "storage_key": "Invoices/session123/inv-1_receipt.jpg",
-            "content_type": "image/jpeg",
-            "fields": {"merchant": "Cafe Example"},
-            "extraction_error": None,
-            "folder_path": "Invoices/session123",
-            "created_at": "2026-04-30T10:00:00+00:00",
-            "updated_at": "2026-04-30T10:00:00+00:00",
-        }
-        client = FakeBlobClient(
-            {
-                "Stundenblatt.pdf": b"%PDF-stundenblatt\n",
-                "Rechnungsvorlage_aL_elektronisch (1).pdf": b"%PDF-rechnung\n",
-                "Invoices/session123/inv-1.json": json.dumps(invoice_metadata).encode("utf-8"),
-                "Invoices/session123/inv-1_receipt.jpg": b"\xff\xd8\xff",
-            }
+    def test_supabase_template_store_uses_template_bucket_and_keys(self):
+        client = FakeSupabaseClient()
+        store = SupabaseStorageTemplateStore(client=client, bucket="iv-agent-templates")
+
+        saved = store.upsert_template(
+            template_key="transportkosten",
+            file_name="AK_Formular_EL_Transportkosten.pdf",
+            content=b"%PDF-transport\n",
         )
-        template_store = CaptureTemplateStore()
-        invoice_store = CaptureInvoiceStore()
+        template = store.get_template("transportkosten")
+        content, content_type = store.read_template_bytes("transportkosten")
 
-        template_count = migrate_templates(client, template_store)
-        invoice_count = migrate_invoice_captures(client, invoice_store)
-        second_invoice_count = migrate_invoice_captures(client, invoice_store)
+        self.assertEqual(saved["storage_backend"], "supabase")
+        self.assertEqual(saved["storage_key"], "transportkosten/AK_Formular_EL_Transportkosten.pdf")
+        self.assertEqual(template["storage_key"], "transportkosten/AK_Formular_EL_Transportkosten.pdf")
+        self.assertEqual(content, b"%PDF-transport\n")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertEqual(
+            client.objects[("iv-agent-templates", "transportkosten/AK_Formular_EL_Transportkosten.pdf")]["options"]["upsert"],
+            "true",
+        )
 
-        self.assertEqual(template_count, 2)
-        self.assertIn("stundenblatt", template_store.templates)
-        self.assertIn("rechnung", template_store.templates)
-        self.assertEqual(invoice_count, 1)
-        self.assertEqual(second_invoice_count, 0)
-        self.assertEqual(invoice_store.records[0]["fields"]["merchant"], "Cafe Example")
+    def test_supabase_report_asset_store_uploads_to_reports_bucket(self):
+        client = FakeSupabaseClient()
+        store = SupabaseStorageAssetStore(client=client, bucket="iv-agent-reports")
 
-    def test_migrate_local_data_imports_calendar_and_profiles(self):
-        with workspace_tempdir() as temp_dir:
-            calendar_path = os.path.join(temp_dir, "calendar.json")
-            profile_path = os.path.join(temp_dir, "profile.json")
-            profile_dir = os.path.join(temp_dir, "profiles")
-            os.makedirs(profile_dir, exist_ok=True)
+        saved = store.store_report(
+            month="2026-04",
+            report_id="rpt-1",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-report\n",
+            content_type="application/pdf",
+        )
+        content, content_type = store.read_bytes(storage_key=saved["storage_key"])
 
-            source_event_store = JsonEventStore(temp_dir, calendar_path)
-            source_event_store.replace_all_events(
+        self.assertEqual(store.backend_name, "supabase")
+        self.assertEqual(saved["storage_key"], "reports/2026-04/rpt-1_Assistenzbeitrag_2026-04.pdf")
+        self.assertEqual(saved["storage_url"], "supabase://iv-agent-reports/reports/2026-04/rpt-1_Assistenzbeitrag_2026-04.pdf")
+        self.assertEqual(content, b"%PDF-report\n")
+        self.assertEqual(content_type, "application/pdf")
+
+    def test_supabase_invoice_capture_store_uploads_file_and_metadata(self):
+        cursor = RecordingCursor(
+            fetchall_results=[
                 [
                     {
-                        "id": "evt-1",
-                        "date": "2026-04-05",
-                        "time": "09:00",
-                        "end_time": "10:00",
-                        "all_day": False,
-                        "category": "assistant",
-                        "title": "Morning support",
-                        "notes": "",
-                        "hours": 1.0,
-                        "assistant_hours": {"koerperpflege": 1.0},
-                        "transport_mode": "",
-                        "transport_kilometers": 0.0,
-                        "transport_address": "",
+                        "invoice_id": "inv-1",
+                        "sid": "session123",
+                        "file_name": "receipt.jpg",
+                        "storage_key": "Invoices/session123/inv-1_receipt.jpg",
+                        "storage_backend": "supabase",
+                        "storage_bucket": "iv-agent-invoices",
+                        "storage_url": "supabase://iv-agent-invoices/Invoices/session123/inv-1_receipt.jpg",
+                        "content_type": "image/jpeg",
+                        "content_size": 3,
+                        "fields": {"merchant": "Cafe Example"},
+                        "extraction_error": None,
+                        "folder_path": "Invoices/session123",
+                        "created_at": "2026-04-30T10:00:00+00:00",
+                        "updated_at": "2026-04-30T10:00:00+00:00",
                     }
                 ]
-            )
+            ]
+        )
+        client = FakeSupabaseClient()
+        store = SupabaseStorageInvoiceCaptureStore(
+            "postgres://example",
+            client=client,
+            bucket="iv-agent-invoices",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
 
-            with open(profile_path, "w", encoding="utf-8") as file:
-                json.dump({"insured_name": "Default"}, file)
+        saved = store.save_capture(
+            sid="session123",
+            file_name="receipt.jpg",
+            content=b"\xff\xd8\xff",
+            content_type="image/jpeg",
+            fields={"merchant": "Cafe Example"},
+        )
+        listed = store.list_captures("session123")
+        content, content_type = store.read_capture_bytes(saved)
 
-            with open(os.path.join(profile_dir, "child.json"), "w", encoding="utf-8") as file:
-                json.dump({"insured_name": "Child"}, file)
+        self.assertEqual(saved["storage_backend"], "supabase")
+        self.assertTrue(saved["storage_key"].startswith("Invoices/session123/"))
+        self.assertEqual(listed[0]["storage_backend"], "supabase")
+        self.assertEqual(content, b"\xff\xd8\xff")
+        self.assertEqual(content_type, "image/jpeg")
+        self.assertTrue(any("INSERT INTO invoice_captures" in query for query, _ in cursor.statements))
 
-            target_event_store = CaptureEventStore()
-            target_profile_store = CaptureProfileStore()
+    def test_supabase_invoice_capture_store_can_read_migrated_postgres_capture(self):
+        cursor = RecordingCursor(
+            fetchone_results=[{"content": b"\xff\xd8\xff", "content_type": "image/jpeg"}]
+        )
+        store = SupabaseStorageInvoiceCaptureStore(
+            "postgres://example",
+            client=FakeSupabaseClient(),
+            bucket="iv-agent-invoices",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
 
-            summary = migrate_local_data(
-                database_url="postgres://example",
-                calendar_path=calendar_path,
-                default_profile_path=profile_path,
-                profile_dir=profile_dir,
-                event_store_factory=lambda _url: target_event_store,
-                profile_store_factory=lambda _url: target_profile_store,
-            )
+        content, content_type = store.read_capture_bytes(
+            {
+                "invoice_id": "inv-1",
+                "storage_backend": "postgres",
+                "storage_key": "Invoices/session123/inv-1_receipt.jpg",
+                "content_type": "image/jpeg",
+            }
+        )
 
-        self.assertEqual(summary, {"events": 1, "profiles": 2})
-        self.assertEqual(target_event_store.events[0]["id"], "evt-1")
-        self.assertIn("default", target_profile_store.profiles)
-        self.assertIn("child", target_profile_store.profiles)
+        self.assertEqual(content, b"\xff\xd8\xff")
+        self.assertEqual(content_type, "image/jpeg")
+
+    def test_backend_factories_select_supabase_from_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgres://example",
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
+                "IV_AGENT_STORAGE_BACKEND": "postgres",
+                "IV_AGENT_REPORT_ASSET_BACKEND": "supabase",
+                "IV_AGENT_INVOICE_ASSET_BACKEND": "supabase",
+                "IV_AGENT_TEMPLATE_BACKEND": "supabase",
+            },
+        ), patch("iv_agent.storage.SupabaseStorageAssetStore", return_value="asset-store"), patch(
+            "iv_agent.storage.SupabaseStorageInvoiceCaptureStore", return_value="invoice-store"
+        ), patch("iv_agent.storage.SupabaseStorageTemplateStore", return_value="template-store"):
+            self.assertEqual(make_asset_store("output"), "asset-store")
+            self.assertEqual(make_invoice_capture_store("output"), "invoice-store")
+            self.assertEqual(make_template_store(), "template-store")
 
 
 if __name__ == "__main__":

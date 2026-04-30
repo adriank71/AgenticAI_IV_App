@@ -2978,7 +2978,7 @@ function renderInvoiceCapture(capture, index) {
   const fileUrl = capture.file_url || capture.image_url || "#";
   const summary = capture.summary || (isImage ? "Receipt image saved to storage." : "Document saved to storage.");
   const storageLabels = {
-    blob: "Vercel Blob",
+    supabase: "Supabase Storage",
     postgres: "Supabase DB",
     local: "Local",
   };

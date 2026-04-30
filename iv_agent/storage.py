@@ -154,7 +154,7 @@ def _normalize_storage_backend(value: str | None) -> str:
 
 def _normalize_file_backend(value: str | None) -> str:
     normalized = str(value or "auto").strip().lower()
-    if normalized not in {"auto", "local", "postgres", "blob", "supabase"}:
+    if normalized not in {"auto", "local", "postgres", "supabase"}:
         return "auto"
     return normalized
 
@@ -173,21 +173,17 @@ def _report_asset_backend() -> str:
     normalized = _normalize_file_backend(os.environ.get("IV_AGENT_REPORT_ASSET_BACKEND"))
     if normalized == "local":
         return "local"
-    if normalized == "blob":
-        return "blob"
     if normalized == "supabase":
         return "supabase"
     if normalized == "postgres":
         return "postgres"
-    return "blob" if os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip() else "local"
+    return "supabase" if _supabase_storage_configured() else "local"
 
 
 def _invoice_asset_backend() -> str:
     normalized = _normalize_file_backend(os.environ.get("IV_AGENT_INVOICE_ASSET_BACKEND"))
     if normalized == "local":
         return "local"
-    if normalized == "blob":
-        return "blob"
     if normalized == "supabase":
         return "supabase"
     if normalized == "postgres":
@@ -203,6 +199,8 @@ def _template_backend() -> str:
         return "postgres"
     if normalized == "local":
         return "local"
+    if _supabase_storage_configured():
+        return "supabase"
     return "postgres" if _database_backend_enabled() else "local"
 
 
@@ -227,16 +225,6 @@ def _load_psycopg():
 def _connect_postgres(database_url: str):
     psycopg, dict_row = _load_psycopg()
     return psycopg.connect(database_url, row_factory=dict_row)
-
-
-def _load_vercel_blob():
-    try:
-        from vercel.blob import BlobClient, head as blob_head  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "Blob storage requires the vercel Python package. Install dependencies from requirements.txt."
-        ) from exc
-    return BlobClient, blob_head
 
 
 def _load_supabase_client():
@@ -264,6 +252,19 @@ def _supabase_service_role_key() -> str:
     if not value:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is required for Supabase storage.")
     return value
+
+
+def _supabase_storage_configured() -> bool:
+    return bool(_supabase_url_configured() and os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip())
+
+
+def _supabase_url_configured() -> bool:
+    return bool(
+        (
+            os.environ.get("SUPABASE_URL", "")
+            or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
+        ).strip()
+    )
 
 
 def _create_supabase_client():
@@ -347,13 +348,6 @@ def _coerce_bytes(value: Any) -> bytes:
     return bytes(value)
 
 
-def _blob_token() -> str:
-    token = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("BLOB_READ_WRITE_TOKEN is required for Blob storage.")
-    return token
-
-
 def _download_url_bytes(url: str, *, auth_token: str | None = None) -> tuple[bytes, str]:
     headers = {}
     if auth_token:
@@ -375,14 +369,9 @@ def read_binary_reference(reference: str) -> tuple[bytes, str]:
             return file.read(), _guess_content_type(normalized_reference)
 
     if _is_url(normalized_reference):
-        auth_token = None
-        if ".blob.vercel-storage.com" in urllib.parse.urlparse(normalized_reference).netloc:
-            auth_token = _blob_token()
-        return _download_url_bytes(normalized_reference, auth_token=auth_token)
+        return _download_url_bytes(normalized_reference)
 
-    _, blob_head = _load_vercel_blob()
-    blob_details = blob_head(normalized_reference, token=_blob_token())
-    return _download_url_bytes(blob_details.url, auth_token=_blob_token())
+    raise FileNotFoundError(normalized_reference)
 
 
 @contextmanager
@@ -444,54 +433,6 @@ class LocalFileAssetStore:
     def read_bytes(self, *, storage_key: str, storage_url: str | None = None) -> tuple[bytes, str]:
         with open(storage_key, "rb") as file:
             return file.read(), _guess_content_type(storage_key, fallback="application/pdf")
-
-
-class VercelBlobAssetStore:
-    def __init__(self, token: str | None = None):
-        self._token = str(token or os.environ.get("BLOB_READ_WRITE_TOKEN", "")).strip()
-        if not self._token:
-            raise RuntimeError("BLOB_READ_WRITE_TOKEN is required for Blob storage.")
-
-    @property
-    def backend_name(self) -> str:
-        return "blob"
-
-    def store_report(
-        self,
-        *,
-        month: str,
-        report_id: str,
-        file_name: str,
-        content: bytes,
-        content_type: str,
-    ) -> dict[str, Any]:
-        BlobClient, _ = _load_vercel_blob()
-        client = BlobClient(token=self._token)
-        safe_file_name = _sanitize_storage_name(file_name)
-        report_prefix = str(os.environ.get("IV_AGENT_REPORTS_BLOB_PREFIX", "reports") or "reports").strip("/")
-        pathname = "/".join(part for part in (report_prefix, month, f"{report_id}_{safe_file_name}") if part)
-        uploaded_blob = client.put(
-            pathname,
-            content,
-            access="private",
-            content_type=content_type,
-            overwrite=True,
-        )
-        return {
-            "storage_key": uploaded_blob.pathname,
-            "storage_url": uploaded_blob.url,
-            "storage_download_url": uploaded_blob.download_url,
-            "content_type": uploaded_blob.content_type or content_type,
-            "content_size": len(content),
-        }
-
-    def read_bytes(self, *, storage_key: str, storage_url: str | None = None) -> tuple[bytes, str]:
-        resolved_url = storage_url
-        if not resolved_url:
-            _, blob_head = _load_vercel_blob()
-            blob_details = blob_head(storage_key, token=self._token)
-            resolved_url = blob_details.url
-        return _download_url_bytes(resolved_url, auth_token=self._token)
 
 
 class PostgresAssetStore:
@@ -1236,6 +1177,14 @@ class PostgresReportStore:
         }
 
     def read_report_bytes(self, report: dict[str, Any]) -> tuple[bytes, str]:
+        if report.get("storage_backend") == "postgres" and self._asset_store.backend_name != "postgres":
+            return PostgresAssetStore(
+                self._database_url,
+                connection_factory=self._connection_factory,
+            ).read_bytes(
+                storage_key=report["storage_key"],
+                storage_url=report.get("storage_url"),
+            )
         return self._asset_store.read_bytes(
             storage_key=report["storage_key"],
             storage_url=report.get("storage_url"),
@@ -1319,106 +1268,6 @@ class LocalInvoiceCaptureStore:
     def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
         with open(capture["storage_key"], "rb") as file:
             return file.read(), capture.get("content_type") or _guess_content_type(capture["storage_key"], "image/jpeg")
-
-
-class BlobInvoiceCaptureStore:
-    def __init__(self, token: str | None = None):
-        self._token = str(token or os.environ.get("BLOB_READ_WRITE_TOKEN", "")).strip()
-        if not self._token:
-            raise RuntimeError("BLOB_READ_WRITE_TOKEN is required for Blob storage.")
-        self._prefix = str(os.environ.get("IV_AGENT_INVOICES_BLOB_PREFIX", "Invoices") or "Invoices").strip("/")
-
-    def _client(self):
-        BlobClient, _ = _load_vercel_blob()
-        return BlobClient(token=self._token)
-
-    def _session_prefix(self, sid: str) -> str:
-        safe_sid = sanitize_invoice_sid(sid)
-        return "/".join(part for part in (self._prefix, safe_sid) if part)
-
-    def _metadata_key(self, sid: str, invoice_id: str) -> str:
-        return f"{self._session_prefix(sid)}/{invoice_id}.json"
-
-    def save_capture(
-        self,
-        *,
-        sid: str,
-        file_name: str,
-        content: bytes,
-        content_type: str,
-        fields: dict[str, Any] | None = None,
-        extraction_error: str | None = None,
-    ) -> dict[str, Any]:
-        safe_sid = sanitize_invoice_sid(sid)
-        safe_file_name = _sanitize_storage_name(file_name)
-        invoice_id = str(uuid.uuid4())
-        storage_key = f"{self._session_prefix(safe_sid)}/{invoice_id}_{safe_file_name}"
-        client = self._client()
-
-        uploaded_blob = client.put(
-            storage_key,
-            content,
-            access="private",
-            content_type=content_type,
-            overwrite=True,
-        )
-        record = {
-            "invoice_id": invoice_id,
-            "sid": safe_sid,
-            "file_name": safe_file_name,
-            "storage_backend": "blob",
-            "storage_key": uploaded_blob.pathname,
-            "storage_url": uploaded_blob.url,
-            "content_type": uploaded_blob.content_type or content_type,
-            "content_size": len(content),
-            "fields": fields or None,
-            "extraction_error": extraction_error or None,
-            "folder_path": self._session_prefix(safe_sid),
-            "created_at": utcnow_iso(),
-            "updated_at": utcnow_iso(),
-        }
-        client.put(
-            self._metadata_key(safe_sid, invoice_id),
-            json.dumps(record, ensure_ascii=False).encode("utf-8"),
-            access="private",
-            content_type="application/json",
-            overwrite=True,
-        )
-        return record
-
-    def list_captures(self, sid: str) -> list[dict[str, Any]]:
-        client = self._client()
-        prefix = f"{self._session_prefix(sid)}/"
-        captures: list[dict[str, Any]] = []
-
-        for blob in client.iter_objects(prefix=prefix):
-            if not str(blob.pathname).endswith(".json"):
-                continue
-            metadata = client.get(blob.pathname, access="private")
-            if metadata.status_code != 200:
-                continue
-            captures.append(json.loads(metadata.content.decode("utf-8")))
-
-        captures.sort(key=lambda capture: str(capture.get("created_at", "")), reverse=True)
-        return captures
-
-    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
-        metadata_key = self._metadata_key(sid, invoice_id)
-        client = self._client()
-        try:
-            metadata = client.get(metadata_key, access="private")
-        except Exception:
-            return None
-        if metadata.status_code != 200:
-            return None
-        return json.loads(metadata.content.decode("utf-8"))
-
-    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
-        client = self._client()
-        blob = client.get(capture["storage_key"], access="private")
-        if blob.status_code != 200:
-            raise FileNotFoundError(capture["storage_key"])
-        return blob.content, blob.content_type or capture.get("content_type") or "image/jpeg"
 
 
 class PostgresInvoiceCaptureStore:
@@ -1691,7 +1540,7 @@ class SupabaseStorageInvoiceCaptureStore:
                     )
                     """
                 )
-                cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'postgres'")
+                cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'supabase'")
                 cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_bucket TEXT")
                 cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_url TEXT")
                 cursor.execute(
@@ -1861,6 +1710,17 @@ class SupabaseStorageInvoiceCaptureStore:
 
     def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
         storage_key = capture["storage_key"]
+        if capture.get("storage_backend") == "postgres":
+            with self._connection_factory() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT content, content_type FROM invoice_captures WHERE invoice_id = %s LIMIT 1",
+                        (capture["invoice_id"],),
+                    )
+                    row = cursor.fetchone()
+            if not row:
+                raise FileNotFoundError(capture["invoice_id"])
+            return _coerce_bytes(row["content"]), row.get("content_type") or capture.get("content_type") or "image/jpeg"
         content = _supabase_download(self._client, bucket=self._bucket, path=storage_key)
         return content, capture.get("content_type") or _guess_content_type(storage_key, "image/jpeg")
 
@@ -1877,8 +1737,6 @@ def make_asset_store(output_dir: str) -> AssetStore:
         return SupabaseStorageAssetStore()
     if backend == "postgres":
         return PostgresAssetStore(_database_url())
-    if backend == "blob":
-        return VercelBlobAssetStore()
     return LocalFileAssetStore(output_dir)
 
 
@@ -1895,8 +1753,6 @@ def make_invoice_capture_store(output_dir: str) -> InvoiceCaptureStore:
         return SupabaseStorageInvoiceCaptureStore(_database_url())
     if backend == "postgres":
         return PostgresInvoiceCaptureStore(_database_url())
-    if backend == "blob":
-        return BlobInvoiceCaptureStore()
     return LocalInvoiceCaptureStore(output_dir)
 
 
