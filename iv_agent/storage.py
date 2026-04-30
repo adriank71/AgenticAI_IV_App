@@ -304,19 +304,30 @@ def _supabase_upload(
     content_type: str,
     upsert: bool = True,
 ) -> None:
-    client.storage.from_(bucket).upload(
-        path=path,
-        file=content,
-        file_options={
-            "content-type": content_type or "application/octet-stream",
-            "cache-control": "3600",
-            "upsert": "true" if upsert else "false",
-        },
-    )
+    try:
+        client.storage.from_(bucket).upload(
+            path=path,
+            file=content,
+            file_options={
+                "content-type": content_type or "application/octet-stream",
+                "cache-control": "3600",
+                "upsert": "true" if upsert else "false",
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Supabase Storage upload failed for bucket '{bucket}'. "
+            "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files."
+        ) from exc
 
 
 def _supabase_download(client: Any, *, bucket: str, path: str) -> bytes:
-    result = client.storage.from_(bucket).download(path)
+    try:
+        result = client.storage.from_(bucket).download(path)
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"Supabase Storage object not available in bucket '{bucket}': {path}"
+        ) from exc
     return _coerce_bytes(result)
 
 

@@ -47,7 +47,7 @@
       </nav>
 
       <div class="app-nav-footer">
-        <button class="nav-aux" type="button">
+        <button id="open-settings-view" class="nav-aux" type="button">
           <span class="material-symbols-outlined">settings</span>
           <span>Settings</span>
         </button>
@@ -352,6 +352,93 @@
                 </div>
               </div>
             </article>
+          </div>
+        </section>
+
+        <section id="view-settings" class="app-view" data-view="settings">
+          <div class="settings-shell">
+            <section class="settings-panel glass-panel">
+              <div class="settings-header">
+                <div>
+                  <p class="eyebrow">Profile</p>
+                  <h2 class="settings-title">Settings</h2>
+                </div>
+                <span id="profile-save-status" class="status-pill">Not loaded</span>
+              </div>
+              <form id="profile-form" class="profile-form">
+                <div class="profile-grid">
+                  <section class="profile-group">
+                    <p class="section-title">Insured Person</p>
+                    <label>
+                      <span>Full name</span>
+                      <input data-profile-path="insuredPerson.fullName" type="text" autocomplete="name" />
+                    </label>
+                    <label>
+                      <span>AHV number</span>
+                      <input data-profile-path="insuredPerson.ahvNumber" type="text" />
+                    </label>
+                    <label>
+                      <span>Street</span>
+                      <input data-profile-path="insuredPerson.street" type="text" autocomplete="street-address" />
+                    </label>
+                    <div class="profile-inline-fields">
+                      <label>
+                        <span>ZIP</span>
+                        <input data-profile-path="insuredPerson.zip" type="text" autocomplete="postal-code" />
+                      </label>
+                      <label>
+                        <span>City</span>
+                        <input data-profile-path="insuredPerson.city" type="text" autocomplete="address-level2" />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section class="profile-group">
+                    <p class="section-title">Invoice Issuer</p>
+                    <label>
+                      <span>Full name</span>
+                      <input data-profile-path="invoiceIssuer.fullName" type="text" autocomplete="name" />
+                    </label>
+                    <label>
+                      <span>Email</span>
+                      <input data-profile-path="invoiceIssuer.email" type="email" autocomplete="email" />
+                    </label>
+                    <label>
+                      <span>Phone</span>
+                      <input data-profile-path="invoiceIssuer.phone" type="tel" autocomplete="tel" />
+                    </label>
+                    <label class="profile-checkbox">
+                      <input id="profile-same-as-insured" data-profile-path="invoiceIssuer.sameAsInsuredPerson" type="checkbox" />
+                      <span>Same as insured person</span>
+                    </label>
+                  </section>
+
+                  <section class="profile-group">
+                    <p class="section-title">Billing</p>
+                    <label>
+                      <span>IBAN</span>
+                      <input data-profile-path="billing.iban" type="text" />
+                    </label>
+                    <label>
+                      <span>Reference number</span>
+                      <input data-profile-path="billing.referenceNumber" type="text" />
+                    </label>
+                    <label>
+                      <span>GLN</span>
+                      <input data-profile-path="billing.gln" type="text" />
+                    </label>
+                    <label>
+                      <span>Account holder</span>
+                      <input data-profile-path="billing.accountHolderFullName" type="text" />
+                    </label>
+                  </section>
+                </div>
+                <div class="settings-actions">
+                  <button id="reload-profile" class="secondary-button" type="button">Reload</button>
+                  <button id="save-profile" class="primary-button" type="submit">Save Profile</button>
+                </div>
+              </form>
+            </section>
           </div>
         </section>
       </main>

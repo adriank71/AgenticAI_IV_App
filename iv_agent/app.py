@@ -340,6 +340,15 @@ def load_profile_payload(profile_id: str | None) -> dict:
     raise FileNotFoundError("Profile not found")
 
 
+def save_profile_payload(profile_id: str | None, payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body is required")
+    profile_store = make_profile_store(DEFAULT_PROFILE_PATH, PROFILE_DIR)
+    target_profile_id = profile_id or "default"
+    profile_store.upsert_profile(target_profile_id, payload)
+    return payload
+
+
 def build_report_download_path(report_record: dict) -> str:
     return f"/api/reports/download/{report_record['report_id']}/{report_record['file_name']}"
 
@@ -742,6 +751,48 @@ def api_get_hours():
                 "assistant_breakdown": get_assistant_hours_breakdown(month),
             }
         )
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+
+
+@app.route("/api/profile", methods=["GET", "PUT"])
+def api_profile():
+    profile_id = request.args.get("profile_id", "default").strip() or "default"
+    try:
+        if request.method == "GET":
+            return jsonify({"profile_id": profile_id, "profile": load_profile_payload(profile_id)})
+
+        payload = get_json_payload(required=True)
+        saved_profile = save_profile_payload(profile_id, payload)
+        return jsonify({"profile_id": profile_id, "profile": saved_profile, "saved": True})
+    except FileNotFoundError:
+        return json_error("Profile not found", 404)
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except Exception as exc:
+        logger.exception("Profile API failed")
+        return json_error(f"Failed to save profile: {exc}", 500)
+
+
+@app.get("/api/calendar-data")
+def api_calendar_data():
+    profile_id = request.args.get("profile_id", "default").strip() or "default"
+    try:
+        month = parse_month(request.args.get("month", "").strip())
+        month_events = get_events(month)
+        return jsonify(
+            {
+                "profile_id": profile_id,
+                "profile": load_profile_payload(profile_id),
+                "month": month,
+                "events": month_events,
+                "total_hours": get_assistant_hours(month),
+                "assistant_breakdown": get_assistant_hours_breakdown(month),
+                "reminders": reminders_module.list_reminders(),
+            }
+        )
+    except FileNotFoundError:
+        return json_error("Profile not found", 404)
     except ValueError as exc:
         return json_error(str(exc), 400)
 
@@ -1242,6 +1293,9 @@ def api_invoices_extract(sid: str):
         return capture_invoice(sid, get_json_payload(required=True))
     except ValueError as exc:
         return json_error(str(exc), 400)
+    except RuntimeError as exc:
+        logger.error("Invoice capture storage error: %s", exc)
+        return json_error(f"Failed to store invoice capture: {exc}", 503)
     except Exception as exc:
         logger.exception("Unexpected invoice capture error")
         return json_error(f"Failed to store invoice capture: {exc}", 500)
@@ -1253,6 +1307,9 @@ def api_invoices_capture(sid: str):
         return capture_invoice(sid, get_json_payload(required=True))
     except ValueError as exc:
         return json_error(str(exc), 400)
+    except RuntimeError as exc:
+        logger.error("Invoice capture storage error: %s", exc)
+        return json_error(f"Failed to store invoice capture: {exc}", 503)
     except Exception as exc:
         logger.exception("Unexpected invoice capture error")
         return json_error(f"Failed to store invoice capture: {exc}", 500)

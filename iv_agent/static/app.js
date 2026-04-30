@@ -34,6 +34,7 @@ const appViewTitleMap = {
   adviser: "IV-Adviser",
   community: "Community",
   reports: "File Storage",
+  settings: "Settings",
 };
 
 const communityChannelTitleMap = {
@@ -115,6 +116,8 @@ const state = {
   notificationsOpen: false,
   communityMessages: [],
   aiStatus: null,
+  profile: null,
+  profileLoaded: false,
 };
 
 const elements = {
@@ -229,6 +232,11 @@ const elements = {
   communityChannelButtons: document.querySelectorAll("[data-community-channel]"),
   communityTopicTitle: document.getElementById("community-topic-title"),
   communityCount: document.getElementById("community-count"),
+  settingsButton: document.getElementById("open-settings-view"),
+  profileForm: document.getElementById("profile-form"),
+  profileInputs: document.querySelectorAll("[data-profile-path]"),
+  profileSaveStatus: document.getElementById("profile-save-status"),
+  reloadProfileButton: document.getElementById("reload-profile"),
 };
 
 function formatMonth(date) {
@@ -513,6 +521,84 @@ function showError(message) {
   state.errorTimer = window.setTimeout(() => {
     elements.errorBanner.classList.add("hidden");
   }, 4000);
+}
+
+function getNestedValue(source, path) {
+  return path.split(".").reduce((value, key) => {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    return value[key];
+  }, source);
+}
+
+function setNestedValue(target, path, value) {
+  const parts = path.split(".");
+  let cursor = target;
+  parts.slice(0, -1).forEach((key) => {
+    if (!cursor[key] || typeof cursor[key] !== "object" || Array.isArray(cursor[key])) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key];
+  });
+  cursor[parts[parts.length - 1]] = value;
+}
+
+function syncProfileStatus(message, variant = "") {
+  if (!elements.profileSaveStatus) {
+    return;
+  }
+  elements.profileSaveStatus.textContent = message;
+  elements.profileSaveStatus.dataset.variant = variant;
+}
+
+function populateProfileForm(profile) {
+  elements.profileInputs.forEach((input) => {
+    const value = getNestedValue(profile, input.dataset.profilePath || "");
+    if (input.type === "checkbox") {
+      input.checked = Boolean(value);
+    } else {
+      input.value = value == null ? "" : String(value);
+    }
+  });
+}
+
+function collectProfileForm() {
+  const profile = JSON.parse(JSON.stringify(state.profile || {}));
+  elements.profileInputs.forEach((input) => {
+    const path = input.dataset.profilePath || "";
+    if (!path) {
+      return;
+    }
+    setNestedValue(profile, path, input.type === "checkbox" ? input.checked : input.value.trim());
+  });
+  return profile;
+}
+
+async function loadProfileForm({ force = false } = {}) {
+  if (state.profileLoaded && !force) {
+    return;
+  }
+  syncProfileStatus("Loading");
+  const payload = await apiFetch("/api/profile?profile_id=default");
+  state.profile = payload.profile || {};
+  state.profileLoaded = true;
+  populateProfileForm(state.profile);
+  syncProfileStatus("Loaded", "success");
+}
+
+async function submitProfileForm(event) {
+  event.preventDefault();
+  const nextProfile = collectProfileForm();
+  syncProfileStatus("Saving");
+  const payload = await apiFetch("/api/profile?profile_id=default", {
+    method: "PUT",
+    body: JSON.stringify(nextProfile),
+  });
+  state.profile = payload.profile || nextProfile;
+  state.profileLoaded = true;
+  populateProfileForm(state.profile);
+  syncProfileStatus("Saved", "success");
 }
 
 function getOpenAiStatus() {
@@ -847,6 +933,11 @@ async function switchAppView(viewName) {
     button.classList.toggle("is-active", isActive);
     button.setAttribute("aria-current", isActive ? "page" : "false");
   });
+  if (elements.settingsButton) {
+    const isSettings = viewName === "settings";
+    elements.settingsButton.classList.toggle("is-active", isSettings);
+    elements.settingsButton.setAttribute("aria-current", isSettings ? "page" : "false");
+  }
 
   elements.viewSections.forEach((section) => {
     section.classList.toggle("is-active", section.dataset.view === viewName);
@@ -883,6 +974,10 @@ async function switchAppView(viewName) {
     if (elements.communityInput) {
       elements.communityInput.focus();
     }
+  }
+
+  if (viewName === "settings") {
+    await loadProfileForm();
   }
 }
 
@@ -2707,6 +2802,19 @@ function bindEvents() {
       switchAppView(button.dataset.viewTarget).catch(() => {});
     });
   });
+  if (elements.settingsButton) {
+    elements.settingsButton.addEventListener("click", () => {
+      switchAppView("settings").catch(() => {});
+    });
+  }
+  if (elements.profileForm) {
+    elements.profileForm.addEventListener("submit", submitProfileForm);
+  }
+  if (elements.reloadProfileButton) {
+    elements.reloadProfileButton.addEventListener("click", () => {
+      loadProfileForm({ force: true }).catch(() => {});
+    });
+  }
 
   elements.chatChips.forEach((button) => {
     button.addEventListener("click", () => {

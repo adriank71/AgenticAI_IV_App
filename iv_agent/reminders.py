@@ -3,7 +3,12 @@ import os
 import uuid
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol
+
+try:
+    from .storage import _connect_postgres
+except ImportError:
+    from storage import _connect_postgres
 
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +26,14 @@ VALID_SCHEDULES = {"month_end", "weekly_sun", "weekly_mon", "daily", "once"}
 DEFAULT_TIMEZONE = "Europe/Berlin"
 
 
+class ReminderStore(Protocol):
+    def load_all(self) -> List[Dict[str, Any]]:
+        ...
+
+    def replace_all(self, items: List[Dict[str, Any]]) -> int:
+        ...
+
+
 def _now(tz_name: str | None = None) -> datetime:
     tz = _resolve_tz(tz_name)
     return datetime.now(tz)
@@ -36,15 +49,15 @@ def _resolve_tz(tz_name: str | None):
         return ZoneInfo(DEFAULT_TIMEZONE)
 
 
-def _ensure_storage() -> None:
+def _ensure_json_storage() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(REMINDERS_PATH):
         with open(REMINDERS_PATH, "w", encoding="utf-8") as file:
             json.dump([], file)
 
 
-def _load_all() -> List[Dict[str, Any]]:
-    _ensure_storage()
+def _load_json_all() -> List[Dict[str, Any]]:
+    _ensure_json_storage()
     try:
         with open(REMINDERS_PATH, "r", encoding="utf-8") as file:
             data = json.load(file)
@@ -53,10 +66,197 @@ def _load_all() -> List[Dict[str, Any]]:
         return []
 
 
-def _save_all(items: List[Dict[str, Any]]) -> None:
-    _ensure_storage()
+def _save_json_all(items: List[Dict[str, Any]]) -> None:
+    _ensure_json_storage()
     with open(REMINDERS_PATH, "w", encoding="utf-8") as file:
         json.dump(items, file, indent=2)
+
+
+class JsonReminderStore:
+    def load_all(self) -> List[Dict[str, Any]]:
+        return _load_json_all()
+
+    def replace_all(self, items: List[Dict[str, Any]]) -> int:
+        _save_json_all(items)
+        return len(items)
+
+
+class PostgresReminderStore:
+    def __init__(
+        self,
+        database_url: str,
+        connection_factory: Callable[[], Any] | None = None,
+    ):
+        self._database_url = database_url
+        self._connection_factory = connection_factory or (lambda: _connect_postgres(database_url))
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        reminder_id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        schedule TEXT NOT NULL,
+                        note TEXT NOT NULL DEFAULT '',
+                        run_time TEXT NOT NULL DEFAULT '09:00',
+                        run_date TEXT NOT NULL DEFAULT '',
+                        timezone TEXT NOT NULL DEFAULT 'Europe/Berlin',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        last_run_at TIMESTAMPTZ,
+                        next_run_at TIMESTAMPTZ,
+                        last_run_status TEXT,
+                        last_run_message TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS reminders_next_run_idx ON reminders (status, next_run_at)"
+                )
+
+    def _row_to_reminder(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        def iso(value: Any) -> str | None:
+            if value is None:
+                return None
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+            return str(value)
+
+        return {
+            "id": row["reminder_id"],
+            "created_at": iso(row.get("created_at")),
+            "last_run_at": iso(row.get("last_run_at")),
+            "next_run_at": iso(row.get("next_run_at")),
+            "status": row.get("status") or "active",
+            "title": row.get("title") or "",
+            "action": row.get("action") or "notify",
+            "schedule": row.get("schedule") or "month_end",
+            "note": row.get("note") or "",
+            "run_time": row.get("run_time") or "09:00",
+            "run_date": row.get("run_date") or "",
+            "timezone": row.get("timezone") or DEFAULT_TIMEZONE,
+            "last_run_status": row.get("last_run_status"),
+            "last_run_message": row.get("last_run_message"),
+        }
+
+    def _upsert_reminder(self, cursor, item: Dict[str, Any]) -> None:
+        cursor.execute(
+            """
+            INSERT INTO reminders (
+                reminder_id,
+                title,
+                action,
+                schedule,
+                note,
+                run_time,
+                run_date,
+                timezone,
+                status,
+                last_run_at,
+                next_run_at,
+                last_run_status,
+                last_run_message,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s::timestamptz,
+                %s::timestamptz,
+                %s, %s,
+                %s::timestamptz,
+                NOW()
+            )
+            ON CONFLICT (reminder_id)
+            DO UPDATE SET
+                title = EXCLUDED.title,
+                action = EXCLUDED.action,
+                schedule = EXCLUDED.schedule,
+                note = EXCLUDED.note,
+                run_time = EXCLUDED.run_time,
+                run_date = EXCLUDED.run_date,
+                timezone = EXCLUDED.timezone,
+                status = EXCLUDED.status,
+                last_run_at = EXCLUDED.last_run_at,
+                next_run_at = EXCLUDED.next_run_at,
+                last_run_status = EXCLUDED.last_run_status,
+                last_run_message = EXCLUDED.last_run_message,
+                updated_at = NOW()
+            """,
+            (
+                item["id"],
+                item.get("title") or "",
+                item.get("action") or "notify",
+                item.get("schedule") or "month_end",
+                item.get("note") or "",
+                item.get("run_time") or "09:00",
+                item.get("run_date") or "",
+                item.get("timezone") or DEFAULT_TIMEZONE,
+                item.get("status") or "active",
+                item.get("last_run_at"),
+                item.get("next_run_at"),
+                item.get("last_run_status"),
+                item.get("last_run_message"),
+                item.get("created_at") or _now(item.get("timezone")).isoformat(),
+            ),
+        )
+
+    def load_all(self) -> List[Dict[str, Any]]:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        reminder_id,
+                        title,
+                        action,
+                        schedule,
+                        note,
+                        run_time,
+                        run_date,
+                        timezone,
+                        status,
+                        last_run_at,
+                        next_run_at,
+                        last_run_status,
+                        last_run_message,
+                        created_at,
+                        updated_at
+                    FROM reminders
+                    ORDER BY created_at ASC
+                    """
+                )
+                rows = cursor.fetchall()
+        return [self._row_to_reminder(row) for row in rows]
+
+    def replace_all(self, items: List[Dict[str, Any]]) -> int:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM reminders")
+                for item in items:
+                    self._upsert_reminder(cursor, item)
+        return len(items)
+
+
+def get_reminder_store() -> ReminderStore:
+    backend = str(os.environ.get("IV_AGENT_STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if backend == "local" or not database_url:
+        return JsonReminderStore()
+    return PostgresReminderStore(database_url)
+
+
+def _load_all() -> List[Dict[str, Any]]:
+    return get_reminder_store().load_all()
+
+
+def _save_all(items: List[Dict[str, Any]]) -> None:
+    get_reminder_store().replace_all(items)
 
 
 def _last_day_of_month(year: int, month: int) -> int:

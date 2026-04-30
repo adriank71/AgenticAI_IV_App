@@ -1695,6 +1695,99 @@ textarea:focus-visible,
   line-height: 1.45;
 }
 
+.settings-shell {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.settings-panel {
+  display: grid;
+  gap: 22px;
+  padding: 24px;
+}
+
+.settings-header,
+.settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.settings-title {
+  margin: 4px 0 0;
+  font-size: 1.6rem;
+}
+
+.profile-form {
+  display: grid;
+  gap: 18px;
+}
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.profile-group {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.profile-group label {
+  display: grid;
+  gap: 6px;
+}
+
+.profile-group label span {
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.profile-group input {
+  min-height: 42px;
+  width: 100%;
+  padding: 0 11px;
+  background: #fff;
+}
+
+.profile-inline-fields {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 10px;
+}
+
+.profile-checkbox {
+  min-height: 42px;
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 9px !important;
+}
+
+.profile-checkbox input {
+  width: 18px;
+  min-height: 18px;
+}
+
+.status-pill[data-variant="success"] {
+  background: var(--assistant-bg);
+  color: var(--assistant-text);
+  border-color: var(--assistant-border);
+}
+
+@media (max-width: 980px) {
+  .profile-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 640px) {
   .storage-options,
   .document-row {
@@ -2036,6 +2129,11 @@ body {
 .nav-aux:hover {
   background: rgba(255, 255, 255, 0.75);
   color: var(--md3-on-surface);
+}
+
+.nav-aux.is-active {
+  background: #fde8e6;
+  color: var(--accent-strong);
 }
 
 .layout-main {

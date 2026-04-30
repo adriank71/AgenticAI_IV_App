@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from iv_agent.calendar_manager import PostgresEventStore
+from iv_agent import migrate_local_data
+from iv_agent.reminders import PostgresReminderStore
 from iv_agent.storage import (
     LocalInvoiceCaptureStore,
     PostgresAssetStore,
@@ -202,6 +204,42 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(events[0]["id"], "evt-1")
         self.assertEqual(events[0]["assistant_hours"]["koerperpflege"], 1.0)
         self.assertTrue(any("WHERE TO_CHAR(event_date, 'YYYY-MM') = %s" in query for query, _ in cursor.statements))
+
+    def test_postgres_reminder_store_reads_structured_rows(self):
+        cursor = RecordingCursor(
+            fetchall_results=[
+                [
+                    {
+                        "reminder_id": "rem-1",
+                        "title": "Month-end report",
+                        "action": "generate_assistenzbeitrag",
+                        "schedule": "month_end",
+                        "note": "",
+                        "run_time": "09:00",
+                        "run_date": "",
+                        "timezone": "Europe/Berlin",
+                        "status": "active",
+                        "last_run_at": None,
+                        "next_run_at": "2026-05-31T09:00:00+02:00",
+                        "last_run_status": None,
+                        "last_run_message": None,
+                        "created_at": "2026-04-30T10:00:00+00:00",
+                        "updated_at": "2026-04-30T10:00:00+00:00",
+                    }
+                ]
+            ]
+        )
+        store = PostgresReminderStore(
+            "postgres://example",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        reminders = store.load_all()
+
+        self.assertEqual(reminders[0]["id"], "rem-1")
+        self.assertEqual(reminders[0]["action"], "generate_assistenzbeitrag")
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS reminders" in query for query, _ in cursor.statements))
+        self.assertTrue(any("FROM reminders" in query for query, _ in cursor.statements))
 
     def test_postgres_report_store_saves_metadata_and_uses_asset_store(self):
         cursor = RecordingCursor()
@@ -471,6 +509,29 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(content, b"\xff\xd8\xff")
         self.assertEqual(content_type, "image/jpeg")
 
+    def test_supabase_upload_error_mentions_required_bucket_and_service_key(self):
+        class FailingBucket:
+            def upload(self, **kwargs):
+                raise RuntimeError("bucket not found")
+
+        class FailingStorage:
+            def from_(self, bucket):
+                return FailingBucket()
+
+        class FailingClient:
+            storage = FailingStorage()
+
+        store = SupabaseStorageAssetStore(client=FailingClient(), bucket="iv-agent-reports")
+
+        with self.assertRaisesRegex(RuntimeError, "SUPABASE_SERVICE_ROLE_KEY.*private bucket"):
+            store.store_report(
+                month="2026-04",
+                report_id="rpt-1",
+                file_name="report.pdf",
+                content=b"%PDF\n",
+                content_type="application/pdf",
+            )
+
     def test_backend_factories_select_supabase_from_env(self):
         with patch.dict(
             os.environ,
@@ -489,6 +550,27 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(make_asset_store("output"), "asset-store")
             self.assertEqual(make_invoice_capture_store("output"), "invoice-store")
             self.assertEqual(make_template_store(), "template-store")
+
+    def test_env_loader_handles_bom_and_dry_run_helpers_do_not_connect(self):
+        with workspace_tempdir() as temp_dir:
+            env_path = os.path.join(temp_dir, ".env.local")
+            with open(env_path, "w", encoding="utf-8-sig") as file:
+                file.write("DATABASE_URL=postgres://example\nSUPABASE_SERVICE_ROLE_KEY=\n")
+
+            with patch.dict(os.environ, {}, clear=True):
+                loaded = migrate_local_data.load_env_file(env_path)
+                self.assertEqual(loaded["DATABASE_URL"], "postgres://example")
+                self.assertEqual(os.environ["DATABASE_URL"], "postgres://example")
+
+            with patch.object(migrate_local_data, "_connect_postgres", side_effect=AssertionError("should not connect")):
+                migrate_local_data.ensure_tables("postgres://example", dry_run=True)
+                migrate_local_data.seed_database(
+                    "postgres://example",
+                    {"insuredPerson": {"fullName": "Example"}},
+                    [],
+                    [],
+                    dry_run=True,
+                )
 
 
 if __name__ == "__main__":

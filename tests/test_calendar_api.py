@@ -31,6 +31,61 @@ def isolated_calendar_storage():
 
 
 @contextmanager
+def isolated_profile_storage():
+    base_tmp = os.path.join(os.getcwd(), "output", "test_tmp")
+    os.makedirs(base_tmp, exist_ok=True)
+    temp_dir = os.path.join(base_tmp, f"profile_{uuid.uuid4().hex}")
+    os.makedirs(temp_dir, exist_ok=True)
+    profile_path = os.path.join(temp_dir, "profile.json")
+    profile_dir = os.path.join(temp_dir, "profiles")
+    with open(profile_path, "w", encoding="utf-8") as file:
+        json.dump({"insuredPerson": {"fullName": "Initial Name"}}, file)
+    try:
+        with patch.object(app_module, "DEFAULT_PROFILE_PATH", profile_path), patch.object(
+            app_module, "PROFILE_DIR", profile_dir
+        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local"}, clear=False):
+            yield profile_path
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@contextmanager
+def isolated_reminder_storage():
+    base_tmp = os.path.join(os.getcwd(), "output", "test_tmp")
+    os.makedirs(base_tmp, exist_ok=True)
+    temp_dir = os.path.join(base_tmp, f"reminders_{uuid.uuid4().hex}")
+    os.makedirs(temp_dir, exist_ok=True)
+    reminders_path = os.path.join(temp_dir, "reminders.json")
+    with open(reminders_path, "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "id": "rem-1",
+                    "created_at": "2026-04-29T09:00:00+02:00",
+                    "last_run_at": None,
+                    "next_run_at": "2026-04-30T09:00:00+02:00",
+                    "status": "active",
+                    "title": "Month-end report",
+                    "action": "generate_assistenzbeitrag",
+                    "schedule": "month_end",
+                    "note": "",
+                    "run_time": "09:00",
+                    "run_date": "",
+                    "timezone": "Europe/Berlin",
+                }
+            ],
+            file,
+        )
+    try:
+        with patch.object(app_module.reminders_module, "DATA_DIR", temp_dir), patch.object(
+            app_module.reminders_module, "REMINDERS_PATH", reminders_path
+        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local"}, clear=False):
+            yield reminders_path
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@contextmanager
 def passthrough_materialized_path(path, suffix=".pdf"):
     yield path
 
@@ -183,6 +238,53 @@ class CalendarManagerTests(unittest.TestCase):
 
 
 class CalendarApiTests(unittest.TestCase):
+    def test_profile_api_get_and_put_uses_profile_store(self):
+        client = app_module.app.test_client()
+        with isolated_profile_storage():
+            get_response = client.get("/api/profile?profile_id=default")
+            self.assertEqual(get_response.status_code, 200)
+            self.assertEqual(get_response.get_json()["profile"]["insuredPerson"]["fullName"], "Initial Name")
+
+            put_response = client.put(
+                "/api/profile?profile_id=default",
+                json={
+                    "insuredPerson": {"fullName": "Updated Name", "ahvNumber": "756.0000.0000.00"},
+                    "billing": {"iban": "CH00"},
+                },
+            )
+            self.assertEqual(put_response.status_code, 200)
+            self.assertTrue(put_response.get_json()["saved"])
+
+            get_updated_response = client.get("/api/profile?profile_id=default")
+            self.assertEqual(get_updated_response.get_json()["profile"]["insuredPerson"]["fullName"], "Updated Name")
+
+    def test_calendar_data_api_combines_profile_events_hours_and_reminders(self):
+        client = app_module.app.test_client()
+        with isolated_calendar_storage(), isolated_profile_storage(), isolated_reminder_storage():
+            calendar_manager.add_event(
+                date="2026-04-10",
+                time="09:00",
+                end_time="10:00",
+                category="assistant",
+                title="Support",
+                assistant_hours={
+                    "koerperpflege": 1.0,
+                    "mahlzeiten_eingeben": 0.0,
+                    "mahlzeiten_zubereiten": 0.0,
+                    "begleitung_therapie": 0.0,
+                },
+            )
+
+            response = client.get("/api/calendar-data?month=2026-04")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["profile"]["insuredPerson"]["fullName"], "Initial Name")
+        self.assertEqual(len(payload["events"]), 1)
+        self.assertEqual(payload["total_hours"], 1.0)
+        self.assertEqual(payload["assistant_breakdown"]["koerperpflege"], 1.0)
+        self.assertEqual(payload["reminders"][0]["id"], "rem-1")
+
     def test_post_transport_event_persists_transport_fields(self):
         with isolated_calendar_storage():
             client = app_module.app.test_client()
@@ -538,6 +640,31 @@ class CalendarApiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["capture"]["storage_backend"], "supabase")
         self.assertIn("/api/invoices/session123/files/inv-1/phone.jpg", payload["capture"]["file_url"])
+
+    def test_invoice_capture_returns_clear_storage_configuration_error(self):
+        client = app_module.app.test_client()
+
+        class FailingInvoiceStore:
+            def save_capture(self, **kwargs):
+                raise RuntimeError(
+                    "Supabase Storage upload failed for bucket 'iv-agent-invoices'. "
+                    "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files."
+                )
+
+        with patch.object(app_module, "get_invoice_store", return_value=FailingInvoiceStore()), patch.object(
+            app_module, "_call_openai_vision"
+        ):
+            response = client.post(
+                "/api/invoices/session123/capture",
+                json={
+                    "image_base64": "/9j/",
+                    "mime": "image/jpeg",
+                    "file_name": "phone.jpg",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Supabase Storage upload failed", response.get_json()["error"])
 
     def test_scan_url_uses_camera_route_and_scan_redirects(self):
         client = app_module.app.test_client()
