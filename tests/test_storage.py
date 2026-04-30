@@ -4,10 +4,19 @@ import shutil
 import unittest
 import uuid
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 from iv_agent.calendar_manager import JsonEventStore, PostgresEventStore
+from iv_agent.migrate_blob_to_supabase import migrate_invoice_captures, migrate_templates
 from iv_agent.migrate_local_data import migrate_local_data
-from iv_agent.storage import LocalInvoiceCaptureStore, PostgresProfileStore, PostgresReportStore
+from iv_agent.storage import (
+    LocalInvoiceCaptureStore,
+    PostgresAssetStore,
+    PostgresInvoiceCaptureStore,
+    PostgresProfileStore,
+    PostgresReportStore,
+    PostgresTemplateStore,
+)
 
 
 @contextmanager
@@ -25,7 +34,7 @@ def workspace_tempdir():
 class RecordingCursor:
     def __init__(self, fetchone_results=None, fetchall_results=None):
         self.statements = []
-        self.rowcount = 0
+        self.rowcount = 1
         self._fetchone_results = list(fetchone_results or [])
         self._fetchall_results = list(fetchall_results or [])
 
@@ -100,6 +109,39 @@ class CaptureProfileStore:
 
     def upsert_profile(self, profile_id, payload):
         self.profiles[profile_id] = payload
+
+
+class CaptureTemplateStore:
+    def __init__(self):
+        self.templates = {}
+
+    def upsert_template(self, **kwargs):
+        self.templates[kwargs["template_key"]] = kwargs
+
+
+class CaptureInvoiceStore:
+    def __init__(self):
+        self.records = []
+
+    def upsert_capture_record(self, record, *, content, overwrite=False):
+        if any(existing["invoice_id"] == record["invoice_id"] for existing in self.records):
+            return False
+        self.records.append({**record, "content": content})
+        return True
+
+
+class FakeBlobClient:
+    def __init__(self, objects):
+        self.objects = objects
+
+    def get(self, key, access="private"):
+        content = self.objects[key]
+        return SimpleNamespace(status_code=200, content=content, content_type=None)
+
+    def iter_objects(self, prefix):
+        for key in sorted(self.objects):
+            if key.startswith(prefix):
+                yield SimpleNamespace(pathname=key)
 
 
 class StorageTests(unittest.TestCase):
@@ -199,6 +241,157 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(report["type"], "assistenzbeitrag")
         self.assertEqual(asset_store.saved["month"], "2026-04")
         self.assertTrue(any("INSERT INTO reports" in query for query, _ in cursor.statements))
+
+    def test_postgres_template_store_upserts_and_reads_template_bytes(self):
+        cursor = RecordingCursor(
+            fetchone_results=[
+                {
+                    "template_key": "stundenblatt",
+                    "file_name": "Stundenblatt.pdf",
+                    "content_type": "application/pdf",
+                    "content_size": 11,
+                    "checksum_sha256": "abc",
+                    "metadata": {"source": "test"},
+                    "created_at": "2026-04-30T10:00:00+00:00",
+                    "updated_at": "2026-04-30T10:00:00+00:00",
+                },
+                {"content": b"%PDF-test\n", "content_type": "application/pdf"},
+            ]
+        )
+        store = PostgresTemplateStore(
+            "postgres://example",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        saved = store.upsert_template(
+            template_key="stundenblatt",
+            file_name="Stundenblatt.pdf",
+            content=b"%PDF-test\n",
+        )
+        template = store.get_template("stundenblatt")
+        content, content_type = store.read_template_bytes("stundenblatt")
+
+        self.assertEqual(saved["template_key"], "stundenblatt")
+        self.assertEqual(template["file_name"], "Stundenblatt.pdf")
+        self.assertEqual(content, b"%PDF-test\n")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS document_templates" in query for query, _ in cursor.statements))
+        self.assertTrue(any("INSERT INTO document_templates" in query for query, _ in cursor.statements))
+
+    def test_postgres_invoice_capture_store_saves_lists_and_reads_bytes(self):
+        cursor = RecordingCursor(
+            fetchall_results=[
+                [
+                    {
+                        "invoice_id": "inv-1",
+                        "sid": "session123",
+                        "file_name": "receipt.jpg",
+                        "storage_key": "Invoices/session123/inv-1_receipt.jpg",
+                        "content_type": "image/jpeg",
+                        "content_size": 3,
+                        "fields": {"merchant": "Cafe Example"},
+                        "extraction_error": None,
+                        "folder_path": "Invoices/session123",
+                        "created_at": "2026-04-30T10:00:00+00:00",
+                        "updated_at": "2026-04-30T10:00:00+00:00",
+                    }
+                ]
+            ],
+            fetchone_results=[
+                {
+                    "invoice_id": "inv-1",
+                    "sid": "session123",
+                    "file_name": "receipt.jpg",
+                    "storage_key": "Invoices/session123/inv-1_receipt.jpg",
+                    "content_type": "image/jpeg",
+                    "content_size": 3,
+                    "fields": {"merchant": "Cafe Example"},
+                    "extraction_error": None,
+                    "folder_path": "Invoices/session123",
+                    "created_at": "2026-04-30T10:00:00+00:00",
+                    "updated_at": "2026-04-30T10:00:00+00:00",
+                },
+                {"content": b"\xff\xd8\xff", "content_type": "image/jpeg"},
+            ],
+        )
+        store = PostgresInvoiceCaptureStore(
+            "postgres://example",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        saved = store.save_capture(
+            sid="session123",
+            file_name="receipt.jpg",
+            content=b"\xff\xd8\xff",
+            content_type="image/jpeg",
+            fields={"merchant": "Cafe Example"},
+        )
+        listed = store.list_captures("session123")
+        fetched = store.get_capture(sid="session123", invoice_id="inv-1")
+        image_bytes, content_type = store.read_capture_bytes(fetched)
+
+        self.assertEqual(saved["storage_backend"], "postgres")
+        self.assertEqual(listed[0]["fields"]["merchant"], "Cafe Example")
+        self.assertEqual(fetched["storage_backend"], "postgres")
+        self.assertEqual(image_bytes, b"\xff\xd8\xff")
+        self.assertEqual(content_type, "image/jpeg")
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS invoice_captures" in query for query, _ in cursor.statements))
+
+    def test_postgres_asset_store_saves_and_reads_report_bytes(self):
+        cursor = RecordingCursor(fetchone_results=[{"content": b"%PDF-asset\n", "content_type": "application/pdf"}])
+        store = PostgresAssetStore(
+            "postgres://example",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        saved = store.store_report(
+            month="2026-04",
+            report_id="rpt-1",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-asset\n",
+            content_type="application/pdf",
+        )
+        content, content_type = store.read_bytes(storage_key=saved["storage_key"])
+
+        self.assertEqual(saved["storage_key"], "reports/2026-04/rpt-1_Assistenzbeitrag_2026-04.pdf")
+        self.assertEqual(content, b"%PDF-asset\n")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS asset_blobs" in query for query, _ in cursor.statements))
+
+    def test_blob_to_supabase_migration_imports_templates_and_invoice_captures(self):
+        invoice_metadata = {
+            "invoice_id": "inv-1",
+            "sid": "session123",
+            "file_name": "receipt.jpg",
+            "storage_key": "Invoices/session123/inv-1_receipt.jpg",
+            "content_type": "image/jpeg",
+            "fields": {"merchant": "Cafe Example"},
+            "extraction_error": None,
+            "folder_path": "Invoices/session123",
+            "created_at": "2026-04-30T10:00:00+00:00",
+            "updated_at": "2026-04-30T10:00:00+00:00",
+        }
+        client = FakeBlobClient(
+            {
+                "Stundenblatt.pdf": b"%PDF-stundenblatt\n",
+                "Rechnungsvorlage_aL_elektronisch (1).pdf": b"%PDF-rechnung\n",
+                "Invoices/session123/inv-1.json": json.dumps(invoice_metadata).encode("utf-8"),
+                "Invoices/session123/inv-1_receipt.jpg": b"\xff\xd8\xff",
+            }
+        )
+        template_store = CaptureTemplateStore()
+        invoice_store = CaptureInvoiceStore()
+
+        template_count = migrate_templates(client, template_store)
+        invoice_count = migrate_invoice_captures(client, invoice_store)
+        second_invoice_count = migrate_invoice_captures(client, invoice_store)
+
+        self.assertEqual(template_count, 2)
+        self.assertIn("stundenblatt", template_store.templates)
+        self.assertIn("rechnung", template_store.templates)
+        self.assertEqual(invoice_count, 1)
+        self.assertEqual(second_invoice_count, 0)
+        self.assertEqual(invoice_store.records[0]["fields"]["merchant"], "Cafe Example")
 
     def test_migrate_local_data_imports_calendar_and_profiles(self):
         with workspace_tempdir() as temp_dir:

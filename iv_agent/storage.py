@@ -1,4 +1,5 @@
 import json
+import hashlib
 import mimetypes
 import os
 import re
@@ -92,6 +93,25 @@ class AssetStore(Protocol):
         ...
 
 
+class TemplateStore(Protocol):
+    def upsert_template(
+        self,
+        *,
+        template_key: str,
+        file_name: str,
+        content: bytes,
+        content_type: str = "application/pdf",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def get_template(self, template_key: str) -> dict[str, Any] | None:
+        ...
+
+    def read_template_bytes(self, template_key: str) -> tuple[bytes, str]:
+        ...
+
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -132,6 +152,13 @@ def _normalize_storage_backend(value: str | None) -> str:
     return normalized
 
 
+def _normalize_file_backend(value: str | None) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized not in {"auto", "local", "postgres", "blob", "supabase"}:
+        return "auto"
+    return normalized
+
+
 def _database_backend_enabled() -> bool:
     backend = _normalize_storage_backend(os.environ.get("IV_AGENT_STORAGE_BACKEND"))
     if backend == "local":
@@ -143,21 +170,47 @@ def _database_backend_enabled() -> bool:
 
 
 def _report_asset_backend() -> str:
-    normalized = str(os.environ.get("IV_AGENT_REPORT_ASSET_BACKEND", "auto") or "auto").strip().lower()
+    normalized = _normalize_file_backend(os.environ.get("IV_AGENT_REPORT_ASSET_BACKEND"))
     if normalized == "local":
         return "local"
     if normalized == "blob":
         return "blob"
+    if normalized == "supabase":
+        return "supabase"
+    if normalized == "postgres":
+        return "postgres"
     return "blob" if os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip() else "local"
 
 
 def _invoice_asset_backend() -> str:
-    normalized = str(os.environ.get("IV_AGENT_INVOICE_ASSET_BACKEND", "auto") or "auto").strip().lower()
+    normalized = _normalize_file_backend(os.environ.get("IV_AGENT_INVOICE_ASSET_BACKEND"))
     if normalized == "local":
         return "local"
     if normalized == "blob":
         return "blob"
+    if normalized == "supabase":
+        return "supabase"
+    if normalized == "postgres":
+        return "postgres"
     return _report_asset_backend()
+
+
+def _template_backend() -> str:
+    normalized = _normalize_file_backend(os.environ.get("IV_AGENT_TEMPLATE_BACKEND"))
+    if normalized == "supabase":
+        return "supabase"
+    if normalized == "postgres":
+        return "postgres"
+    if normalized == "local":
+        return "local"
+    return "postgres" if _database_backend_enabled() else "local"
+
+
+def _database_url() -> str:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required for Postgres storage.")
+    return database_url
 
 
 def _load_psycopg():
@@ -186,6 +239,86 @@ def _load_vercel_blob():
     return BlobClient, blob_head
 
 
+def _load_supabase_client():
+    try:
+        from supabase import create_client  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "Supabase storage requires the supabase Python package. Install dependencies from requirements.txt."
+        ) from exc
+    return create_client
+
+
+def _supabase_url() -> str:
+    value = (
+        os.environ.get("SUPABASE_URL", "")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
+    ).strip()
+    if not value:
+        raise RuntimeError("SUPABASE_URL is required for Supabase storage.")
+    return value
+
+
+def _supabase_service_role_key() -> str:
+    value = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not value:
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is required for Supabase storage.")
+    return value
+
+
+def _create_supabase_client():
+    create_client = _load_supabase_client()
+    return create_client(_supabase_url(), _supabase_service_role_key())
+
+
+def _supabase_templates_bucket() -> str:
+    return os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "iv-agent-templates").strip() or "iv-agent-templates"
+
+
+def _supabase_reports_bucket() -> str:
+    return os.environ.get("SUPABASE_STORAGE_REPORTS_BUCKET", "iv-agent-reports").strip() or "iv-agent-reports"
+
+
+def _supabase_invoices_bucket() -> str:
+    return os.environ.get("SUPABASE_STORAGE_INVOICES_BUCKET", "iv-agent-invoices").strip() or "iv-agent-invoices"
+
+
+SUPABASE_TEMPLATE_FILES = {
+    "stundenblatt": "Stundenblatt.pdf",
+    "rechnung": "Rechnungsvorlage_aL_elektronisch (1).pdf",
+    "transportkosten": "AK_Formular_EL_Transportkosten.pdf",
+}
+
+
+def _supabase_storage_url(bucket: str, path: str) -> str:
+    return f"supabase://{bucket}/{path.lstrip('/')}"
+
+
+def _supabase_upload(
+    client: Any,
+    *,
+    bucket: str,
+    path: str,
+    content: bytes,
+    content_type: str,
+    upsert: bool = True,
+) -> None:
+    client.storage.from_(bucket).upload(
+        path=path,
+        file=content,
+        file_options={
+            "content-type": content_type or "application/octet-stream",
+            "cache-control": "3600",
+            "upsert": "true" if upsert else "false",
+        },
+    )
+
+
+def _supabase_download(client: Any, *, bucket: str, path: str) -> bytes:
+    result = client.storage.from_(bucket).download(path)
+    return _coerce_bytes(result)
+
+
 def _is_url(reference: str) -> bool:
     parsed = urllib.parse.urlparse(str(reference or "").strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
@@ -194,6 +327,24 @@ def _is_url(reference: str) -> bool:
 def _guess_content_type(reference: str, fallback: str = "application/octet-stream") -> str:
     content_type, _ = mimetypes.guess_type(reference)
     return content_type or fallback
+
+
+def _coerce_json(value: Any, fallback: Any = None) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _coerce_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    return bytes(value)
 
 
 def _blob_token() -> str:
@@ -341,6 +492,382 @@ class VercelBlobAssetStore:
             blob_details = blob_head(storage_key, token=self._token)
             resolved_url = blob_details.url
         return _download_url_bytes(resolved_url, auth_token=self._token)
+
+
+class PostgresAssetStore:
+    def __init__(
+        self,
+        database_url: str,
+        connection_factory: Callable[[], Any] | None = None,
+    ):
+        self._database_url = database_url
+        self._connection_factory = connection_factory or (lambda: _connect_postgres(database_url))
+        self._ensure_schema()
+
+    @property
+    def backend_name(self) -> str:
+        return "postgres"
+
+    def _ensure_schema(self) -> None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS asset_blobs (
+                        storage_key TEXT PRIMARY KEY,
+                        file_name TEXT NOT NULL,
+                        content_type TEXT NOT NULL,
+                        content_size BIGINT NOT NULL DEFAULT 0,
+                        content BYTEA NOT NULL,
+                        checksum_sha256 TEXT NOT NULL,
+                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+
+    def store_report(
+        self,
+        *,
+        month: str,
+        report_id: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        safe_file_name = _sanitize_storage_name(file_name)
+        storage_key = "/".join(part for part in ("reports", month, f"{report_id}_{safe_file_name}") if part)
+        checksum = hashlib.sha256(content).hexdigest()
+        metadata = {"month": month, "report_id": report_id}
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO asset_blobs (
+                        storage_key,
+                        file_name,
+                        content_type,
+                        content_size,
+                        content,
+                        checksum_sha256,
+                        metadata,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), NOW())
+                    ON CONFLICT (storage_key)
+                    DO UPDATE SET
+                        file_name = EXCLUDED.file_name,
+                        content_type = EXCLUDED.content_type,
+                        content_size = EXCLUDED.content_size,
+                        content = EXCLUDED.content,
+                        checksum_sha256 = EXCLUDED.checksum_sha256,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW()
+                    """,
+                    (
+                        storage_key,
+                        safe_file_name,
+                        content_type,
+                        len(content),
+                        content,
+                        checksum,
+                        json.dumps(metadata),
+                    ),
+                )
+
+        return {
+            "storage_key": storage_key,
+            "storage_url": None,
+            "storage_download_url": None,
+            "content_type": content_type,
+            "content_size": len(content),
+        }
+
+    def read_bytes(self, *, storage_key: str, storage_url: str | None = None) -> tuple[bytes, str]:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT content, content_type FROM asset_blobs WHERE storage_key = %s LIMIT 1",
+                    (storage_key,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise FileNotFoundError(storage_key)
+        return _coerce_bytes(row["content"]), row.get("content_type") or "application/pdf"
+
+
+class SupabaseStorageAssetStore:
+    def __init__(
+        self,
+        client: Any | None = None,
+        bucket: str | None = None,
+    ):
+        self._client = client or _create_supabase_client()
+        self._bucket = bucket or _supabase_reports_bucket()
+
+    @property
+    def backend_name(self) -> str:
+        return "supabase"
+
+    def store_report(
+        self,
+        *,
+        month: str,
+        report_id: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        safe_file_name = _sanitize_storage_name(file_name)
+        storage_key = "/".join(part for part in ("reports", month, f"{report_id}_{safe_file_name}") if part)
+        _supabase_upload(
+            self._client,
+            bucket=self._bucket,
+            path=storage_key,
+            content=content,
+            content_type=content_type,
+            upsert=True,
+        )
+        return {
+            "storage_key": storage_key,
+            "storage_url": _supabase_storage_url(self._bucket, storage_key),
+            "storage_download_url": None,
+            "content_type": content_type,
+            "content_size": len(content),
+        }
+
+    def read_bytes(self, *, storage_key: str, storage_url: str | None = None) -> tuple[bytes, str]:
+        content = _supabase_download(self._client, bucket=self._bucket, path=storage_key)
+        return content, _guess_content_type(storage_key, fallback="application/pdf")
+
+
+class PostgresTemplateStore:
+    def __init__(
+        self,
+        database_url: str,
+        connection_factory: Callable[[], Any] | None = None,
+    ):
+        self._database_url = database_url
+        self._connection_factory = connection_factory or (lambda: _connect_postgres(database_url))
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS document_templates (
+                        template_key TEXT PRIMARY KEY,
+                        file_name TEXT NOT NULL,
+                        content_type TEXT NOT NULL,
+                        content_size BIGINT NOT NULL DEFAULT 0,
+                        content BYTEA NOT NULL,
+                        checksum_sha256 TEXT NOT NULL,
+                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+
+    def upsert_template(
+        self,
+        *,
+        template_key: str,
+        file_name: str,
+        content: bytes,
+        content_type: str = "application/pdf",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_key = str(template_key or "").strip()
+        if not normalized_key:
+            raise ValueError("template_key is required")
+        safe_file_name = _sanitize_storage_name(file_name)
+        checksum = hashlib.sha256(content).hexdigest()
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO document_templates (
+                        template_key,
+                        file_name,
+                        content_type,
+                        content_size,
+                        content,
+                        checksum_sha256,
+                        metadata,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), NOW())
+                    ON CONFLICT (template_key)
+                    DO UPDATE SET
+                        file_name = EXCLUDED.file_name,
+                        content_type = EXCLUDED.content_type,
+                        content_size = EXCLUDED.content_size,
+                        content = EXCLUDED.content,
+                        checksum_sha256 = EXCLUDED.checksum_sha256,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW()
+                    """,
+                    (
+                        normalized_key,
+                        safe_file_name,
+                        content_type,
+                        len(content),
+                        content,
+                        checksum,
+                        json.dumps(metadata or {}),
+                    ),
+                )
+
+        return {
+            "template_key": normalized_key,
+            "file_name": safe_file_name,
+            "content_type": content_type,
+            "content_size": len(content),
+            "checksum_sha256": checksum,
+            "metadata": metadata or {},
+            "created_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        }
+
+    def get_template(self, template_key: str) -> dict[str, Any] | None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT template_key, file_name, content_type, content_size, checksum_sha256,
+                           metadata, created_at, updated_at
+                    FROM document_templates
+                    WHERE template_key = %s
+                    LIMIT 1
+                    """,
+                    (template_key,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        metadata = _coerce_json(row.get("metadata"), {}) or {}
+        return {
+            "template_key": row["template_key"],
+            "file_name": row["file_name"],
+            "content_type": row.get("content_type") or "application/pdf",
+            "content_size": int(row.get("content_size") or 0),
+            "checksum_sha256": row.get("checksum_sha256"),
+            "metadata": metadata,
+            "created_at": (
+                row["created_at"].isoformat()
+                if hasattr(row.get("created_at"), "isoformat")
+                else str(row.get("created_at") or "")
+            ),
+            "updated_at": (
+                row["updated_at"].isoformat()
+                if hasattr(row.get("updated_at"), "isoformat")
+                else str(row.get("updated_at") or "")
+            ),
+        }
+
+    def read_template_bytes(self, template_key: str) -> tuple[bytes, str]:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT content, content_type FROM document_templates WHERE template_key = %s LIMIT 1",
+                    (template_key,),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise FileNotFoundError(template_key)
+        return _coerce_bytes(row["content"]), row.get("content_type") or "application/pdf"
+
+
+class SupabaseStorageTemplateStore:
+    def __init__(
+        self,
+        client: Any | None = None,
+        bucket: str | None = None,
+        template_files: dict[str, str] | None = None,
+    ):
+        self._client = client or _create_supabase_client()
+        self._bucket = bucket or _supabase_templates_bucket()
+        self._template_files = dict(template_files or SUPABASE_TEMPLATE_FILES)
+
+    def _file_name_for_key(self, template_key: str, file_name: str | None = None) -> str:
+        normalized_key = str(template_key or "").strip()
+        if not normalized_key:
+            raise ValueError("template_key is required")
+        return _sanitize_storage_name(file_name or self._template_files.get(normalized_key) or f"{normalized_key}.pdf")
+
+    def _template_path(self, template_key: str, file_name: str | None = None) -> str:
+        normalized_key = str(template_key or "").strip()
+        if not normalized_key:
+            raise ValueError("template_key is required")
+        return f"{normalized_key}/{self._file_name_for_key(normalized_key, file_name)}"
+
+    def upsert_template(
+        self,
+        *,
+        template_key: str,
+        file_name: str,
+        content: bytes,
+        content_type: str = "application/pdf",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_key = str(template_key or "").strip()
+        storage_key = self._template_path(normalized_key, file_name)
+        _supabase_upload(
+            self._client,
+            bucket=self._bucket,
+            path=storage_key,
+            content=content,
+            content_type=content_type,
+            upsert=True,
+        )
+        checksum = hashlib.sha256(content).hexdigest()
+        return {
+            "template_key": normalized_key,
+            "file_name": self._file_name_for_key(normalized_key, file_name),
+            "content_type": content_type,
+            "content_size": len(content),
+            "checksum_sha256": checksum,
+            "metadata": metadata or {},
+            "storage_backend": "supabase",
+            "storage_key": storage_key,
+            "storage_url": _supabase_storage_url(self._bucket, storage_key),
+            "created_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        }
+
+    def get_template(self, template_key: str) -> dict[str, Any] | None:
+        normalized_key = str(template_key or "").strip()
+        if normalized_key not in self._template_files:
+            return None
+        file_name = self._file_name_for_key(normalized_key)
+        storage_key = self._template_path(normalized_key, file_name)
+        return {
+            "template_key": normalized_key,
+            "file_name": file_name,
+            "content_type": _guess_content_type(file_name, fallback="application/pdf"),
+            "content_size": 0,
+            "checksum_sha256": None,
+            "metadata": {},
+            "storage_backend": "supabase",
+            "storage_key": storage_key,
+            "storage_url": _supabase_storage_url(self._bucket, storage_key),
+            "created_at": "",
+            "updated_at": "",
+        }
+
+    def read_template_bytes(self, template_key: str) -> tuple[bytes, str]:
+        template = self.get_template(template_key)
+        if not template:
+            raise FileNotFoundError(template_key)
+        content = _supabase_download(self._client, bucket=self._bucket, path=template["storage_key"])
+        return content, template.get("content_type") or "application/pdf"
 
 
 class LocalProfileStore:
@@ -894,14 +1421,462 @@ class BlobInvoiceCaptureStore:
         return blob.content, blob.content_type or capture.get("content_type") or "image/jpeg"
 
 
+class PostgresInvoiceCaptureStore:
+    def __init__(
+        self,
+        database_url: str,
+        connection_factory: Callable[[], Any] | None = None,
+    ):
+        self._database_url = database_url
+        self._connection_factory = connection_factory or (lambda: _connect_postgres(database_url))
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS invoice_captures (
+                        invoice_id TEXT PRIMARY KEY,
+                        sid TEXT NOT NULL,
+                        file_name TEXT NOT NULL,
+                        storage_key TEXT NOT NULL UNIQUE,
+                        content_type TEXT NOT NULL,
+                        content_size BIGINT NOT NULL DEFAULT 0,
+                        content BYTEA NOT NULL,
+                        fields JSONB,
+                        extraction_error TEXT,
+                        folder_path TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS invoice_captures_sid_idx ON invoice_captures (sid, created_at DESC)"
+                )
+
+    def _row_to_record(self, row: dict[str, Any]) -> dict[str, Any]:
+        fields = _coerce_json(row.get("fields"), None)
+        return {
+            "invoice_id": row["invoice_id"],
+            "sid": row["sid"],
+            "file_name": row["file_name"],
+            "storage_backend": "postgres",
+            "storage_key": row["storage_key"],
+            "storage_url": None,
+            "content_type": row.get("content_type") or "application/octet-stream",
+            "content_size": int(row.get("content_size") or 0),
+            "fields": fields,
+            "extraction_error": row.get("extraction_error"),
+            "folder_path": row.get("folder_path") or f"Invoices/{row['sid']}",
+            "created_at": (
+                row["created_at"].isoformat()
+                if hasattr(row.get("created_at"), "isoformat")
+                else str(row.get("created_at") or "")
+            ),
+            "updated_at": (
+                row["updated_at"].isoformat()
+                if hasattr(row.get("updated_at"), "isoformat")
+                else str(row.get("updated_at") or "")
+            ),
+        }
+
+    def save_capture(
+        self,
+        *,
+        sid: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+        fields: dict[str, Any] | None = None,
+        extraction_error: str | None = None,
+    ) -> dict[str, Any]:
+        safe_sid = sanitize_invoice_sid(sid)
+        safe_file_name = _sanitize_storage_name(file_name)
+        invoice_id = str(uuid.uuid4())
+        storage_key = f"Invoices/{safe_sid}/{invoice_id}_{safe_file_name}"
+        now = utcnow_iso()
+        self.upsert_capture_record(
+            {
+                "invoice_id": invoice_id,
+                "sid": safe_sid,
+                "file_name": safe_file_name,
+                "storage_key": storage_key,
+                "content_type": content_type,
+                "fields": fields or None,
+                "extraction_error": extraction_error or None,
+                "folder_path": f"Invoices/{safe_sid}",
+                "created_at": now,
+                "updated_at": now,
+            },
+            content=content,
+            overwrite=True,
+        )
+        return {
+            "invoice_id": invoice_id,
+            "sid": safe_sid,
+            "file_name": safe_file_name,
+            "storage_backend": "postgres",
+            "storage_key": storage_key,
+            "storage_url": None,
+            "content_type": content_type,
+            "content_size": len(content),
+            "fields": fields or None,
+            "extraction_error": extraction_error or None,
+            "folder_path": f"Invoices/{safe_sid}",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def upsert_capture_record(
+        self,
+        record: dict[str, Any],
+        *,
+        content: bytes,
+        overwrite: bool = False,
+    ) -> bool:
+        invoice_id = str(record.get("invoice_id") or "").strip() or str(uuid.uuid4())
+        safe_sid = sanitize_invoice_sid(str(record.get("sid") or ""))
+        safe_file_name = _sanitize_storage_name(str(record.get("file_name") or "invoice.jpg"))
+        storage_key = str(record.get("storage_key") or "").strip() or f"Invoices/{safe_sid}/{invoice_id}_{safe_file_name}"
+        content_type = str(record.get("content_type") or _guess_content_type(safe_file_name)).strip()
+        folder_path = str(record.get("folder_path") or f"Invoices/{safe_sid}").strip()
+        created_at = str(record.get("created_at") or utcnow_iso()).strip()
+        updated_at = str(record.get("updated_at") or created_at).strip()
+        fields = record.get("fields")
+        extraction_error = record.get("extraction_error")
+
+        conflict_clause = (
+            """
+            DO UPDATE SET
+                sid = EXCLUDED.sid,
+                file_name = EXCLUDED.file_name,
+                storage_key = EXCLUDED.storage_key,
+                content_type = EXCLUDED.content_type,
+                content_size = EXCLUDED.content_size,
+                content = EXCLUDED.content,
+                fields = EXCLUDED.fields,
+                extraction_error = EXCLUDED.extraction_error,
+                folder_path = EXCLUDED.folder_path,
+                updated_at = EXCLUDED.updated_at
+            """
+            if overwrite
+            else "DO NOTHING"
+        )
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    INSERT INTO invoice_captures (
+                        invoice_id,
+                        sid,
+                        file_name,
+                        storage_key,
+                        content_type,
+                        content_size,
+                        content,
+                        fields,
+                        extraction_error,
+                        folder_path,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::timestamptz, %s::timestamptz)
+                    ON CONFLICT (invoice_id)
+                    {conflict_clause}
+                    """,
+                    (
+                        invoice_id,
+                        safe_sid,
+                        safe_file_name,
+                        storage_key,
+                        content_type,
+                        len(content),
+                        content,
+                        json.dumps(fields) if fields is not None else None,
+                        extraction_error,
+                        folder_path,
+                        created_at,
+                        updated_at,
+                    ),
+                )
+                return getattr(cursor, "rowcount", 0) != 0
+
+    def list_captures(self, sid: str) -> list[dict[str, Any]]:
+        safe_sid = sanitize_invoice_sid(sid)
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT invoice_id, sid, file_name, storage_key, content_type, content_size,
+                           fields, extraction_error, folder_path, created_at, updated_at
+                    FROM invoice_captures
+                    WHERE sid = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (safe_sid,),
+                )
+                rows = cursor.fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
+        safe_sid = sanitize_invoice_sid(sid)
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT invoice_id, sid, file_name, storage_key, content_type, content_size,
+                           fields, extraction_error, folder_path, created_at, updated_at
+                    FROM invoice_captures
+                    WHERE sid = %s AND invoice_id = %s
+                    LIMIT 1
+                    """,
+                    (safe_sid, invoice_id),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_record(row)
+
+    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT content, content_type FROM invoice_captures WHERE invoice_id = %s LIMIT 1",
+                    (capture["invoice_id"],),
+                )
+                row = cursor.fetchone()
+        if not row:
+            raise FileNotFoundError(capture["invoice_id"])
+        return _coerce_bytes(row["content"]), row.get("content_type") or capture.get("content_type") or "image/jpeg"
+
+
+class SupabaseStorageInvoiceCaptureStore:
+    def __init__(
+        self,
+        database_url: str,
+        client: Any | None = None,
+        bucket: str | None = None,
+        connection_factory: Callable[[], Any] | None = None,
+    ):
+        self._database_url = database_url
+        self._client = client or _create_supabase_client()
+        self._bucket = bucket or _supabase_invoices_bucket()
+        self._connection_factory = connection_factory or (lambda: _connect_postgres(database_url))
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS invoice_captures (
+                        invoice_id TEXT PRIMARY KEY,
+                        sid TEXT NOT NULL,
+                        file_name TEXT NOT NULL,
+                        storage_key TEXT NOT NULL UNIQUE,
+                        storage_backend TEXT NOT NULL DEFAULT 'supabase',
+                        storage_bucket TEXT,
+                        storage_url TEXT,
+                        content_type TEXT NOT NULL,
+                        content_size BIGINT NOT NULL DEFAULT 0,
+                        content BYTEA NOT NULL DEFAULT ''::bytea,
+                        fields JSONB,
+                        extraction_error TEXT,
+                        folder_path TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+                cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'postgres'")
+                cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_bucket TEXT")
+                cursor.execute("ALTER TABLE invoice_captures ADD COLUMN IF NOT EXISTS storage_url TEXT")
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS invoice_captures_sid_idx ON invoice_captures (sid, created_at DESC)"
+                )
+
+    def _row_to_record(self, row: dict[str, Any]) -> dict[str, Any]:
+        fields = _coerce_json(row.get("fields"), None)
+        return {
+            "invoice_id": row["invoice_id"],
+            "sid": row["sid"],
+            "file_name": row["file_name"],
+            "storage_backend": row.get("storage_backend") or "supabase",
+            "storage_key": row["storage_key"],
+            "storage_url": row.get("storage_url") or _supabase_storage_url(row.get("storage_bucket") or self._bucket, row["storage_key"]),
+            "content_type": row.get("content_type") or "application/octet-stream",
+            "content_size": int(row.get("content_size") or 0),
+            "fields": fields,
+            "extraction_error": row.get("extraction_error"),
+            "folder_path": row.get("folder_path") or f"Invoices/{row['sid']}",
+            "created_at": (
+                row["created_at"].isoformat()
+                if hasattr(row.get("created_at"), "isoformat")
+                else str(row.get("created_at") or "")
+            ),
+            "updated_at": (
+                row["updated_at"].isoformat()
+                if hasattr(row.get("updated_at"), "isoformat")
+                else str(row.get("updated_at") or "")
+            ),
+        }
+
+    def save_capture(
+        self,
+        *,
+        sid: str,
+        file_name: str,
+        content: bytes,
+        content_type: str,
+        fields: dict[str, Any] | None = None,
+        extraction_error: str | None = None,
+    ) -> dict[str, Any]:
+        safe_sid = sanitize_invoice_sid(sid)
+        safe_file_name = _sanitize_storage_name(file_name)
+        invoice_id = str(uuid.uuid4())
+        storage_key = f"Invoices/{safe_sid}/{invoice_id}_{safe_file_name}"
+        _supabase_upload(
+            self._client,
+            bucket=self._bucket,
+            path=storage_key,
+            content=content,
+            content_type=content_type,
+            upsert=True,
+        )
+        now = utcnow_iso()
+        storage_url = _supabase_storage_url(self._bucket, storage_key)
+
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO invoice_captures (
+                        invoice_id,
+                        sid,
+                        file_name,
+                        storage_key,
+                        storage_backend,
+                        storage_bucket,
+                        storage_url,
+                        content_type,
+                        content_size,
+                        content,
+                        fields,
+                        extraction_error,
+                        folder_path,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, 'supabase', %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::timestamptz, %s::timestamptz)
+                    ON CONFLICT (invoice_id)
+                    DO UPDATE SET
+                        sid = EXCLUDED.sid,
+                        file_name = EXCLUDED.file_name,
+                        storage_key = EXCLUDED.storage_key,
+                        storage_backend = EXCLUDED.storage_backend,
+                        storage_bucket = EXCLUDED.storage_bucket,
+                        storage_url = EXCLUDED.storage_url,
+                        content_type = EXCLUDED.content_type,
+                        content_size = EXCLUDED.content_size,
+                        content = EXCLUDED.content,
+                        fields = EXCLUDED.fields,
+                        extraction_error = EXCLUDED.extraction_error,
+                        folder_path = EXCLUDED.folder_path,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        invoice_id,
+                        safe_sid,
+                        safe_file_name,
+                        storage_key,
+                        self._bucket,
+                        storage_url,
+                        content_type,
+                        len(content),
+                        b"",
+                        json.dumps(fields) if fields is not None else None,
+                        extraction_error,
+                        f"Invoices/{safe_sid}",
+                        now,
+                        now,
+                    ),
+                )
+
+        return {
+            "invoice_id": invoice_id,
+            "sid": safe_sid,
+            "file_name": safe_file_name,
+            "storage_backend": "supabase",
+            "storage_key": storage_key,
+            "storage_url": storage_url,
+            "content_type": content_type,
+            "content_size": len(content),
+            "fields": fields or None,
+            "extraction_error": extraction_error or None,
+            "folder_path": f"Invoices/{safe_sid}",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def list_captures(self, sid: str) -> list[dict[str, Any]]:
+        safe_sid = sanitize_invoice_sid(sid)
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT invoice_id, sid, file_name, storage_key, storage_backend,
+                           storage_bucket, storage_url, content_type, content_size,
+                           fields, extraction_error, folder_path, created_at, updated_at
+                    FROM invoice_captures
+                    WHERE sid = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (safe_sid,),
+                )
+                rows = cursor.fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def get_capture(self, *, sid: str, invoice_id: str) -> dict[str, Any] | None:
+        safe_sid = sanitize_invoice_sid(sid)
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT invoice_id, sid, file_name, storage_key, storage_backend,
+                           storage_bucket, storage_url, content_type, content_size,
+                           fields, extraction_error, folder_path, created_at, updated_at
+                    FROM invoice_captures
+                    WHERE sid = %s AND invoice_id = %s
+                    LIMIT 1
+                    """,
+                    (safe_sid, invoice_id),
+                )
+                row = cursor.fetchone()
+        if not row:
+            return None
+        return self._row_to_record(row)
+
+    def read_capture_bytes(self, capture: dict[str, Any]) -> tuple[bytes, str]:
+        storage_key = capture["storage_key"]
+        content = _supabase_download(self._client, bucket=self._bucket, path=storage_key)
+        return content, capture.get("content_type") or _guess_content_type(storage_key, "image/jpeg")
+
+
 def make_profile_store(default_profile_path: str, profile_dir: str) -> ProfileStore:
     if _database_backend_enabled():
-        return PostgresProfileStore(os.environ["DATABASE_URL"].strip())
+        return PostgresProfileStore(_database_url())
     return LocalProfileStore(default_profile_path, profile_dir)
 
 
 def make_asset_store(output_dir: str) -> AssetStore:
     backend = _report_asset_backend()
+    if backend == "supabase":
+        return SupabaseStorageAssetStore()
+    if backend == "postgres":
+        return PostgresAssetStore(_database_url())
     if backend == "blob":
         return VercelBlobAssetStore()
     return LocalFileAssetStore(output_dir)
@@ -910,12 +1885,24 @@ def make_asset_store(output_dir: str) -> AssetStore:
 def make_report_store(output_dir: str) -> ReportStore:
     asset_store = make_asset_store(output_dir)
     if _database_backend_enabled():
-        return PostgresReportStore(os.environ["DATABASE_URL"].strip(), asset_store=asset_store)
+        return PostgresReportStore(_database_url(), asset_store=asset_store)
     return JsonReportStore(output_dir, asset_store=asset_store)
 
 
 def make_invoice_capture_store(output_dir: str) -> InvoiceCaptureStore:
     backend = _invoice_asset_backend()
+    if backend == "supabase":
+        return SupabaseStorageInvoiceCaptureStore(_database_url())
+    if backend == "postgres":
+        return PostgresInvoiceCaptureStore(_database_url())
     if backend == "blob":
         return BlobInvoiceCaptureStore()
     return LocalInvoiceCaptureStore(output_dir)
+
+
+def make_template_store() -> TemplateStore | None:
+    if _template_backend() == "supabase":
+        return SupabaseStorageTemplateStore()
+    if _template_backend() == "postgres":
+        return PostgresTemplateStore(_database_url())
+    return None

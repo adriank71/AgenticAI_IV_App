@@ -5,9 +5,10 @@ import os
 import socket
 import base64
 import binascii
+import tempfile
 import urllib.error
 import urllib.request
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, url_for
@@ -34,6 +35,7 @@ try:
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
+        make_template_store,
         materialize_binary_reference,
         resolve_profile_file_path,
     )
@@ -68,6 +70,7 @@ except ImportError:
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
+        make_template_store,
         materialize_binary_reference,
         resolve_profile_file_path,
     )
@@ -111,6 +114,7 @@ DEFAULT_TEMPLATE_CANDIDATES = (
     os.path.join(PROJECT_ROOT, "318.536_D_Rechnung_AB_01_2025_V1.pdf"),
     r"C:\Users\trxqz\Desktop\318.536_D_Rechnung_AB_01_2025_V1.pdf",
 )
+POSTGRES_TEMPLATE_PREFIX = "postgres-template:"
 N8N_WEBHOOK_URL = os.environ.get(
     "IV_AGENT_N8N_WEBHOOK_URL",
     "https://adrx.app.n8n.cloud/webhook/da1ab6f3-73d4-4eaa-9063-ebf8d0e6226f",
@@ -244,7 +248,50 @@ def resolve_configured_reference(candidate: str) -> str | None:
     return None
 
 
+def get_template_store():
+    return make_template_store()
+
+
+def postgres_template_reference(template_key: str) -> str | None:
+    try:
+        template_store = get_template_store()
+        if template_store and template_store.get_template(template_key):
+            return f"{POSTGRES_TEMPLATE_PREFIX}{template_key}"
+    except Exception as exc:
+        logger.warning("Could not resolve Postgres template %s: %s", template_key, exc)
+    return None
+
+
+@contextmanager
+def materialize_template_reference(reference: str, *, suffix: str = ".pdf"):
+    normalized_reference = str(reference or "").strip()
+    if normalized_reference.startswith(POSTGRES_TEMPLATE_PREFIX):
+        template_key = normalized_reference.removeprefix(POSTGRES_TEMPLATE_PREFIX)
+        template_store = get_template_store()
+        if not template_store:
+            raise FileNotFoundError(f"Template store is not configured for {template_key}")
+        data, _ = template_store.read_template_bytes(template_key)
+        fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as temp_file:
+                temp_file.write(data)
+            yield temp_path
+        finally:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+        return
+
+    with materialize_binary_reference(normalized_reference, suffix=suffix) as materialized_path:
+        yield materialized_path
+
+
 def resolve_template_path() -> str:
+    db_reference = postgres_template_reference("assistenz_standard")
+    if db_reference:
+        return db_reference
+
     configured_reference = resolve_configured_reference(DEFAULT_TEMPLATE_CANDIDATES[0])
     if configured_reference:
         return configured_reference
@@ -258,6 +305,11 @@ def resolve_template_path() -> str:
 
 
 def resolve_dual_template_paths() -> tuple[str, str] | None:
+    db_stundenblatt = postgres_template_reference("stundenblatt")
+    db_rechnung = postgres_template_reference("rechnung")
+    if db_stundenblatt and db_rechnung:
+        return db_stundenblatt, db_rechnung
+
     stundenblatt_path = resolve_configured_reference(DEFAULT_STUNDENBLATT_TEMPLATE_CANDIDATES[0]) or resolve_existing_path(
         DEFAULT_STUNDENBLATT_TEMPLATE_CANDIDATES[1:]
     )
@@ -535,10 +587,10 @@ def generate_assistenz_report(
     with ExitStack() as exit_stack:
         if dual_template_paths:
             stundenblatt_template_path = exit_stack.enter_context(
-                materialize_binary_reference(dual_template_paths[0], suffix=".pdf")
+                materialize_template_reference(dual_template_paths[0], suffix=".pdf")
             )
             rechnung_template_path = exit_stack.enter_context(
-                materialize_binary_reference(dual_template_paths[1], suffix=".pdf")
+                materialize_template_reference(dual_template_paths[1], suffix=".pdf")
             )
             report_bytes = fill_assistenz_dual_form_auto_bytes(
                 stundenblatt_template_pdf_path=stundenblatt_template_path,
@@ -550,7 +602,7 @@ def generate_assistenz_report(
             gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
         else:
             template_path = exit_stack.enter_context(
-                materialize_binary_reference(resolve_template_path(), suffix=".pdf")
+                materialize_template_reference(resolve_template_path(), suffix=".pdf")
             )
             report_bytes = fill_assistenz_form_auto_bytes(
                 template_pdf_path=template_path,

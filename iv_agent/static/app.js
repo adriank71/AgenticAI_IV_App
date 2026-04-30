@@ -2977,7 +2977,12 @@ function renderInvoiceCapture(capture, index) {
   const isImage = String(capture.content_type || "").startsWith("image/");
   const fileUrl = capture.file_url || capture.image_url || "#";
   const summary = capture.summary || (isImage ? "Receipt image saved to storage." : "Document saved to storage.");
-  const storageLabel = capture.storage_backend === "blob" ? "Vercel Blob" : capture.storage_backend || "Local";
+  const storageLabels = {
+    blob: "Vercel Blob",
+    postgres: "Supabase DB",
+    local: "Local",
+  };
+  const storageLabel = storageLabels[capture.storage_backend] || capture.storage_backend || "Local";
   const extractionNote = capture.extraction_error
     ? `<div class="invoice-note">${escapeHtml(capture.extraction_error)}</div>`
     : "";

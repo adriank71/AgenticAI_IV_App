@@ -73,15 +73,16 @@ class FakeReportStore:
 
 
 class FakeInvoiceStore:
-    def __init__(self):
+    def __init__(self, backend_name="blob"):
         self.captures = []
+        self.backend_name = backend_name
 
     def save_capture(self, **kwargs):
         record = {
             "invoice_id": f"inv-{len(self.captures) + 1}",
             "sid": kwargs["sid"],
             "file_name": kwargs["file_name"],
-            "storage_backend": "blob",
+            "storage_backend": self.backend_name,
             "storage_key": f"Invoices/{kwargs['sid']}/inv-{len(self.captures) + 1}_{kwargs['file_name']}",
             "storage_url": "https://blob.example/private/invoice.jpg",
             "content_type": kwargs["content_type"],
@@ -106,6 +107,23 @@ class FakeInvoiceStore:
 
     def read_capture_bytes(self, capture):
         return b"\xff\xd8\xff", capture.get("content_type") or "image/jpeg"
+
+
+class FakeTemplateStore:
+    def __init__(self, keys):
+        self.keys = set(keys)
+
+    def get_template(self, template_key):
+        if template_key not in self.keys:
+            return None
+        return {
+            "template_key": template_key,
+            "file_name": f"{template_key}.pdf",
+            "content_type": "application/pdf",
+        }
+
+    def read_template_bytes(self, template_key):
+        return b"%PDF-template\n", "application/pdf"
 
 
 class CalendarManagerTests(unittest.TestCase):
@@ -381,6 +399,22 @@ class CalendarApiTests(unittest.TestCase):
         single_fill_mock.assert_not_called()
         self.assertEqual(payload["generated_reports"][0]["gross_amount_chf"], "157.50")
 
+    def test_dual_template_resolution_prefers_postgres_templates(self):
+        with patch.object(
+            app_module,
+            "get_template_store",
+            return_value=FakeTemplateStore({"stundenblatt", "rechnung"}),
+        ):
+            resolved = app_module.resolve_dual_template_paths()
+
+        self.assertEqual(
+            resolved,
+            (
+                f"{app_module.POSTGRES_TEMPLATE_PREFIX}stundenblatt",
+                f"{app_module.POSTGRES_TEMPLATE_PREFIX}rechnung",
+            ),
+        )
+
     def test_send_report_accepts_report_id_and_omits_file_path(self):
         client = app_module.app.test_client()
         fake_report_store = FakeReportStore()
@@ -481,6 +515,27 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["capture"]["storage_backend"], "blob")
         self.assertIsNone(payload["extraction_error"])
         vision_mock.assert_not_called()
+
+    def test_invoice_capture_can_return_supabase_db_backend(self):
+        client = app_module.app.test_client()
+        fake_invoice_store = FakeInvoiceStore(backend_name="postgres")
+
+        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+            app_module, "_call_openai_vision", return_value={"merchant": "Cafe Example", "date": "2026-04-30", "total": 12.5, "currency": "CHF"}
+        ):
+            response = client.post(
+                "/api/invoices/session123/capture",
+                json={
+                    "image_base64": "/9j/",
+                    "mime": "image/jpeg",
+                    "file_name": "phone.jpg",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["capture"]["storage_backend"], "postgres")
+        self.assertIn("/api/invoices/session123/files/inv-1/phone.jpg", payload["capture"]["file_url"])
 
     def test_scan_url_uses_camera_route_and_scan_redirects(self):
         client = app_module.app.test_client()
