@@ -289,6 +289,7 @@ SUPABASE_TEMPLATE_FILES = {
     "rechnung": "Rechnungsvorlage_aL_elektronisch.pdf",
     "transportkosten": "AK_Formular_EL_Transportkosten.pdf",
 }
+_STORE_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
 def _supabase_storage_url(bucket: str, path: str) -> str:
@@ -747,6 +748,7 @@ class SupabaseStorageTemplateStore:
         self._client = client or _create_supabase_client()
         self._bucket = bucket or _supabase_templates_bucket()
         self._template_files = dict(template_files or SUPABASE_TEMPLATE_FILES)
+        self._template_bytes_cache: dict[str, tuple[bytes, str]] = {}
 
     def _file_name_for_key(self, template_key: str, file_name: str | None = None) -> str:
         normalized_key = str(template_key or "").strip()
@@ -818,8 +820,13 @@ class SupabaseStorageTemplateStore:
         template = self.get_template(template_key)
         if not template:
             raise FileNotFoundError(template_key)
+        cache_key = template["storage_key"]
+        if cache_key in self._template_bytes_cache:
+            return self._template_bytes_cache[cache_key]
         content = _supabase_download(self._client, bucket=self._bucket, path=template["storage_key"])
-        return content, template.get("content_type") or "application/pdf"
+        result = (content, template.get("content_type") or "application/pdf")
+        self._template_bytes_cache[cache_key] = result
+        return result
 
 
 class LocalProfileStore:
@@ -1738,38 +1745,110 @@ class SupabaseStorageInvoiceCaptureStore:
 
 def make_profile_store(default_profile_path: str, profile_dir: str) -> ProfileStore:
     if _database_backend_enabled():
-        return PostgresProfileStore(_database_url())
-    return LocalProfileStore(default_profile_path, profile_dir)
+        database_url = _database_url()
+        cache_key = ("profile", "postgres", database_url, id(PostgresProfileStore))
+        if cache_key not in _STORE_CACHE:
+            _STORE_CACHE[cache_key] = PostgresProfileStore(database_url)
+        return _STORE_CACHE[cache_key]
+
+    cache_key = ("profile", "local", default_profile_path, profile_dir, id(LocalProfileStore))
+    if cache_key not in _STORE_CACHE:
+        _STORE_CACHE[cache_key] = LocalProfileStore(default_profile_path, profile_dir)
+    return _STORE_CACHE[cache_key]
 
 
 def make_asset_store(output_dir: str) -> AssetStore:
     backend = _report_asset_backend()
+    cache_key = (
+        "asset",
+        backend,
+        output_dir,
+        os.environ.get("DATABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_URL", "").strip(),
+        os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+        _supabase_reports_bucket(),
+        id(LocalFileAssetStore),
+        id(PostgresAssetStore),
+        id(SupabaseStorageAssetStore),
+    )
+    if cache_key in _STORE_CACHE:
+        return _STORE_CACHE[cache_key]
+
     if backend == "supabase":
-        return SupabaseStorageAssetStore()
+        _STORE_CACHE[cache_key] = SupabaseStorageAssetStore()
+        return _STORE_CACHE[cache_key]
     if backend == "postgres":
-        return PostgresAssetStore(_database_url())
-    return LocalFileAssetStore(output_dir)
+        _STORE_CACHE[cache_key] = PostgresAssetStore(_database_url())
+        return _STORE_CACHE[cache_key]
+    _STORE_CACHE[cache_key] = LocalFileAssetStore(output_dir)
+    return _STORE_CACHE[cache_key]
 
 
 def make_report_store(output_dir: str) -> ReportStore:
     asset_store = make_asset_store(output_dir)
     if _database_backend_enabled():
-        return PostgresReportStore(_database_url(), asset_store=asset_store)
-    return JsonReportStore(output_dir, asset_store=asset_store)
+        database_url = _database_url()
+        cache_key = ("report", "postgres", database_url, output_dir, id(asset_store), id(PostgresReportStore))
+        if cache_key not in _STORE_CACHE:
+            _STORE_CACHE[cache_key] = PostgresReportStore(database_url, asset_store=asset_store)
+        return _STORE_CACHE[cache_key]
+
+    cache_key = ("report", "local", output_dir, id(asset_store), id(JsonReportStore))
+    if cache_key not in _STORE_CACHE:
+        _STORE_CACHE[cache_key] = JsonReportStore(output_dir, asset_store=asset_store)
+    return _STORE_CACHE[cache_key]
 
 
 def make_invoice_capture_store(output_dir: str) -> InvoiceCaptureStore:
     backend = _invoice_asset_backend()
+    cache_key = (
+        "invoice",
+        backend,
+        output_dir,
+        os.environ.get("DATABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_URL", "").strip(),
+        os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+        _supabase_invoices_bucket(),
+        id(LocalInvoiceCaptureStore),
+        id(PostgresInvoiceCaptureStore),
+        id(SupabaseStorageInvoiceCaptureStore),
+    )
+    if cache_key in _STORE_CACHE:
+        return _STORE_CACHE[cache_key]
+
     if backend == "supabase":
-        return SupabaseStorageInvoiceCaptureStore(_database_url())
+        _STORE_CACHE[cache_key] = SupabaseStorageInvoiceCaptureStore(_database_url())
+        return _STORE_CACHE[cache_key]
     if backend == "postgres":
-        return PostgresInvoiceCaptureStore(_database_url())
-    return LocalInvoiceCaptureStore(output_dir)
+        _STORE_CACHE[cache_key] = PostgresInvoiceCaptureStore(_database_url())
+        return _STORE_CACHE[cache_key]
+    _STORE_CACHE[cache_key] = LocalInvoiceCaptureStore(output_dir)
+    return _STORE_CACHE[cache_key]
 
 
 def make_template_store() -> TemplateStore | None:
-    if _template_backend() == "supabase":
-        return SupabaseStorageTemplateStore()
-    if _template_backend() == "postgres":
-        return PostgresTemplateStore(_database_url())
+    backend = _template_backend()
+    cache_key = (
+        "template",
+        backend,
+        os.environ.get("DATABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_URL", "").strip(),
+        os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+        _supabase_templates_bucket(),
+        id(PostgresTemplateStore),
+        id(SupabaseStorageTemplateStore),
+    )
+    if cache_key in _STORE_CACHE:
+        return _STORE_CACHE[cache_key]
+
+    if backend == "supabase":
+        _STORE_CACHE[cache_key] = SupabaseStorageTemplateStore()
+        return _STORE_CACHE[cache_key]
+    if backend == "postgres":
+        _STORE_CACHE[cache_key] = PostgresTemplateStore(_database_url())
+        return _STORE_CACHE[cache_key]
+    _STORE_CACHE[cache_key] = None
     return None

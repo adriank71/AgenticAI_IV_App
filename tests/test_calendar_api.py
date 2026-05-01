@@ -434,9 +434,11 @@ class CalendarApiTests(unittest.TestCase):
             app_module, "materialize_binary_reference", side_effect=passthrough_materialized_path
         ), patch.object(
             app_module, "fill_assistenz_form_auto_bytes", return_value=b"%PDF-1.4\n"
-        ), patch.object(app_module, "get_assistant_hours", return_value=4.5), patch.object(
+        ), patch.object(app_module, "get_events", return_value=[]), patch.object(
+            app_module, "get_assistant_hours_for_events", return_value=4.5
+        ), patch.object(
             app_module,
-            "get_assistant_hours_breakdown",
+            "get_assistant_hours_breakdown_for_events",
             return_value={
                 "koerperpflege": 1.0,
                 "mahlzeiten_eingeben": 1.0,
@@ -476,10 +478,12 @@ class CalendarApiTests(unittest.TestCase):
         ) as dual_fill_mock, patch.object(
             app_module, "fill_assistenz_form_auto_bytes"
         ) as single_fill_mock, patch.object(
-            app_module, "get_assistant_hours", return_value=4.5
+            app_module, "get_events", return_value=[]
+        ), patch.object(
+            app_module, "get_assistant_hours_for_events", return_value=4.5
         ), patch.object(
             app_module,
-            "get_assistant_hours_breakdown",
+            "get_assistant_hours_breakdown_for_events",
             return_value={
                 "koerperpflege": 1.0,
                 "mahlzeiten_eingeben": 1.0,

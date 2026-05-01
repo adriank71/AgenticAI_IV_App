@@ -24,6 +24,7 @@ REMINDERS_PATH = os.path.join(DATA_DIR, "reminders.json")
 VALID_ACTIONS = {"notify", "generate_assistenzbeitrag"}
 VALID_SCHEDULES = {"month_end", "weekly_sun", "weekly_mon", "daily", "once"}
 DEFAULT_TIMEZONE = "Europe/Berlin"
+_REMINDER_STORE_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 
 class ReminderStore(Protocol):
@@ -247,8 +248,15 @@ def get_reminder_store() -> ReminderStore:
     backend = str(os.environ.get("IV_AGENT_STORAGE_BACKEND", "auto") or "auto").strip().lower()
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if backend == "local" or not database_url:
-        return JsonReminderStore()
-    return PostgresReminderStore(database_url)
+        cache_key = ("local", "", DATA_DIR, REMINDERS_PATH)
+        if cache_key not in _REMINDER_STORE_CACHE:
+            _REMINDER_STORE_CACHE[cache_key] = JsonReminderStore()
+        return _REMINDER_STORE_CACHE[cache_key]
+
+    cache_key = ("postgres", database_url, DATA_DIR, REMINDERS_PATH)
+    if cache_key not in _REMINDER_STORE_CACHE:
+        _REMINDER_STORE_CACHE[cache_key] = PostgresReminderStore(database_url)
+    return _REMINDER_STORE_CACHE[cache_key]
 
 
 def _load_all() -> List[Dict[str, Any]]:

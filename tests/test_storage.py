@@ -203,7 +203,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["id"], "evt-1")
         self.assertEqual(events[0]["assistant_hours"]["koerperpflege"], 1.0)
-        self.assertTrue(any("WHERE TO_CHAR(event_date, 'YYYY-MM') = %s" in query for query, _ in cursor.statements))
+        self.assertTrue(any("WHERE event_date >= %s::date AND event_date < %s::date" in query for query, _ in cursor.statements))
 
     def test_postgres_reminder_store_reads_structured_rows(self):
         cursor = RecordingCursor(

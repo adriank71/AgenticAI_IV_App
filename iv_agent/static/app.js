@@ -118,12 +118,15 @@ const state = {
   aiStatus: null,
   profile: null,
   profileLoaded: false,
+  calendarDataCache: {},
+  calendarDataRequests: {},
 };
 
 const elements = {
   monthPicker: document.getElementById("month-picker"),
   heading: document.getElementById("calendar-heading"),
   hoursValue: document.getElementById("hours-value"),
+  capacityProgress: document.getElementById("capacity-progress"),
   loadingOverlay: document.getElementById("loading-overlay"),
   errorBanner: document.getElementById("error-banner"),
   addModal: document.getElementById("add-modal"),
@@ -677,8 +680,12 @@ async function refreshHours() {
   if (!elements.hoursValue) {
     return;
   }
-  const data = await apiFetch(`/api/hours?month=${encodeURIComponent(state.currentMonth)}`);
-  elements.hoursValue.textContent = Number(data.total_hours).toFixed(2);
+  const data = await getCalendarMonthData(state.currentMonth);
+  const totalHours = Number(data.total_hours || 0);
+  elements.hoursValue.textContent = totalHours.toFixed(2);
+  if (elements.capacityProgress) {
+    elements.capacityProgress.style.width = `${Math.max(0, Math.min(100, (totalHours / 60) * 100))}%`;
+  }
 }
 
 function renderFocusSummary(events) {
@@ -744,7 +751,7 @@ function renderFocusSummary(events) {
 
 async function refreshFocusSummary() {
   const todayMonth = formatMonth(new Date());
-  const data = await apiFetch(`/api/events?month=${encodeURIComponent(todayMonth)}`);
+  const data = await getCalendarMonthData(todayMonth);
   renderFocusSummary(data.events || []);
 }
 
@@ -754,16 +761,12 @@ async function refreshSidebarData() {
 }
 
 async function refreshDashboardData() {
-  const [hoursData, eventsData] = await Promise.all([
-    apiFetch(`/api/hours?month=${encodeURIComponent(state.currentMonth)}`),
-    apiFetch(`/api/events?month=${encodeURIComponent(state.currentMonth)}`),
-  ]);
-
-  const monthEvents = eventsData.events || [];
+  const data = await getCalendarMonthData(state.currentMonth);
+  const monthEvents = data.events || [];
   const assistantEvents = monthEvents.filter((event) => event.category === "assistant");
 
   if (elements.dashboardHoursValue) {
-    elements.dashboardHoursValue.textContent = Number(hoursData.total_hours || 0).toFixed(2);
+    elements.dashboardHoursValue.textContent = Number(data.total_hours || 0).toFixed(2);
   }
   if (elements.dashboardEventsValue) {
     elements.dashboardEventsValue.textContent = String(monthEvents.length);
@@ -774,6 +777,42 @@ async function refreshDashboardData() {
   if (elements.dashboardReportLabel) {
     elements.dashboardReportLabel.textContent = `Generate monthly report for ${formatMonthHeading(state.currentMonth)}`;
   }
+}
+
+async function getCalendarMonthData(month, options = {}) {
+  const force = Boolean(options.force);
+  if (!force && state.calendarDataCache[month]) {
+    return state.calendarDataCache[month];
+  }
+  if (!force && state.calendarDataRequests[month]) {
+    return state.calendarDataRequests[month];
+  }
+
+  const request = apiFetch(`/api/calendar-data?month=${encodeURIComponent(month)}`, {
+    showLoading: false,
+  })
+    .then((data) => {
+      state.calendarDataCache[month] = data;
+
+      if (Array.isArray(data.reminders)) {
+        state.automations = data.reminders;
+        state.automationsLoaded = true;
+        renderAutomations();
+      }
+
+      return data;
+    })
+    .finally(() => {
+      delete state.calendarDataRequests[month];
+    });
+
+  state.calendarDataRequests[month] = request;
+  return request;
+}
+
+function clearCalendarDataCache() {
+  state.calendarDataCache = {};
+  state.calendarDataRequests = {};
 }
 
 function getMonthsInRange(startDate, endDateExclusive) {
@@ -865,7 +904,7 @@ async function fetchEvents(info, successCallback, failureCallback) {
   try {
     const months = getMonthsInRange(info.start, info.end);
     const responses = await Promise.all(
-      months.map((month) => apiFetch(`/api/events?month=${encodeURIComponent(month)}`))
+      months.map((month) => getCalendarMonthData(month))
     );
 
     const rawEvents = [];
@@ -886,7 +925,10 @@ async function fetchEvents(info, successCallback, failureCallback) {
   }
 }
 
-async function refreshCalendarData() {
+async function refreshCalendarData(options = {}) {
+  if (options.force) {
+    clearCalendarDataCache();
+  }
   syncMonthUi();
   closeDeletePopover();
   if (state.calendar) {
@@ -1253,7 +1295,7 @@ async function submitAddEvent(event) {
   seedFormDefaults();
   resetEventFormMode();
   closeModal("add-modal");
-  await refreshCalendarData();
+  await refreshCalendarData({ force: true });
 }
 
 function getVoiceContext(target) {
@@ -1854,7 +1896,7 @@ async function confirmDelete() {
     method: "DELETE",
   });
   closeDeletePopover();
-  await refreshCalendarData();
+  await refreshCalendarData({ force: true });
 }
 
 function handleDocumentClick(event) {
@@ -2493,7 +2535,7 @@ function resetAutomationForm() {
 
 async function refreshAutomations() {
   try {
-    const data = await apiFetch("/api/reminders");
+    const data = await apiFetch("/api/reminders", { showLoading: false });
     state.automations = Array.isArray(data.reminders) ? data.reminders : [];
     state.automationsLoaded = true;
     renderAutomations();
@@ -2648,6 +2690,7 @@ async function handleAutomationItemAction(action, id) {
     if (!window.confirm("Delete this automation?")) return;
     try {
       await apiFetch(`/api/reminders/${encodeURIComponent(id)}`, { method: "DELETE" });
+      clearCalendarDataCache();
       await refreshAutomations();
     } catch (error) {
       // showError already shown by apiFetch
@@ -2661,6 +2704,7 @@ async function handleAutomationItemAction(action, id) {
         showError(result.message);
       }
       await refreshAutomations();
+      clearCalendarDataCache();
     } catch (error) {
       // ignore — error already shown
     }
@@ -2687,6 +2731,7 @@ async function submitAutomationForm(event) {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    clearCalendarDataCache();
     resetAutomationForm();
     await refreshAutomations();
   } catch (error) {
@@ -2733,6 +2778,7 @@ async function submitAutomationVoiceRecording(chunks, mimeType) {
       toggleAutomationDateRow();
     }
     if (payload.created) {
+      clearCalendarDataCache();
       await refreshAutomations();
     }
     if (elements.automationVoiceStatus) {
@@ -2748,7 +2794,8 @@ async function submitAutomationVoiceRecording(chunks, mimeType) {
 
 async function tickAutomationsLazy() {
   try {
-    await apiFetch("/api/reminders/tick", { method: "POST" });
+    await apiFetch("/api/reminders/tick", { method: "POST", showLoading: false });
+    clearCalendarDataCache();
   } catch (error) {
     // silent — tick errors should not disturb UI
   }

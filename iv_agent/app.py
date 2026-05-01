@@ -20,8 +20,8 @@ try:
         add_events,
         delete_event,
         export_month_plan,
-        get_assistant_hours,
-        get_assistant_hours_breakdown,
+        get_assistant_hours_breakdown_for_events,
+        get_assistant_hours_for_events,
         get_events,
         update_event,
     )
@@ -55,8 +55,8 @@ except ImportError:
         add_events,
         delete_event,
         export_month_plan,
-        get_assistant_hours,
-        get_assistant_hours_breakdown,
+        get_assistant_hours_breakdown_for_events,
+        get_assistant_hours_for_events,
         get_events,
         update_event,
     )
@@ -594,8 +594,9 @@ def generate_assistenz_report(
     triggered_by_reminder: str | None = None,
 ) -> dict:
     output_filename = f"Assistenzbeitrag_{month}.pdf"
-    total_hours = get_assistant_hours(month)
-    assistant_breakdown = get_assistant_hours_breakdown(month)
+    month_events = get_events(month)
+    total_hours = get_assistant_hours_for_events(month_events)
+    assistant_breakdown = get_assistant_hours_breakdown_for_events(month_events)
     dual_template_paths = resolve_dual_template_paths()
 
     with ExitStack() as exit_stack:
@@ -744,11 +745,12 @@ def api_update_event(event_id: str):
 def api_get_hours():
     try:
         month = parse_month(request.args.get("month", "").strip())
+        month_events = get_events(month)
         return jsonify(
             {
                 "month": month,
-                "total_hours": get_assistant_hours(month),
-                "assistant_breakdown": get_assistant_hours_breakdown(month),
+                "total_hours": get_assistant_hours_for_events(month_events),
+                "assistant_breakdown": get_assistant_hours_breakdown_for_events(month_events),
             }
         )
     except ValueError as exc:
@@ -786,8 +788,8 @@ def api_calendar_data():
                 "profile": load_profile_payload(profile_id),
                 "month": month,
                 "events": month_events,
-                "total_hours": get_assistant_hours(month),
-                "assistant_breakdown": get_assistant_hours_breakdown(month),
+                "total_hours": get_assistant_hours_for_events(month_events),
+                "assistant_breakdown": get_assistant_hours_breakdown_for_events(month_events),
                 "reminders": reminders_module.list_reminders(),
             }
         )

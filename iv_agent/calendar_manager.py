@@ -27,6 +27,7 @@ ASSISTANT_HOUR_FIELDS = (
     "begleitung_therapie",
 )
 VALID_RECURRENCE_PATTERNS = {"none", "weekly", "biweekly", "monthly"}
+_EVENT_STORE_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 
 class EventStore(Protocol):
@@ -601,6 +602,8 @@ class PostgresEventStore:
 
     def get_events(self, month: str):
         datetime.strptime(month, "%Y-%m")
+        start_date = f"{month}-01"
+        next_month = _add_months(datetime.strptime(start_date, "%Y-%m-%d").date(), 1).isoformat()
         with self._connection_factory() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -620,14 +623,15 @@ class PostgresEventStore:
                         transport_kilometers,
                         transport_address
                     FROM events
-                    WHERE TO_CHAR(event_date, 'YYYY-MM') = %s
+                    WHERE event_date >= %s::date
+                      AND event_date < %s::date
                     ORDER BY
                         event_date ASC,
                         CASE WHEN all_day THEN 0 ELSE 1 END ASC,
                         start_time ASC,
                         title ASC
                     """,
-                    (month,),
+                    (start_date, next_month),
                 )
                 rows = cursor.fetchall()
         return [self._row_to_event(row) for row in rows]
@@ -683,8 +687,15 @@ def get_event_store() -> EventStore:
     backend = str(os.environ.get("IV_AGENT_STORAGE_BACKEND", "auto") or "auto").strip().lower()
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if backend == "local" or not database_url:
-        return JsonEventStore(DATA_DIR, CALENDAR_PATH)
-    return PostgresEventStore(database_url)
+        cache_key = ("local", "", DATA_DIR, CALENDAR_PATH)
+        if cache_key not in _EVENT_STORE_CACHE:
+            _EVENT_STORE_CACHE[cache_key] = JsonEventStore(DATA_DIR, CALENDAR_PATH)
+        return _EVENT_STORE_CACHE[cache_key]
+
+    cache_key = ("postgres", database_url, DATA_DIR, CALENDAR_PATH)
+    if cache_key not in _EVENT_STORE_CACHE:
+        _EVENT_STORE_CACHE[cache_key] = PostgresEventStore(database_url)
+    return _EVENT_STORE_CACHE[cache_key]
 
 
 def add_events(
@@ -758,8 +769,12 @@ def get_events(month: str):
 
 
 def get_assistant_hours_breakdown(month: str) -> Dict[str, float]:
+    return get_assistant_hours_breakdown_for_events(get_events(month))
+
+
+def get_assistant_hours_breakdown_for_events(events: List[Dict]) -> Dict[str, float]:
     totals = {field: 0.0 for field in ASSISTANT_HOUR_FIELDS}
-    for event in get_events(month):
+    for event in events:
         if event["category"] != "assistant":
             continue
         assistant_hours = _normalize_assistant_hours(event.get("assistant_hours"), event.get("hours", 0.0))
@@ -769,10 +784,11 @@ def get_assistant_hours_breakdown(month: str) -> Dict[str, float]:
 
 
 def get_assistant_hours(month: str):
-    return round(
-        sum(_assistant_total_hours(event) for event in get_events(month) if event["category"] == "assistant"),
-        2,
-    )
+    return get_assistant_hours_for_events(get_events(month))
+
+
+def get_assistant_hours_for_events(events: List[Dict]):
+    return round(sum(_assistant_total_hours(event) for event in events if event["category"] == "assistant"), 2)
 
 
 def _assistant_breakdown_suffix(event: Dict) -> str:
@@ -857,7 +873,7 @@ def update_event(
 
 def export_month_plan(month: str):
     events = get_events(month)
-    total_hours = get_assistant_hours(month)
+    total_hours = get_assistant_hours_for_events(events)
     lines = [f"Monthly plan for {month}", f"Assistant hours: {total_hours:.2f}", ""]
 
     if not events:
