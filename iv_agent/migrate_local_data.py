@@ -157,7 +157,7 @@ def ensure_tables(database_url: str, *, dry_run: bool = False) -> None:
                 CREATE TABLE IF NOT EXISTS reports (
                     report_id TEXT PRIMARY KEY,
                     month TEXT NOT NULL,
-                    type TEXT NOT NULL,
+                    report_type TEXT NOT NULL,
                     profile_id TEXT,
                     file_name TEXT NOT NULL,
                     storage_backend TEXT NOT NULL DEFAULT 'local',
