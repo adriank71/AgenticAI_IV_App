@@ -286,7 +286,7 @@ def _supabase_invoices_bucket() -> str:
 
 SUPABASE_TEMPLATE_FILES = {
     "stundenblatt": "Stundenblatt.pdf",
-    "rechnung": "Rechnungsvorlage_aL_elektronisch (1).pdf",
+    "rechnung": "Rechnungsvorlage_aL_elektronisch.pdf",
     "transportkosten": "AK_Formular_EL_Transportkosten.pdf",
 }
 
