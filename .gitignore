@@ -31,9 +31,6 @@ tests/.tmp/
 iv_agent/data/profile.json
 iv_agent/data/calendar.json
 
-# Migration artifacts (pg_dump output, never commit)
-migration_artifacts/
-
 # Local PDFs / generated documents
 *.pdf
 
