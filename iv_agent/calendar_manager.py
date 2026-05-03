@@ -47,10 +47,11 @@ class EventStore(Protocol):
         transport_address: str = "",
         recurrence: str = "none",
         repeat_count: int = 0,
+        user_id: str | None = None,
     ) -> List[Dict]:
         ...
 
-    def get_events(self, month: str) -> List[Dict]:
+    def get_events(self, month: str, user_id: str | None = None) -> List[Dict]:
         ...
 
     def update_event(
@@ -68,10 +69,11 @@ class EventStore(Protocol):
         transport_mode: str = "",
         transport_kilometers: float = 0.0,
         transport_address: str = "",
+        user_id: str | None = None,
     ) -> Dict | None:
         ...
 
-    def delete_event(self, event_id: str) -> bool:
+    def delete_event(self, event_id: str, user_id: str | None = None) -> bool:
         ...
 
     def load_all_events(self) -> List[Dict]:
@@ -308,6 +310,7 @@ class JsonEventStore:
         transport_address="",
         recurrence="none",
         repeat_count=0,
+        user_id=None,
     ):
         events = self.load_all_events()
         created_events = []
@@ -335,12 +338,12 @@ class JsonEventStore:
         self.replace_all_events(events)
         return created_events
 
-    def get_events(self, month: str):
+    def get_events(self, month: str, user_id: str | None = None):
         datetime.strptime(month, "%Y-%m")
         events = [event for event in self.load_all_events() if event["date"].startswith(month)]
         return sorted(events, key=_event_sort_key)
 
-    def delete_event(self, event_id: str):
+    def delete_event(self, event_id: str, user_id: str | None = None):
         events = self.load_all_events()
         updated_events = [event for event in events if event["id"] != event_id]
         if len(updated_events) == len(events):
@@ -363,6 +366,7 @@ class JsonEventStore:
         transport_mode="",
         transport_kilometers=0.0,
         transport_address="",
+        user_id=None,
     ) -> Dict | None:
         events = self.load_all_events()
         target_index = next((index for index, event in enumerate(events) if event["id"] == event_id), None)
@@ -572,6 +576,7 @@ class PostgresEventStore:
         transport_address="",
         recurrence="none",
         repeat_count=0,
+        user_id=None,
     ):
         created_events = []
         with self._connection_factory() as connection:
@@ -600,7 +605,7 @@ class PostgresEventStore:
                     created_events.append(event)
         return sorted(created_events, key=_event_sort_key)
 
-    def get_events(self, month: str):
+    def get_events(self, month: str, user_id: str | None = None):
         datetime.strptime(month, "%Y-%m")
         start_date = f"{month}-01"
         next_month = _add_months(datetime.strptime(start_date, "%Y-%m-%d").date(), 1).isoformat()
@@ -636,7 +641,7 @@ class PostgresEventStore:
                 rows = cursor.fetchall()
         return [self._row_to_event(row) for row in rows]
 
-    def delete_event(self, event_id: str):
+    def delete_event(self, event_id: str, user_id: str | None = None):
         with self._connection_factory() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("DELETE FROM events WHERE event_id = %s", (event_id,))
@@ -657,6 +662,7 @@ class PostgresEventStore:
         transport_mode="",
         transport_kilometers=0.0,
         transport_address="",
+        user_id=None,
     ) -> Dict | None:
         with self._connection_factory() as connection:
             with connection.cursor() as cursor:
@@ -694,7 +700,12 @@ def get_event_store() -> EventStore:
 
     cache_key = ("postgres", database_url, DATA_DIR, CALENDAR_PATH)
     if cache_key not in _EVENT_STORE_CACHE:
-        _EVENT_STORE_CACHE[cache_key] = PostgresEventStore(database_url)
+        try:
+            from .services.calendar_service import CalendarEventCompatibilityStore
+        except ImportError:
+            from services.calendar_service import CalendarEventCompatibilityStore
+
+        _EVENT_STORE_CACHE[cache_key] = CalendarEventCompatibilityStore(database_url)
     return _EVENT_STORE_CACHE[cache_key]
 
 
@@ -713,6 +724,7 @@ def add_events(
     transport_address="",
     recurrence="none",
     repeat_count=0,
+    user_id=None,
 ):
     return get_event_store().add_events(
         date=date,
@@ -729,6 +741,7 @@ def add_events(
         transport_address=transport_address,
         recurrence=recurrence,
         repeat_count=repeat_count,
+        user_id=user_id,
     )
 
 
@@ -745,6 +758,7 @@ def add_event(
     transport_mode="",
     transport_kilometers=0.0,
     transport_address="",
+    user_id=None,
 ):
     return add_events(
         date=date,
@@ -759,13 +773,14 @@ def add_event(
         transport_mode=transport_mode,
         transport_kilometers=transport_kilometers,
         transport_address=transport_address,
+        user_id=user_id,
         recurrence="none",
         repeat_count=0,
     )[0]
 
 
-def get_events(month: str):
-    return get_event_store().get_events(month)
+def get_events(month: str, user_id: str | None = None):
+    return get_event_store().get_events(month, user_id=user_id)
 
 
 def get_assistant_hours_breakdown(month: str) -> Dict[str, float]:
@@ -835,8 +850,8 @@ def display_month(month: str):
             )
 
 
-def delete_event(event_id: str):
-    return get_event_store().delete_event(event_id)
+def delete_event(event_id: str, user_id: str | None = None):
+    return get_event_store().delete_event(event_id, user_id=user_id)
 
 
 def update_event(
@@ -853,6 +868,7 @@ def update_event(
     transport_mode="",
     transport_kilometers=0.0,
     transport_address="",
+    user_id=None,
 ) -> Dict | None:
     return get_event_store().update_event(
         event_id=event_id,
@@ -868,6 +884,7 @@ def update_event(
         transport_mode=transport_mode,
         transport_kilometers=transport_kilometers,
         transport_address=transport_address,
+        user_id=user_id,
     )
 
 

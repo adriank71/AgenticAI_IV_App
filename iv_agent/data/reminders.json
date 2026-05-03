@@ -2,7 +2,7 @@
   {
     "id": "89648491-2e46-4536-8522-2ff986fcb41c",
     "created_at": "2026-04-29T11:49:42.280905+02:00",
-    "last_run_at": "2026-05-01T09:51:44.259735+02:00",
+    "last_run_at": "2026-05-03T17:23:48.166016+02:00",
     "next_run_at": "2026-05-31T09:00:00+02:00",
     "status": "active",
     "title": "Generate Assistenzbeitrag at month-end",

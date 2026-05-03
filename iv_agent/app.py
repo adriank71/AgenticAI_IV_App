@@ -25,6 +25,20 @@ try:
         get_events,
         update_event,
     )
+    from .services.calendar_service import (
+        create_calendar_event as create_service_calendar_event,
+        delete_calendar_event as delete_service_calendar_event,
+        normalize_user_id,
+        update_calendar_event as update_service_calendar_event,
+    )
+    from .services.storage_service import (
+        create_folder as create_document_folder,
+        delete_document as delete_service_document,
+        document_bucket_name,
+        move_document_to_folder,
+        process_chat_attachments,
+        update_document_metadata,
+    )
     from .form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
         STANDARD_RATE,
@@ -46,11 +60,12 @@ try:
         MissingOpenAIConfigurationError,
         build_voice_calendar_draft,
         openai_configuration_status,
+        transcribe_audio,
         _extract_text_response,
         _get_openai_client,
     )
     from . import reminders as reminders_module
-    from .agent_orchestrator import confirm_pending_action, run_agent_chat
+    from .agents.orchestrator import confirm_pending_action, run_agent_chat
     from .reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 except ImportError:
     from calendar_manager import (
@@ -62,6 +77,20 @@ except ImportError:
         get_assistant_hours_for_events,
         get_events,
         update_event,
+    )
+    from services.calendar_service import (
+        create_calendar_event as create_service_calendar_event,
+        delete_calendar_event as delete_service_calendar_event,
+        normalize_user_id,
+        update_calendar_event as update_service_calendar_event,
+    )
+    from services.storage_service import (
+        create_folder as create_document_folder,
+        delete_document as delete_service_document,
+        document_bucket_name,
+        move_document_to_folder,
+        process_chat_attachments,
+        update_document_metadata,
     )
     from form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
@@ -84,11 +113,12 @@ except ImportError:
         MissingOpenAIConfigurationError,
         build_voice_calendar_draft,
         openai_configuration_status,
+        transcribe_audio,
         _extract_text_response,
         _get_openai_client,
     )
     import reminders as reminders_module
-    from agent_orchestrator import confirm_pending_action, run_agent_chat
+    from agents.orchestrator import confirm_pending_action, run_agent_chat
     from reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 
 
@@ -148,6 +178,16 @@ def resolve_chat_webhook_url() -> str:
 N8N_CHAT_WEBHOOK_URL = resolve_chat_webhook_url()
 
 
+def agent_external_knowledge_enabled() -> bool:
+    explicit_url = os.environ.get("IV_AGENT_CHAT_WEBHOOK_URL", "").strip()
+    explicit_flag = str(os.environ.get("IV_AGENT_ENABLE_EXTERNAL_KNOWLEDGE", "true")).strip().lower()
+    legacy_flag = str(os.environ.get("IV_AGENT_ENABLE_LEGACY_N8N_RAG", "")).strip().lower()
+    return bool(
+        (explicit_url and explicit_flag not in {"0", "false", "no"})
+        or legacy_flag in {"1", "true", "yes"}
+    )
+
+
 def json_error(message: str, status_code: int):
     response = jsonify({"error": message})
     response.status_code = status_code
@@ -159,6 +199,16 @@ def ai_configuration_error():
         "AI is not configured on this server. Add OPENAI_API_KEY in Vercel Project Settings -> Environment Variables, then redeploy.",
         503,
     )
+
+
+def external_service_error_message(exc: Exception, fallback: str) -> str:
+    message = getattr(exc, "message", None) or str(exc)
+    message = " ".join(str(message or "").split())
+    if not message:
+        return fallback
+    if len(message) > 360:
+        message = f"{message[:357]}..."
+    return message
 
 
 def utc_now() -> datetime:
@@ -600,7 +650,7 @@ def generate_assistenz_report(
     triggered_by_reminder: str | None = None,
 ) -> dict:
     output_filename = f"Assistenzbeitrag_{month}.pdf"
-    month_events = get_events(month)
+    month_events = get_events(month, user_id=normalize_user_id(profile_id or "default"))
     total_hours = get_assistant_hours_for_events(month_events)
     assistant_breakdown = get_assistant_hours_breakdown_for_events(month_events)
     dual_template_paths = resolve_dual_template_paths()
@@ -740,6 +790,82 @@ def parse_chat_payload(payload: dict) -> dict:
     }
 
 
+def build_agent_chat_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body is required")
+
+    message = str(payload.get("message", "")).strip()
+    if not message:
+        raise ValueError("message is required")
+
+    raw_context = payload.get("client_context") if isinstance(payload.get("client_context"), dict) else {}
+    profile_id = str(
+        raw_context.get("profile_id")
+        or payload.get("profile_id")
+        or payload.get("user_id")
+        or "default"
+    ).strip() or "default"
+    context = {
+        **raw_context,
+        "profile_id": normalize_user_id(profile_id),
+        "timezone": str(raw_context.get("timezone") or payload.get("timezone") or "").strip(),
+        "now": str(raw_context.get("now") or payload.get("now") or utc_timestamp()).strip(),
+    }
+    raw_attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
+    attachments, uploaded_documents = process_chat_attachments(
+        [item for item in raw_attachments if isinstance(item, dict)],
+        user_id=context["profile_id"],
+    )
+
+    return {
+        "message": message,
+        "thread_id": str(payload.get("thread_id") or "").strip(),
+        "attachments": attachments,
+        "uploaded_documents": uploaded_documents,
+        "client_context": context,
+        "history": payload.get("history") if isinstance(payload.get("history"), list) else [],
+    }
+
+
+def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: dict) -> dict:
+    uploaded_documents = agent_payload.get("uploaded_documents")
+    if not isinstance(uploaded_documents, list) or not uploaded_documents:
+        return response_payload
+
+    artifacts = response_payload.get("artifacts") if isinstance(response_payload.get("artifacts"), list) else []
+    for document in uploaded_documents:
+        if not isinstance(document, dict):
+            continue
+        artifacts.append(
+            {
+                "id": document.get("document_id"),
+                "type": "document",
+                "title": document.get("file_name") or document.get("safe_file_name") or "Document",
+                "document_id": document.get("document_id"),
+                "content_type": document.get("content_type"),
+                "content_size": document.get("content_size"),
+                "summary": document.get("summary"),
+                "extraction_status": document.get("extraction_status"),
+            }
+        )
+
+    response_payload["artifacts"] = artifacts
+    response_payload["uploaded_documents"] = uploaded_documents
+    names = [
+        str(document.get("file_name") or document.get("safe_file_name") or "").strip()
+        for document in uploaded_documents
+        if isinstance(document, dict)
+    ]
+    names = [name for name in names if name]
+    if names and response_payload.get("answer"):
+        response_payload["answer"] = (
+            str(response_payload["answer"]).rstrip()
+            + "\n\nGespeicherte Dokumente: "
+            + ", ".join(names[:5])
+        )
+    return response_payload
+
+
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -759,7 +885,8 @@ def script():
 def api_get_events():
     try:
         month = parse_month(request.args.get("month", "").strip())
-        return jsonify({"events": get_events(month)})
+        profile_id = normalize_user_id(request.args.get("profile_id", "default"))
+        return jsonify({"events": get_events(month, user_id=profile_id)})
     except ValueError as exc:
         return json_error(str(exc), 400)
 
@@ -768,7 +895,8 @@ def api_get_events():
 def api_add_event():
     try:
         payload = parse_event_payload(get_json_payload(required=True))
-        created_events = add_events(**payload)
+        profile_id = normalize_user_id(request.args.get("profile_id", request.args.get("user_id", "default")))
+        created_events = add_events(**payload, user_id=profile_id)
         response = jsonify(
             {
                 "event": created_events[0],
@@ -784,7 +912,8 @@ def api_add_event():
 
 @app.delete("/api/events/<event_id>")
 def api_delete_event(event_id: str):
-    if delete_event(event_id):
+    profile_id = normalize_user_id(request.args.get("profile_id", request.args.get("user_id", "default")))
+    if delete_event(event_id, user_id=profile_id):
         return jsonify({"deleted": True, "event_id": event_id})
     return json_error("Event not found", 404)
 
@@ -795,7 +924,8 @@ def api_update_event(event_id: str):
         payload = parse_event_payload(get_json_payload(required=True))
         payload.pop("recurrence", None)
         payload.pop("repeat_count", None)
-        updated_event = update_event(event_id=event_id, **payload)
+        profile_id = normalize_user_id(request.args.get("profile_id", request.args.get("user_id", "default")))
+        updated_event = update_event(event_id=event_id, user_id=profile_id, **payload)
         if not updated_event:
             return json_error("Event not found", 404)
         return jsonify({"updated": True, "event": updated_event})
@@ -807,7 +937,8 @@ def api_update_event(event_id: str):
 def api_get_hours():
     try:
         month = parse_month(request.args.get("month", "").strip())
-        month_events = get_events(month)
+        profile_id = normalize_user_id(request.args.get("profile_id", request.args.get("user_id", "default")))
+        month_events = get_events(month, user_id=profile_id)
         return jsonify(
             {
                 "month": month,
@@ -843,7 +974,7 @@ def api_calendar_data():
     profile_id = request.args.get("profile_id", "default").strip() or "default"
     try:
         month = parse_month(request.args.get("month", "").strip())
-        month_events = get_events(month)
+        month_events = get_events(month, user_id=normalize_user_id(profile_id))
         return jsonify(
             {
                 "profile_id": profile_id,
@@ -885,9 +1016,14 @@ def api_ai_status():
 @app.post("/api/chat")
 def api_chat():
     try:
-        chat_payload = parse_chat_payload(get_json_payload(required=True))
-        webhook_response = trigger_chat_webhook(chat_payload)
-        return jsonify({"webhook_response": make_json_safe(webhook_response)})
+        agent_payload = build_agent_chat_payload(get_json_payload(required=True))
+        response_payload = run_agent_chat(
+            agent_payload,
+            rag_callback=trigger_chat_webhook if agent_external_knowledge_enabled() else None,
+            local_tools={"calendar_snapshot": build_agent_calendar_snapshot},
+        )
+        response_payload = enrich_agent_response_with_uploads(response_payload, agent_payload)
+        return jsonify(make_json_safe(response_payload))
     except ValueError as exc:
         return json_error(str(exc), 400)
     except urllib.error.URLError as exc:
@@ -904,10 +1040,17 @@ def api_chat():
 def execute_pending_agent_action(action: dict) -> dict:
     action_type = str(action.get("type") or "").strip()
     payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    user_id = normalize_user_id(payload.get("user_id") or action.get("user_id") or "default")
+    timezone_name = str(payload.get("timezone") or "").strip() or None
 
     if action_type == "create_event":
-        event_payload = parse_event_payload(payload)
-        created_events = add_events(**event_payload)
+        recurrence = str(payload.get("recurrence", "none") or "none").strip().lower()
+        if recurrence and recurrence != "none":
+            event_payload = parse_event_payload(payload)
+            created_events = add_events(**event_payload, user_id=user_id)
+        else:
+            created = create_service_calendar_event(payload, user_id=user_id, timezone_name=timezone_name)
+            created_events = [created["event"]]
         return {
             "event": created_events[0],
             "events": created_events,
@@ -918,21 +1061,63 @@ def execute_pending_agent_action(action: dict) -> dict:
         event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
         if not event_id:
             raise ValueError("event_id is required")
-        event_payload = parse_event_payload(payload)
-        event_payload.pop("recurrence", None)
-        event_payload.pop("repeat_count", None)
-        updated_event = update_event(event_id=event_id, **event_payload)
-        if not updated_event:
+        updates = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"event_id", "id", "matched_event", "user_id", "timezone"}
+        }
+        updated_result = update_service_calendar_event(
+            event_id,
+            updates,
+            user_id=user_id,
+            timezone_name=timezone_name,
+        )
+        if not updated_result:
             raise FileNotFoundError("Event not found")
-        return {"updated": True, "event": updated_event}
+        return {"updated": True, "event": updated_result["event"]}
 
     if action_type == "delete_event":
         event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
         if not event_id:
             raise ValueError("event_id is required")
-        if not delete_event(event_id):
+        if not delete_service_calendar_event(event_id, user_id=user_id):
             raise FileNotFoundError("Event not found")
         return {"deleted": True, "event_id": event_id}
+
+    if action_type == "storage.create_folder":
+        folder = create_document_folder(
+            user_id=user_id,
+            name=str(payload.get("name") or "").strip(),
+            parent_folder_id=payload.get("parent_folder_id") or None,
+            color=str(payload.get("color") or "").strip(),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
+        return {"folder": folder}
+
+    if action_type == "storage.move_document":
+        document_id = str(payload.get("document_id") or "").strip()
+        if not document_id:
+            raise ValueError("document_id is required")
+        document = move_document_to_folder(
+            user_id=user_id,
+            document_id=document_id,
+            folder_id=payload.get("folder_id") or None,
+        )
+        return {"document": document, "moved": True}
+
+    if action_type == "storage.delete_document":
+        document_id = str(payload.get("document_id") or "").strip()
+        if not document_id:
+            raise ValueError("document_id is required")
+        return delete_service_document(user_id=user_id, document_id=document_id)
+
+    if action_type == "storage.update_metadata":
+        document_id = str(payload.get("document_id") or "").strip()
+        updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
+        if not document_id:
+            raise ValueError("document_id is required")
+        document = update_document_metadata(user_id=user_id, document_id=document_id, updates=updates)
+        return {"document": document, "updated": True}
 
     if action_type == "create_reminder":
         reminder = reminders_module.create_reminder(payload)
@@ -966,13 +1151,38 @@ def execute_pending_agent_action(action: dict) -> dict:
     raise ValueError(f"Unsupported pending action type: {action_type}")
 
 
+def build_agent_calendar_snapshot(payload: dict) -> dict:
+    raw_month = str(payload.get("month") or "").strip()
+    if not raw_month:
+        raw_month = utc_now().strftime("%Y-%m")
+    month = parse_month(raw_month)
+    profile_id = normalize_user_id(payload.get("profile_id") or "default")
+    month_events = get_events(month, user_id=profile_id)
+    try:
+        profile_payload = load_profile_payload(profile_id)
+    except FileNotFoundError:
+        profile_payload = {}
+    return {
+        "profile_id": profile_id,
+        "profile": profile_payload,
+        "month": month,
+        "events": month_events,
+        "total_hours": get_assistant_hours_for_events(month_events),
+        "assistant_breakdown": get_assistant_hours_breakdown_for_events(month_events),
+        "reminders": reminders_module.list_reminders(),
+    }
+
+
 @app.post("/api/agent/chat")
 def api_agent_chat():
     try:
+        agent_payload = build_agent_chat_payload(get_json_payload(required=True))
         response_payload = run_agent_chat(
-            get_json_payload(required=True),
-            rag_callback=trigger_chat_webhook,
+            agent_payload,
+            rag_callback=trigger_chat_webhook if agent_external_knowledge_enabled() else None,
+            local_tools={"calendar_snapshot": build_agent_calendar_snapshot},
         )
+        response_payload = enrich_agent_response_with_uploads(response_payload, agent_payload)
         return jsonify(make_json_safe(response_payload))
     except ValueError as exc:
         return json_error(str(exc), 400)
@@ -990,14 +1200,40 @@ def api_agent_chat():
 @app.post("/api/agent/actions/<action_id>/confirm")
 def api_confirm_agent_action(action_id: str):
     try:
-        confirmation = confirm_pending_action(action_id, execute_pending_agent_action)
-        return jsonify({"confirmed": True, **make_json_safe(confirmation)})
+        payload = get_json_payload(required=False)
+        raw_context = payload.get("client_context") if isinstance(payload.get("client_context"), dict) else {}
+        confirmation = confirm_pending_action(
+            action_id,
+            execute_pending_agent_action,
+            thread_id=str(payload.get("thread_id") or raw_context.get("thread_id") or "").strip() or None,
+            user_id=(
+                normalize_user_id(payload.get("profile_id") or payload.get("user_id") or raw_context.get("profile_id"))
+                if (payload.get("profile_id") or payload.get("user_id") or raw_context.get("profile_id"))
+                else None
+            ),
+        )
+        action_type = confirmation.get("action", {}).get("type")
+        return jsonify(
+            {
+                "confirmed": True,
+                "calendar_updated": action_type in {"create_event", "update_event", "delete_event"},
+                "storage_updated": action_type in {
+                    "storage.create_folder",
+                    "storage.move_document",
+                    "storage.delete_document",
+                    "storage.update_metadata",
+                },
+                **make_json_safe(confirmation),
+            }
+        )
     except KeyError:
         return json_error("Pending action not found", 404)
     except ValueError as exc:
         return json_error(str(exc), 400)
     except FileNotFoundError as exc:
         return json_error(str(exc), 404)
+    except PermissionError as exc:
+        return json_error(str(exc), 403)
     except RuntimeError as exc:
         message = str(exc)
         status_code = 409 if "already been handled" in message else 502
@@ -1037,6 +1273,34 @@ def api_calendar_voice_draft():
     except Exception as exc:
         logger.exception("Unexpected voice calendar draft error: %s", exc)
         return json_error("Failed to process voice calendar request", 500)
+
+
+@app.post("/api/chat/voice/transcribe")
+def api_chat_voice_transcribe():
+    try:
+        audio_file = request.files.get("audio")
+        if not audio_file:
+            return json_error("audio is required", 400)
+
+        audio_bytes = audio_file.read()
+        if not audio_bytes:
+            return json_error("audio is required", 400)
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            return json_error("audio must be 25 MB or smaller", 413)
+
+        transcript = transcribe_audio(audio_bytes, audio_file.filename or "chat-voice.webm")
+        return jsonify({"transcript": transcript})
+    except MissingOpenAIConfigurationError:
+        return ai_configuration_error()
+    except RuntimeError as exc:
+        logger.error("chat voice transcription failed: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.error("chat voice transcription failed: %s", exc)
+        return json_error(
+            external_service_error_message(exc, "Failed to process chat voice request"),
+            502,
+        )
 
 
 @app.post("/api/reports/generate")
@@ -1373,6 +1637,12 @@ def api_storage_browser():
             if not bucket_name:
                 continue
             objects = _list_supabase_bucket_objects(client, bucket_name)
+            if bucket_name == document_bucket_name():
+                objects = [
+                    item
+                    for item in objects
+                    if item.get("path") != "Documents" and not str(item.get("path") or "").startswith("Documents/")
+                ]
             buckets.append(
                 {
                     "id": bucket_name,

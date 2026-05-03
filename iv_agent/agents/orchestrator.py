@@ -24,6 +24,19 @@ AGENT_MODEL = (
     or "gpt-5.4-mini"
 ).strip() or "gpt-5.4-mini"
 
+CALENDAR_AGENT_MODEL = (
+    os.environ.get("OPENAI_CALENDAR_AGENT_MODEL")
+    or os.environ.get("OPENAI_AGENT_MODEL")
+    or "gpt-5.4-mini"
+).strip() or "gpt-5.4-mini"
+
+STORAGE_AGENT_MODEL = (
+    os.environ.get("OPENAI_DOCUMENT_AGENT_MODEL")
+    or os.environ.get("OPENAI_STORAGE_AGENT_MODEL")
+    or os.environ.get("OPENAI_AGENT_MODEL")
+    or "gpt-5.4-mini"
+).strip() or "gpt-5.4-mini"
+
 ACTION_TYPE_ALIASES = {
     "calendar.create_event": "create_event",
     "calendar.update_event": "update_event",
@@ -33,6 +46,10 @@ ACTION_TYPE_ALIASES = {
     "automation.save": "create_reminder",
     "report.generate": "generate_report",
     "report.send": "send_report",
+    "storage.create_document_folder": "storage.create_folder",
+    "storage.move": "storage.move_document",
+    "storage.delete": "storage.delete_document",
+    "storage.update_document_metadata": "storage.update_metadata",
 }
 
 SUPPORTED_ACTION_TYPES = {
@@ -42,6 +59,10 @@ SUPPORTED_ACTION_TYPES = {
     "create_reminder",
     "generate_report",
     "send_report",
+    "storage.create_folder",
+    "storage.move_document",
+    "storage.delete_document",
+    "storage.update_metadata",
 }
 
 
@@ -229,12 +250,18 @@ def _public_pending_action(action: dict[str, Any]) -> dict[str, Any]:
         "payload": make_json_safe(action.get("payload") or {}),
         "status": action.get("status", "pending"),
         "thread_id": action.get("thread_id", ""),
+        "user_id": action.get("user_id", ""),
         "requires_confirmation": True,
         "created_at": action.get("created_at", ""),
     }
 
 
-def register_pending_actions(raw_actions: list[Any], *, thread_id: str) -> list[dict[str, Any]]:
+def register_pending_actions(
+    raw_actions: list[Any],
+    *,
+    thread_id: str,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
     if not raw_actions:
         return []
 
@@ -270,6 +297,7 @@ def register_pending_actions(raw_actions: list[Any], *, thread_id: str) -> list[
             "payload": make_json_safe(payload),
             "status": "pending",
             "thread_id": thread_id,
+            "user_id": str(raw_action.get("user_id") or user_id or payload.get("user_id") or "default").strip() or "default",
             "created_at": utc_timestamp(),
         }
         state["actions"].append(action)
@@ -283,6 +311,9 @@ def register_pending_actions(raw_actions: list[Any], *, thread_id: str) -> list[
 def confirm_pending_action(
     action_id: str,
     executor: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_action_id = str(action_id or "").strip()
     if not normalized_action_id:
@@ -297,6 +328,14 @@ def confirm_pending_action(
 
     if not target_action:
         raise KeyError("Pending action not found")
+
+    expected_thread_id = str(thread_id or "").strip()
+    if expected_thread_id and target_action.get("thread_id") != expected_thread_id:
+        raise PermissionError("Pending action does not belong to this chat thread")
+
+    expected_user_id = str(user_id or "").strip()
+    if expected_user_id and target_action.get("user_id") and target_action.get("user_id") != expected_user_id:
+        raise PermissionError("Pending action does not belong to this user")
 
     if target_action.get("status") != "pending":
         raise RuntimeError("Pending action has already been handled")
@@ -386,6 +425,54 @@ def _run_rag_fallback(
         "tool_events": tool_events,
         "artifacts": artifacts,
         "pending_actions": pending_actions,
+        "structured_actions": pending_actions,
+        "thread_id": request_payload["thread_id"],
+    }
+
+
+def _run_orchestrator_unavailable(
+    request_payload: dict[str, Any],
+    *,
+    reason: str,
+    local_tools: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    tool_events = [
+        _tool_event("orchestrator", "unavailable", reason, event_type="agent"),
+    ]
+    lower_message = request_payload["message"].lower()
+    calendar_hint = ""
+    if local_tools and "calendar_snapshot" in local_tools and any(
+        token in lower_message for token in ("calendar", "kalender", "termin", "event")
+    ):
+        try:
+            snapshot = local_tools["calendar_snapshot"](
+                {
+                    "month": request_payload.get("client_context", {}).get("current_month", ""),
+                    "profile_id": request_payload.get("client_context", {}).get("profile_id", "default"),
+                }
+            )
+            month = str(snapshot.get("month") or "").strip()
+            event_count = len(snapshot.get("events") or [])
+            calendar_hint = (
+                f" Der lokale Kalenderzugriff ist im Backend registriert; "
+                f"fuer {month or 'den aktuellen Monat'} wurden {event_count} Termine gefunden."
+            )
+            tool_events.append(_tool_event("calendar_snapshot", "completed", "Local calendar snapshot checked"))
+        except Exception as exc:
+            logger.warning("Could not inspect local calendar while orchestrator is unavailable: %s", exc)
+            tool_events.append(_tool_event("calendar_snapshot", "failed", "Local calendar snapshot failed"))
+
+    return {
+        "answer": (
+            "Der Chat ist jetzt auf den Orchestrator ausgerichtet, aber der OpenAI Agents SDK Lauf "
+            f"kann aktuell nicht starten: {reason}.{calendar_hint} "
+            "Der alte n8n Webhook wird fuer /api/agent/chat nicht mehr automatisch aufgerufen."
+        ),
+        "citations": [],
+        "tool_events": tool_events,
+        "artifacts": [],
+        "pending_actions": [],
+        "structured_actions": [],
         "thread_id": request_payload["thread_id"],
     }
 
@@ -403,39 +490,77 @@ def _should_run_agents_sdk() -> bool:
 def _run_agents_sdk(
     request_payload: dict[str, Any],
     *,
-    rag_callback: Callable[[dict[str, Any]], dict[str, Any]],
+    rag_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    local_tools: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    from agents import Agent, Runner, function_tool, trace  # type: ignore
+    from agents import Agent, Runner, function_tool, set_tracing_disabled, trace  # type: ignore
+
+    try:
+        from .calendar_agent import build_calendar_agent
+        from .storage_agent import build_storage_agent
+        from ..services.calendar_service import (
+            list_calendar_events as service_list_calendar_events,
+            normalize_timezone,
+            normalize_user_id,
+        )
+        from ..services.storage_service import (
+            list_documents as service_list_documents,
+            search_documents as service_search_documents,
+        )
+    except ImportError:
+        from agents.calendar_agent import build_calendar_agent
+        from agents.storage_agent import build_storage_agent
+        from services.calendar_service import (
+            list_calendar_events as service_list_calendar_events,
+            normalize_timezone,
+            normalize_user_id,
+        )
+        from services.storage_service import (
+            list_documents as service_list_documents,
+            search_documents as service_search_documents,
+        )
+
+    if str(os.environ.get("IV_AGENT_ENABLE_OPENAI_TRACING", "")).strip().lower() not in {"1", "true", "yes"}:
+        set_tracing_disabled(True)
 
     drafted_actions: list[dict[str, Any]] = []
     collected_citations: list[dict[str, Any]] = []
     collected_artifacts: list[dict[str, Any]] = []
+    structured_actions: list[dict[str, Any]] = []
     tool_events: list[dict[str, Any]] = [
         _tool_event("orchestrator", "started", f"OpenAI Agents SDK orchestrator using {AGENT_MODEL}", event_type="agent")
     ]
+    orchestrator_tools = []
 
-    @function_tool
-    def query_iv_knowledge(question: str) -> str:
-        """Query the existing n8n IV knowledge and document retrieval workflow."""
-        tool_events.append(_tool_event("rag_tool", "started", "Querying IV knowledge webhook"))
-        raw_response = rag_callback(_build_rag_payload(request_payload, message=question))
-        answer, citations, artifacts, pending_actions = _normalize_rag_response(
-            raw_response,
-            thread_id=request_payload["thread_id"],
-        )
-        collected_citations.extend(citations)
-        collected_artifacts.extend(artifacts)
-        drafted_actions.extend(pending_actions)
-        tool_events.append(_tool_event("rag_tool", "completed", "IV knowledge webhook response normalized"))
-        return json.dumps(
-            {
-                "answer": answer,
-                "citations": citations,
-                "artifacts": artifacts,
-                "pending_actions": pending_actions,
-            },
-            ensure_ascii=True,
-        )
+    client_context = request_payload.get("client_context", {}) if isinstance(request_payload.get("client_context"), dict) else {}
+    context_user_id = normalize_user_id(client_context.get("profile_id") or client_context.get("user_id") or "default")
+    context_timezone = normalize_timezone(client_context.get("timezone"))
+
+    if rag_callback:
+        @function_tool
+        def query_external_knowledge(question: str) -> str:
+            """Query the configured external IV knowledge webhook when local tools are not enough."""
+            tool_events.append(_tool_event("external_knowledge", "started", "Querying external knowledge webhook"))
+            raw_response = rag_callback(_build_rag_payload(request_payload, message=question))
+            answer, citations, artifacts, pending_actions = _normalize_rag_response(
+                raw_response,
+                thread_id=request_payload["thread_id"],
+            )
+            collected_citations.extend(citations)
+            collected_artifacts.extend(artifacts)
+            drafted_actions.extend(pending_actions)
+            tool_events.append(_tool_event("external_knowledge", "completed", "External knowledge response normalized"))
+            return json.dumps(
+                {
+                    "answer": answer,
+                    "citations": citations,
+                    "artifacts": artifacts,
+                    "pending_actions": pending_actions,
+                },
+                ensure_ascii=True,
+            )
+
+        orchestrator_tools.append(query_external_knowledge)
 
     @function_tool
     def draft_pending_action(action_type: str, title: str, payload_json: str) -> str:
@@ -447,22 +572,132 @@ def _run_agents_sdk(
         actions = register_pending_actions(
             [{"type": action_type, "title": title, "payload": payload}],
             thread_id=request_payload["thread_id"],
+            user_id=context_user_id,
         )
         drafted_actions.extend(actions)
-        return json.dumps({"pending_actions": actions}, ensure_ascii=True)
+        structured_actions.extend(actions)
+        return json.dumps(
+            {
+                "pending_actions": actions,
+            },
+            ensure_ascii=True,
+        )
+
+    orchestrator_tools.append(draft_pending_action)
+
+    def _optional_int(value: Any) -> int | None:
+        try:
+            parsed = int(value or 0)
+        except (TypeError, ValueError):
+            return None
+        return parsed or None
+
+    @function_tool
+    def list_calendar_range(start_at: str, end_at: str, query: str = "") -> str:
+        """Read calendar events for mixed calendar/document questions using explicit ISO datetime bounds."""
+        tool_events.append(_tool_event("list_calendar_range", "started", "Reading local calendar"))
+        payload = service_list_calendar_events(
+            user_id=context_user_id,
+            start_at=start_at,
+            end_at=end_at,
+            query=query,
+            timezone_name=context_timezone,
+        )
+        tool_events.append(_tool_event("list_calendar_range", "completed", "Calendar range read"))
+        return json.dumps(make_json_safe(payload), ensure_ascii=True)
+
+    orchestrator_tools.append(list_calendar_range)
+
+    @function_tool
+    def list_user_documents(year: int = 0, month: int = 0, document_type: str = "", institution: str = "", limit: int = 25) -> str:
+        """Read stored documents for mixed calendar/document questions."""
+        tool_events.append(_tool_event("list_user_documents", "started", "Reading document metadata"))
+        documents = service_list_documents(
+            user_id=context_user_id,
+            year=_optional_int(year),
+            month=_optional_int(month),
+            document_type=document_type,
+            institution=institution,
+            limit=limit,
+        )
+        tool_events.append(_tool_event("list_user_documents", "completed", "Document metadata read"))
+        return json.dumps(make_json_safe({"documents": documents}), ensure_ascii=True)
+
+    orchestrator_tools.append(list_user_documents)
+
+    @function_tool
+    def search_user_documents(query: str, limit: int = 10) -> str:
+        """Search stored documents for mixed calendar/document questions."""
+        tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
+        documents = service_search_documents(user_id=context_user_id, query=query, limit=limit)
+        tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
+        return json.dumps(make_json_safe({"query": query, "documents": documents}), ensure_ascii=True)
+
+    orchestrator_tools.append(search_user_documents)
+
+    now_value = str(client_context.get("now") or request_payload.get("timestamp") or utc_timestamp())
+    current_month = str(client_context.get("current_month") or "").strip()
+    calendar_view = str(client_context.get("calendar_view") or "").strip()
+    uploaded_documents = [
+        item for item in request_payload.get("attachments", [])
+        if isinstance(item, dict) and item.get("type") == "document" and item.get("document_id")
+    ]
+
+    calendar_agent = build_calendar_agent(
+        Agent,
+        function_tool,
+        model=CALENDAR_AGENT_MODEL,
+        context_user_id=context_user_id,
+        context_timezone=context_timezone,
+        now_value=now_value,
+        current_month=current_month,
+        calendar_view=calendar_view,
+        thread_id=request_payload["thread_id"],
+        tool_events=tool_events,
+        drafted_actions=drafted_actions,
+        structured_actions=structured_actions,
+        register_pending_actions=register_pending_actions,
+        make_json_safe=make_json_safe,
+        tool_event_factory=_tool_event,
+    )
+
+    storage_agent = build_storage_agent(
+        Agent,
+        function_tool,
+        model=STORAGE_AGENT_MODEL,
+        context_user_id=context_user_id,
+        now_value=now_value,
+        uploaded_documents=uploaded_documents,
+        thread_id=request_payload["thread_id"],
+        tool_events=tool_events,
+        drafted_actions=drafted_actions,
+        structured_actions=structured_actions,
+        register_pending_actions=register_pending_actions,
+        make_json_safe=make_json_safe,
+        tool_event_factory=_tool_event,
+    )
 
     instructions = (
-        "You are the IV-Helper orchestrator. Own the final answer. "
-        "Use query_iv_knowledge for IV legal, document, reimbursement, eligibility, or case-file questions. "
-        "You may summarize calendar, storage, automation, and report actions, but any create, update, delete, "
-        "PDF generation, sending, or automation save must use draft_pending_action and must not be executed directly. "
-        "Keep answers concise, cite retrieved sources when available, and clearly distinguish draft actions from completed work."
+        "You are the IV-Helper orchestrator. Every chat message reaches you first. "
+        "Before answering, decide whether to answer directly, inspect local app state, draft a pending action, "
+        "or use external knowledge if that tool is available. "
+        "For every calendar, appointment, Termin, Therapie, scheduling, counting, or availability request, hand off to CalendarAgent. "
+        "For every document, storage, upload, Datei, Dokument, Rechnung, Brief, PDF, DOCX, TXT, or image document request, hand off to StorageAgent. "
+        "If the request combines calendar and documents, use the local read tools from both domains before answering or hand off to the best specialized agent. "
+        "Raw file Base64 is never available to you; uploaded attachments are already persisted and represented as document metadata. "
+        "Do not execute side effects directly. For create, update, delete, reminder creation, PDF generation, report sending, "
+        "or automation saves, call draft_pending_action and explain that the user must confirm it. "
+        "Supported generic action_type values are create_reminder, generate_report, and send_report. Calendar mutations belong to CalendarAgent. "
+        "Storage mutations belong to StorageAgent. "
+        "Answer in German unless the user explicitly requests another language. Format final answers as clean concise Markdown. "
+        "Keep answers concise, mention which capability you used when useful, and cite retrieved sources when available."
     )
     agent = Agent(
         name="IV-Helper Orchestrator",
         instructions=instructions,
         model=AGENT_MODEL,
-        tools=[query_iv_knowledge, draft_pending_action],
+        tools=orchestrator_tools,
+        handoffs=[calendar_agent, storage_agent],
     )
 
     input_text = json.dumps(
@@ -485,6 +720,7 @@ def _run_agents_sdk(
         "tool_events": tool_events,
         "artifacts": collected_artifacts,
         "pending_actions": drafted_actions,
+        "structured_actions": structured_actions,
         "thread_id": request_payload["thread_id"],
     }
 
@@ -492,28 +728,57 @@ def _run_agents_sdk(
 def run_agent_chat(
     payload: dict[str, Any],
     *,
-    rag_callback: Callable[[dict[str, Any]], dict[str, Any]],
+    rag_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    local_tools: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     request_payload = normalize_agent_chat_payload(payload)
 
+    if str(os.environ.get("IV_AGENT_DISABLE_OPENAI_AGENTS", "")).strip().lower() in {"1", "true", "yes"}:
+        return make_json_safe(
+            _run_orchestrator_unavailable(
+                request_payload,
+                reason="OpenAI Agents SDK is disabled by IV_AGENT_DISABLE_OPENAI_AGENTS",
+                local_tools=local_tools,
+            )
+        )
+
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        return make_json_safe(
+            _run_orchestrator_unavailable(
+                request_payload,
+                reason="OPENAI_API_KEY is not configured",
+                local_tools=local_tools,
+            )
+        )
+
+    if not _agents_sdk_available():
+        return make_json_safe(
+            _run_orchestrator_unavailable(
+                request_payload,
+                reason="openai-agents is not installed in the active Python environment",
+                local_tools=local_tools,
+            )
+        )
+
     if _should_run_agents_sdk():
         try:
-            response = _run_agents_sdk(request_payload, rag_callback=rag_callback)
+            response = _run_agents_sdk(request_payload, rag_callback=rag_callback, local_tools=local_tools)
             if response.get("answer"):
                 return make_json_safe(response)
         except Exception as exc:
-            logger.warning("Agents SDK run failed; falling back to n8n RAG: %s", exc)
-            return _run_rag_fallback(
-                request_payload,
-                rag_callback=rag_callback,
-                preface_events=[
-                    _tool_event(
-                        "orchestrator",
-                        "fallback",
-                        "OpenAI Agents SDK run failed; using n8n RAG fallback",
-                        event_type="agent",
-                    )
-                ],
+            logger.warning("Agents SDK run failed: %s", exc)
+            return make_json_safe(
+                _run_orchestrator_unavailable(
+                    request_payload,
+                    reason=f"OpenAI Agents SDK run failed: {exc}",
+                    local_tools=local_tools,
+                )
             )
 
-    return _run_rag_fallback(request_payload, rag_callback=rag_callback)
+    return make_json_safe(
+        _run_orchestrator_unavailable(
+            request_payload,
+            reason="No orchestrator runtime is available",
+            local_tools=local_tools,
+        )
+    )

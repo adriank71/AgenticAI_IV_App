@@ -2,11 +2,19 @@ import os
 import shutil
 import unittest
 import uuid
+import io
+import zipfile
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from iv_agent.calendar_manager import PostgresEventStore
 from iv_agent.reminders import PostgresReminderStore
+from iv_agent.services.storage_service import (
+    StorageService,
+    extract_document_text,
+    process_chat_attachments,
+    sanitize_document_filename,
+)
 from iv_agent.storage import (
     LocalInvoiceCaptureStore,
     PostgresAssetStore,
@@ -128,6 +136,132 @@ class FakeSupabaseClient:
 
 
 class StorageTests(unittest.TestCase):
+    def test_document_filename_sanitization_and_text_extraction(self):
+        self.assertEqual(
+            sanitize_document_filename("../Rechnung Mai 2026.pdf", content_type="application/pdf"),
+            "Rechnung_Mai_2026.pdf",
+        )
+
+        text, status, error = extract_document_text("Gruezi\nIV Rechnung".encode("utf-8"), "text/plain")
+        self.assertEqual(status, "completed")
+        self.assertIsNone(error)
+        self.assertIn("IV Rechnung", text)
+
+        docx_buffer = io.BytesIO()
+        with zipfile.ZipFile(docx_buffer, "w") as docx_zip:
+            docx_zip.writestr(
+                "word/document.xml",
+                """
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body><w:p><w:r><w:t>Therapie Bericht</w:t></w:r></w:p></w:body>
+                </w:document>
+                """,
+            )
+        docx_text, docx_status, docx_error = extract_document_text(
+            docx_buffer.getvalue(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertEqual(docx_status, "completed")
+        self.assertIsNone(docx_error)
+        self.assertIn("Therapie Bericht", docx_text)
+
+    def test_storage_service_uploads_document_to_invoice_upload_documents_prefix(self):
+        cursor = RecordingCursor()
+        client = FakeSupabaseClient()
+        service = StorageService(
+            "postgres://example",
+            client=client,
+            bucket="Invoice_upload",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        document = service.upload_document(
+            user_id="default",
+            file_name="Rechnung Mai 2026.txt",
+            content=b"Rechnung der IV-Stelle vom 03.05.2026 Betrag CHF 50",
+            content_type="text/plain",
+        )
+
+        self.assertEqual(document["storage_bucket"], "Invoice_upload")
+        self.assertTrue(document["storage_key"].startswith("Documents/default/"))
+        self.assertTrue(document["storage_key"].endswith("-Rechnung_Mai_2026.txt"))
+        self.assertIn(("Invoice_upload", document["storage_key"]), client.objects)
+        self.assertEqual(document["document_type"], "invoice")
+        self.assertEqual(document["institution"], "Iv-Stelle")
+        self.assertTrue(any("INSERT INTO documents" in query for query, _ in cursor.statements))
+
+    def test_storage_service_list_documents_scopes_and_filters_queries(self):
+        cursor = RecordingCursor(fetchall_results=[[]])
+        service = StorageService(
+            "postgres://example",
+            client=FakeSupabaseClient(),
+            bucket="Invoice_upload",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        documents = service.list_documents(
+            user_id="profile_a",
+            year=2026,
+            month=5,
+            document_type="invoice",
+            institution="IV",
+            tags=["rechnung"],
+            folder_id=None,
+        )
+
+        self.assertEqual(documents, [])
+        query, params = cursor.statements[-1]
+        self.assertIn("FROM documents", query)
+        self.assertIn("user_id = %s", query)
+        self.assertIn("year = %s", query)
+        self.assertIn("month = %s", query)
+        self.assertIn("tags && %s::text[]", query)
+        self.assertEqual(params[0], "profile_a")
+        self.assertEqual(params[1], 2026)
+        self.assertEqual(params[2], 5)
+
+    def test_process_chat_attachments_uploads_and_removes_base64(self):
+        uploaded = {
+            "document_id": "doc-1",
+            "file_name": "brief.txt",
+            "safe_file_name": "brief.txt",
+            "storage_bucket": "Invoice_upload",
+            "storage_key": "Documents/default/2026/05/doc-1-brief.txt",
+            "content_type": "text/plain",
+            "content_size": 5,
+            "document_type": "letter",
+            "institution": "",
+            "document_date": None,
+            "tags": [],
+            "summary": "Hallo",
+            "extracted_text": "Hallo",
+            "extraction_status": "completed",
+            "extraction_error": "",
+        }
+
+        class FakeDocumentService:
+            def upload_document(self, **kwargs):
+                self.kwargs = kwargs
+                return uploaded
+
+        fake_service = FakeDocumentService()
+        with patch("iv_agent.services.storage_service.get_storage_service", return_value=fake_service):
+            sanitized, documents = process_chat_attachments(
+                [
+                    {
+                        "file_name": "brief.txt",
+                        "mime": "text/plain",
+                        "content_base64": "SGFsbG8=",
+                    }
+                ],
+                user_id="default",
+            )
+
+        self.assertEqual(documents, [uploaded])
+        self.assertEqual(fake_service.kwargs["content"], b"Hallo")
+        self.assertNotIn("content_base64", sanitized[0])
+        self.assertEqual(sanitized[0]["document_id"], "doc-1")
+
     def test_local_invoice_capture_store_persists_image_and_metadata(self):
         with workspace_tempdir() as temp_dir:
             store = LocalInvoiceCaptureStore(temp_dir)

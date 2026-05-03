@@ -205,17 +205,37 @@
             </div>
 
             <form id="adviser-form" class="chat-input-wrap glass-panel">
-              <button class="chat-icon-button" type="button" aria-label="Attach">
-                <span class="material-symbols-outlined">attach_file</span>
-              </button>
-              <input id="adviser-input" type="text" maxlength="500" placeholder="Ask IV Desk anything about your case..." />
-              <button class="chat-icon-button" type="button" aria-label="Voice Input">
-                <span class="material-symbols-outlined">mic</span>
-              </button>
-              <button id="adviser-cancel" class="secondary-button chat-cancel-button hidden" type="button">Cancel</button>
-              <button id="adviser-send" class="primary-button send-button" type="submit">
-                <span class="material-symbols-outlined">send</span>
-              </button>
+              <div class="chat-composer-row">
+                <button id="chat-attach-button" class="chat-icon-button" type="button" aria-label="Dateien und mehr hinzuf&#252;gen" title="Dateien und mehr hinzuf&#252;gen">
+                  <span class="material-symbols-outlined">attach_file</span>
+                </button>
+                <button id="chat-qr-button" class="chat-icon-button" type="button" aria-label="Dateien einscannen und hochladen" title="Dateien einscannen und hochladen">
+                  <span class="material-symbols-outlined">qr_code_2</span>
+                </button>
+                <input id="chat-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,.docx" multiple />
+                <input id="adviser-input" type="text" maxlength="500" placeholder="Ask IV Desk anything about your case..." />
+                <div class="chat-voice-waveform" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <button id="chat-voice-button" class="chat-icon-button" type="button" aria-label="Voice Input" title="Voice Input">
+                  <span class="material-symbols-outlined">mic</span>
+                </button>
+                <button id="adviser-cancel" class="secondary-button chat-cancel-button hidden" type="button">Cancel</button>
+                <button id="adviser-send" class="primary-button send-button" type="submit">
+                  <span class="material-symbols-outlined">send</span>
+                </button>
+              </div>
+              <div id="chat-voice-status-row" class="chat-voice-status-row hidden" aria-live="polite">
+                <span id="chat-voice-status" class="chat-voice-status"></span>
+                <span id="chat-voice-transcript" class="chat-voice-transcript"></span>
+              </div>
+              <div id="chat-attachment-tray" class="chat-attachment-tray hidden" aria-live="polite">
+                <div id="chat-attachment-list" class="chat-attachment-list"></div>
+                <p id="chat-attachment-status" class="chat-attachment-status" role="status"></p>
+              </div>
             </form>
             <p class="adviser-footnote">IV Desk AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
           </div>
@@ -445,6 +465,24 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="chat-qr-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="chat-qr-modal-title">
+    <div class="modal-backdrop" data-close-modal="chat-qr-modal"></div>
+    <div class="modal-panel chat-qr-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="chat-qr-modal-title">Dateien einscannen</h2>
+          <p class="modal-subtitle">Scanne den QR-Code mit deinem Handy und lade Fotos ueber die Kamera-App hoch.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="chat-qr-modal" aria-label="Close">&times;</button>
+      </div>
+      <div class="chat-qr-content">
+        <img id="chat-invoices-qr" class="invoices-qr chat-invoices-qr" alt="Scan QR to add invoice" />
+        <a id="chat-invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+        <p id="chat-qr-status" class="upload-status" role="status">QR-Code wird geladen...</p>
+      </div>
     </div>
   </div>
 

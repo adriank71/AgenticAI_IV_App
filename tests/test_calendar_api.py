@@ -12,6 +12,7 @@ from iv_agent import app as app_module
 from iv_agent import calendar_manager
 from iv_agent import reminders_agent
 from iv_agent import voice_calendar_agent
+from iv_agent.services import calendar_service
 
 
 @contextmanager
@@ -236,6 +237,61 @@ class CalendarManagerTests(unittest.TestCase):
 
             events = calendar_manager.get_events("2026-04")
             self.assertEqual(events[0]["category"], "transport")
+
+    def test_calendar_service_counts_events_by_query_and_user_scope(self):
+        with isolated_calendar_storage():
+            calendar_manager.add_event(
+                date="2026-05-04",
+                time="09:00",
+                end_time="10:00",
+                category="other",
+                title="Therapie",
+            )
+            calendar_manager.add_event(
+                date="2026-05-05",
+                time="11:00",
+                end_time="12:00",
+                category="other",
+                title="School call",
+            )
+
+            counted = calendar_service.count_calendar_events(
+                user_id="default",
+                start_at="2026-05-01T00:00:00+02:00",
+                end_at="2026-06-01T00:00:00+02:00",
+                query="Therapie",
+                timezone_name="Europe/Berlin",
+            )
+
+        self.assertEqual(counted["count"], 1)
+        self.assertEqual(counted["events"][0]["title"], "Therapie")
+
+    def test_calendar_service_check_availability_reports_conflicts(self):
+        with isolated_calendar_storage():
+            calendar_manager.add_event(
+                date="2026-05-07",
+                time="09:00",
+                end_time="10:00",
+                category="other",
+                title="Therapie",
+            )
+
+            busy = calendar_service.check_availability(
+                user_id="default",
+                start_at="2026-05-07T09:30:00+02:00",
+                end_at="2026-05-07T10:30:00+02:00",
+                timezone_name="Europe/Berlin",
+            )
+            free = calendar_service.check_availability(
+                user_id="default",
+                start_at="2026-05-07T10:30:00+02:00",
+                end_at="2026-05-07T11:30:00+02:00",
+                timezone_name="Europe/Berlin",
+            )
+
+        self.assertFalse(busy["available"])
+        self.assertEqual(busy["conflicts"][0]["title"], "Therapie")
+        self.assertTrue(free["available"])
 
 
 class CalendarApiTests(unittest.TestCase):

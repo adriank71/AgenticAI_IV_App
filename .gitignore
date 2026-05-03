@@ -24,6 +24,7 @@ Thumbs.db
 # Local environment / secrets
 .env
 .env.*
+!.env.example
 
 # App runtime data
 output/

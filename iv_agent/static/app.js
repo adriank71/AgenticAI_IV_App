@@ -47,6 +47,13 @@ const communityChannelTitleMap = {
 const communityStorageKey = "iv_helper_parent_community";
 const chatSessionsStorageKey = "iv_agent_chat_sessions";
 const activeChatStorageKey = "iv_agent_active_chat_id";
+const chatAttachmentMaxFiles = 5;
+const chatAttachmentMaxBytes = 10 * 1024 * 1024;
+const chatAttachmentMimeTypes = new Set([
+  "application/pdf",
+  "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
 
 const communitySeedMessages = [
   {
@@ -105,6 +112,18 @@ const state = {
   chatHistory: [],
   chatPending: false,
   chatAbortController: null,
+  chatAttachments: [],
+  chatAttachmentStatus: "",
+  chatAttachmentStatusVariant: "",
+  chatDragDepth: 0,
+  chatQrLoading: false,
+  chatVoiceRecorder: null,
+  chatVoiceStream: null,
+  chatVoiceChunks: [],
+  chatVoiceProcessing: false,
+  chatVoiceLiveRecognition: null,
+  chatVoiceInterimTranscript: "",
+  chatVoiceFinalTranscript: "",
   voiceRecorder: null,
   voiceStream: null,
   voiceChunks: [],
@@ -244,6 +263,20 @@ const elements = {
   adviserInput: document.getElementById("adviser-input"),
   adviserSendButton: document.getElementById("adviser-send"),
   adviserCancelButton: document.getElementById("adviser-cancel"),
+  chatAttachButton: document.getElementById("chat-attach-button"),
+  chatQrButton: document.getElementById("chat-qr-button"),
+  chatVoiceButton: document.getElementById("chat-voice-button"),
+  chatVoiceStatusRow: document.getElementById("chat-voice-status-row"),
+  chatVoiceStatus: document.getElementById("chat-voice-status"),
+  chatVoiceTranscript: document.getElementById("chat-voice-transcript"),
+  chatFileInput: document.getElementById("chat-file-input"),
+  chatAttachmentTray: document.getElementById("chat-attachment-tray"),
+  chatAttachmentList: document.getElementById("chat-attachment-list"),
+  chatAttachmentStatus: document.getElementById("chat-attachment-status"),
+  chatQrModal: document.getElementById("chat-qr-modal"),
+  chatQrImage: document.getElementById("chat-invoices-qr"),
+  chatCameraLink: document.getElementById("chat-invoices-camera-link"),
+  chatQrStatus: document.getElementById("chat-qr-status"),
   chatThread: document.getElementById("chat-thread"),
   chatChips: document.querySelectorAll(".chat-chip"),
   newThreadButton: document.getElementById("new-thread"),
@@ -544,6 +577,34 @@ async function apiFetch(url, options = {}) {
   }
 }
 
+async function readResponseError(response, fallbackMessage) {
+  let rawText = "";
+  try {
+    rawText = await response.text();
+  } catch (error) {
+    rawText = "";
+  }
+
+  if (rawText) {
+    try {
+      const payload = JSON.parse(rawText);
+      if (payload && payload.error) {
+        return String(payload.error);
+      }
+    } catch (error) {
+      const normalized = rawText.replace(/\s+/g, " ").trim();
+      if (normalized) {
+        return `${fallbackMessage} (${response.status}): ${normalized.slice(0, 180)}`;
+      }
+    }
+  }
+
+  if (response.status === 404) {
+    return "Voice transcription route not available. Restart the server.";
+  }
+  return `${fallbackMessage} (${response.status || "network"})`;
+}
+
 function showError(message) {
   clearTimeout(state.errorTimer);
   elements.errorBanner.textContent = message;
@@ -648,11 +709,11 @@ function applyAiStatus() {
   const configured = isOpenAiConfigured();
   const message = openAiUnavailableMessage();
 
-  [elements.voiceComposerButton, elements.automationVoiceButton].forEach((button) => {
+  [elements.voiceComposerButton, elements.automationVoiceButton, elements.chatVoiceButton].forEach((button) => {
     if (!button) {
       return;
     }
-    button.disabled = !configured;
+    button.disabled = !configured || (button === elements.chatVoiceButton && (state.chatPending || state.chatVoiceProcessing));
     button.title = configured ? button.getAttribute("aria-label") || "" : message;
   });
 
@@ -663,6 +724,10 @@ function applyAiStatus() {
     if (elements.automationVoiceStatus) {
       elements.automationVoiceStatus.textContent = message;
     }
+    if (elements.chatVoiceStatus) {
+      elements.chatVoiceStatus.textContent = message;
+    }
+    syncChatVoiceStatusRow();
   }
 }
 
@@ -808,18 +873,20 @@ async function refreshDashboardData() {
 
 async function getCalendarMonthData(month, options = {}) {
   const force = Boolean(options.force);
-  if (!force && state.calendarDataCache[month]) {
-    return state.calendarDataCache[month];
+  const profileId = getActiveProfileId();
+  const cacheKey = `${profileId}:${month}`;
+  if (!force && state.calendarDataCache[cacheKey]) {
+    return state.calendarDataCache[cacheKey];
   }
-  if (!force && state.calendarDataRequests[month]) {
-    return state.calendarDataRequests[month];
+  if (!force && state.calendarDataRequests[cacheKey]) {
+    return state.calendarDataRequests[cacheKey];
   }
 
-  const request = apiFetch(`/api/calendar-data?month=${encodeURIComponent(month)}`, {
+  const request = apiFetch(`/api/calendar-data?month=${encodeURIComponent(month)}&profile_id=${encodeURIComponent(profileId)}`, {
     showLoading: false,
   })
     .then((data) => {
-      state.calendarDataCache[month] = data;
+      state.calendarDataCache[cacheKey] = data;
 
       if (Array.isArray(data.reminders)) {
         state.automations = data.reminders;
@@ -830,11 +897,23 @@ async function getCalendarMonthData(month, options = {}) {
       return data;
     })
     .finally(() => {
-      delete state.calendarDataRequests[month];
+      delete state.calendarDataRequests[cacheKey];
     });
 
-  state.calendarDataRequests[month] = request;
+  state.calendarDataRequests[cacheKey] = request;
   return request;
+}
+
+function getActiveProfileId() {
+  return "default";
+}
+
+function getBrowserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin";
+  } catch (error) {
+    return "Europe/Berlin";
+  }
 }
 
 function clearCalendarDataCache() {
@@ -1135,6 +1214,9 @@ function openModal(modalId, triggerElement) {
   state.lastFocusedElement = triggerElement || document.activeElement;
   state.activeModalId = modalId;
   const modal = document.getElementById(modalId);
+  if (!modal) {
+    return;
+  }
   modal.classList.remove("hidden");
   const firstFocusable = modal.querySelector("input, select, textarea, button");
   if (firstFocusable) {
@@ -1419,6 +1501,18 @@ function getVoiceContext(target) {
       processingStatus: "Sending to OpenAI...",
     };
   }
+  if (target === "chat") {
+    return {
+      target: "chat",
+      card: elements.adviserForm,
+      button: elements.chatVoiceButton,
+      statusEl: elements.chatVoiceStatus,
+      transcriptEl: null,
+      idleStatus: "",
+      recordingStatus: "Listening... tap mic again to stop",
+      processingStatus: "Transcribing...",
+    };
+  }
   return {
     target: "event",
     card: elements.voiceComposer,
@@ -1429,6 +1523,49 @@ function getVoiceContext(target) {
     recordingStatus: "Listening… tap mic again to stop",
     processingStatus: "Transcribing & extracting fields…",
   };
+}
+
+function getVoiceStateKeys(target) {
+  if (target === "automation") {
+    return {
+      recorder: "automationVoiceRecorder",
+      stream: "automationVoiceStream",
+      chunks: "automationVoiceChunks",
+      recognition: "automationLiveRecognition",
+      finalTranscript: "automationFinalTranscript",
+      interimTranscript: "automationInterimTranscript",
+      processing: "automationVoiceProcessing",
+    };
+  }
+  if (target === "chat") {
+    return {
+      recorder: "chatVoiceRecorder",
+      stream: "chatVoiceStream",
+      chunks: "chatVoiceChunks",
+      recognition: "chatVoiceLiveRecognition",
+      finalTranscript: "chatVoiceFinalTranscript",
+      interimTranscript: "chatVoiceInterimTranscript",
+      processing: "chatVoiceProcessing",
+    };
+  }
+  return {
+    recorder: "voiceRecorder",
+    stream: "voiceStream",
+    chunks: "voiceChunks",
+    recognition: "voiceLiveRecognition",
+    finalTranscript: "voiceFinalTranscript",
+    interimTranscript: "voiceInterimTranscript",
+    processing: "voiceProcessing",
+  };
+}
+
+function syncChatVoiceStatusRow() {
+  if (!elements.chatVoiceStatusRow) {
+    return;
+  }
+  const hasStatus = Boolean(elements.chatVoiceStatus && elements.chatVoiceStatus.textContent.trim());
+  const hasTranscript = Boolean(elements.chatVoiceTranscript && elements.chatVoiceTranscript.textContent.trim());
+  elements.chatVoiceStatusRow.classList.toggle("hidden", !hasStatus && !hasTranscript);
 }
 
 function setVoiceComposerState(target, mode) {
@@ -1467,6 +1604,9 @@ function setVoiceComposerState(target, mode) {
       ctx.statusEl.textContent = ctx.idleStatus;
     }
   }
+  if (target === "chat") {
+    syncChatVoiceStatusRow();
+  }
 }
 
 function setVoiceTranscript(target, text, isInterim) {
@@ -1476,6 +1616,9 @@ function setVoiceTranscript(target, text, isInterim) {
   }
   ctx.transcriptEl.textContent = text || "";
   ctx.transcriptEl.classList.toggle("is-interim", Boolean(isInterim));
+  if (target === "chat") {
+    syncChatVoiceStatusRow();
+  }
 }
 
 function startLiveTranscription(target) {
@@ -1490,7 +1633,8 @@ function startLiveTranscription(target) {
     recognition.interimResults = true;
 
     recognition.addEventListener("result", (event) => {
-      let finalText = target === "automation" ? state.automationFinalTranscript : state.voiceFinalTranscript;
+      const keys = getVoiceStateKeys(target);
+      let finalText = state[keys.finalTranscript];
       let interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
@@ -1501,13 +1645,8 @@ function startLiveTranscription(target) {
           interimText = `${interimText} ${fragment}`.trim();
         }
       }
-      if (target === "automation") {
-        state.automationFinalTranscript = finalText;
-        state.automationInterimTranscript = interimText;
-      } else {
-        state.voiceFinalTranscript = finalText;
-        state.voiceInterimTranscript = interimText;
-      }
+      state[keys.finalTranscript] = finalText;
+      state[keys.interimTranscript] = interimText;
       const combined = `${finalText} ${interimText}`.trim();
       setVoiceTranscript(target, combined, !finalText && Boolean(interimText));
     });
@@ -1524,30 +1663,22 @@ function startLiveTranscription(target) {
 }
 
 function stopLiveTranscription(target) {
-  if (target === "automation") {
-    if (state.automationLiveRecognition) {
-      try { state.automationLiveRecognition.stop(); } catch (e) { /* ignore */ }
-      state.automationLiveRecognition = null;
-    }
-  } else if (state.voiceLiveRecognition) {
-    try { state.voiceLiveRecognition.stop(); } catch (e) { /* ignore */ }
-    state.voiceLiveRecognition = null;
+  const keys = getVoiceStateKeys(target);
+  if (state[keys.recognition]) {
+    try { state[keys.recognition].stop(); } catch (e) { /* ignore */ }
+    state[keys.recognition] = null;
   }
 }
 
 function resetVoiceTranscriptBuffers(target) {
-  if (target === "automation") {
-    state.automationFinalTranscript = "";
-    state.automationInterimTranscript = "";
-  } else {
-    state.voiceFinalTranscript = "";
-    state.voiceInterimTranscript = "";
-  }
+  const keys = getVoiceStateKeys(target);
+  state[keys.finalTranscript] = "";
+  state[keys.interimTranscript] = "";
   setVoiceTranscript(target, "", false);
 }
 
 function stopVoiceStream(target) {
-  const streamKey = target === "automation" ? "automationVoiceStream" : "voiceStream";
+  const streamKey = getVoiceStateKeys(target).stream;
   if (!state[streamKey]) {
     return;
   }
@@ -1577,10 +1708,11 @@ async function startVoiceRecording(target) {
     return;
   }
 
-  const recorderKey = target === "automation" ? "automationVoiceRecorder" : "voiceRecorder";
-  const streamKey = target === "automation" ? "automationVoiceStream" : "voiceStream";
-  const chunksKey = target === "automation" ? "automationVoiceChunks" : "voiceChunks";
-  const recogKey = target === "automation" ? "automationLiveRecognition" : "voiceLiveRecognition";
+  const keys = getVoiceStateKeys(target);
+  const recorderKey = keys.recorder;
+  const streamKey = keys.stream;
+  const chunksKey = keys.chunks;
+  const recogKey = keys.recognition;
 
   try {
     state[chunksKey] = [];
@@ -1623,7 +1755,7 @@ async function startVoiceRecording(target) {
 }
 
 function stopVoiceRecording(target) {
-  const recorderKey = target === "automation" ? "automationVoiceRecorder" : "voiceRecorder";
+  const recorderKey = getVoiceStateKeys(target).recorder;
   const recorder = state[recorderKey];
   if (!recorder || recorder.state === "inactive") {
     return;
@@ -1635,6 +1767,9 @@ function stopVoiceRecording(target) {
 async function submitVoiceRecording(target, chunks, mimeType) {
   if (target === "automation") {
     return submitAutomationVoiceRecording(chunks, mimeType);
+  }
+  if (target === "chat") {
+    return submitChatVoiceRecording(chunks, mimeType);
   }
   return submitEventVoiceRecording(chunks, mimeType);
 }
@@ -1670,6 +1805,57 @@ async function submitEventVoiceRecording(chunks, mimeType) {
   } finally {
     state.voiceProcessing = false;
     setVoiceComposerState("event", "idle");
+  }
+}
+
+async function submitChatVoiceRecording(chunks, mimeType) {
+  if (!isOpenAiConfigured()) {
+    throw new Error(openAiUnavailableMessage());
+  }
+
+  const audioBlob = new Blob(chunks, { type: mimeType || "audio/webm" });
+  if (!audioBlob.size) {
+    throw new Error("No voice recording was captured.");
+  }
+
+  const formData = new FormData();
+  const extension = audioBlob.type.includes("mp4") ? "mp4" : "webm";
+  formData.append("audio", audioBlob, `chat-voice.${extension}`);
+  formData.append("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin");
+  formData.append("now", new Date().toISOString());
+
+  state.chatVoiceProcessing = true;
+  setVoiceComposerState("chat", "processing");
+  let finalStatus = "";
+  try {
+    const response = await fetch("/api/chat/voice/transcribe", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(await readResponseError(response, "Voice transcription failed."));
+    }
+    const payload = await response.json().catch(() => ({}));
+    const transcript = String(payload.transcript || "").trim();
+    if (!transcript) {
+      throw new Error("Voice transcription returned no text.");
+    }
+    if (elements.adviserInput) {
+      elements.adviserInput.value = transcript;
+      elements.adviserInput.focus();
+    }
+    setVoiceTranscript("chat", "", false);
+    finalStatus = "";
+  } catch (error) {
+    setVoiceTranscript("chat", "", false);
+    finalStatus = error.message || "Voice transcription failed.";
+  } finally {
+    state.chatVoiceProcessing = false;
+    setVoiceComposerState("chat", "idle");
+    if (elements.chatVoiceStatus) {
+      elements.chatVoiceStatus.textContent = finalStatus;
+    }
+    syncChatVoiceStatusRow();
   }
 }
 
@@ -1726,6 +1912,19 @@ function handleAutomationVoiceButtonClick() {
     return;
   }
   startVoiceRecording("automation").catch((error) => {
+    showError(error.message || "Could not start voice recording.");
+  });
+}
+
+function handleChatVoiceButtonClick() {
+  if (state.chatVoiceProcessing) {
+    return;
+  }
+  if (state.chatVoiceRecorder && state.chatVoiceRecorder.state === "recording") {
+    stopVoiceRecording("chat");
+    return;
+  }
+  startVoiceRecording("chat").catch((error) => {
     showError(error.message || "Could not start voice recording.");
   });
 }
@@ -2020,6 +2219,7 @@ function handleDocumentClick(event) {
 
 function handleKeydown(event) {
   if (event.key === "Escape") {
+    resetChatDragState();
     if (state.openThreadMenuId) {
       closeThreadMenus();
       return;
@@ -2114,6 +2314,183 @@ function seedFormDefaults() {
   toggleRepeatCountField();
 }
 
+function normalizeChatMarkdownText(rawText) {
+  return String(rawText || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/([^\n])\s+(-\s+\*\*?\d{1,2}[./]\d{1,2}[./]\d{2,4}\*\*?)/g, "$1\n$2")
+    .replace(/([^\n])\s+(-\s+\*\*?Total[^:\n]*:)/gi, "$1\n\n$2")
+    .trim();
+}
+
+function appendInlineMarkdown(parent, rawText) {
+  const text = String(rawText || "");
+  const tokenPattern = /(\*\*[^*\n][\s\S]*?\*\*|`[^`\n]+`|\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\))/g;
+  let cursor = 0;
+  let match = tokenPattern.exec(text);
+
+  while (match) {
+    if (match.index > cursor) {
+      parent.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+    }
+
+    const token = match[0];
+    if (token.startsWith("**") && token.endsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      parent.appendChild(strong);
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      parent.appendChild(code);
+    } else {
+      const linkMatch = token.match(/^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      if (linkMatch) {
+        const link = document.createElement("a");
+        link.href = linkMatch[2];
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = linkMatch[1];
+        parent.appendChild(link);
+      } else {
+        parent.appendChild(document.createTextNode(token));
+      }
+    }
+
+    cursor = match.index + token.length;
+    match = tokenPattern.exec(text);
+  }
+
+  if (cursor < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+function parseMarkdownList(lines, startIndex, baseIndent) {
+  const list = document.createElement("ul");
+  list.className = "chat-markdown-list";
+  let index = startIndex;
+  let lastItem = null;
+
+  while (index < lines.length) {
+    const rawLine = lines[index];
+    const match = rawLine.match(/^(\s*)-\s+(.+)$/);
+    if (!match) {
+      break;
+    }
+
+    const indent = match[1].length;
+    if (indent < baseIndent) {
+      break;
+    }
+
+    if (indent > baseIndent) {
+      if (lastItem) {
+        const nested = parseMarkdownList(lines, index, indent);
+        lastItem.appendChild(nested.node);
+        index = nested.nextIndex;
+        continue;
+      }
+      break;
+    }
+
+    const item = document.createElement("li");
+    appendInlineMarkdown(item, match[2].trim());
+    list.appendChild(item);
+    lastItem = item;
+    index += 1;
+  }
+
+  return { node: list, nextIndex: index };
+}
+
+function renderChatMarkdown(messageText) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-markdown";
+  const normalizedText = normalizeChatMarkdownText(messageText);
+
+  if (!normalizedText) {
+    return wrapper;
+  }
+
+  const lines = normalizedText.split("\n");
+  let paragraphLines = [];
+  let index = 0;
+
+  function flushParagraph() {
+    if (!paragraphLines.length) {
+      return;
+    }
+    const paragraph = document.createElement("p");
+    appendInlineMarkdown(paragraph, paragraphLines.join(" ").trim());
+    wrapper.appendChild(paragraph);
+    paragraphLines = [];
+  }
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph();
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("```")) {
+      flushParagraph();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = codeLines.join("\n");
+      pre.appendChild(code);
+      wrapper.appendChild(pre);
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{2,4})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      const level = Math.min(headingMatch[1].length, 4);
+      const heading = document.createElement(`h${level}`);
+      appendInlineMarkdown(heading, headingMatch[2].trim());
+      wrapper.appendChild(heading);
+      index += 1;
+      continue;
+    }
+
+    const bulletMatch = line.match(/^(\s*)-\s+(.+)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      const parsedList = parseMarkdownList(lines, index, bulletMatch[1].length);
+      wrapper.appendChild(parsedList.node);
+      index = parsedList.nextIndex;
+      continue;
+    }
+
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      flushParagraph();
+      wrapper.appendChild(document.createElement("hr"));
+      index += 1;
+      continue;
+    }
+
+    paragraphLines.push(trimmed);
+    index += 1;
+  }
+
+  flushParagraph();
+  return wrapper;
+}
+
 function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
   if (!elements.chatThread) {
     return;
@@ -2132,9 +2509,16 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
   const bubble = document.createElement("div");
   bubble.className = "chat-bubble";
 
-  const message = document.createElement("p");
-  message.textContent = messageText;
-  bubble.appendChild(message);
+  if (role === "user") {
+    const message = document.createElement("p");
+    message.textContent = messageText;
+    bubble.appendChild(message);
+    if (extras && Array.isArray(extras.attachments) && extras.attachments.length) {
+      bubble.appendChild(buildChatAttachmentSummary(extras.attachments));
+    }
+  } else {
+    bubble.appendChild(renderChatMarkdown(messageText));
+  }
 
   if (policyCard) {
     const card = document.createElement("div");
@@ -2189,6 +2573,24 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
   scrollChatToBottom();
 }
 
+function buildChatAttachmentSummary(attachments) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-attachment-summary";
+  attachments.slice(0, chatAttachmentMaxFiles).forEach((attachment) => {
+    const item = document.createElement("span");
+    item.className = "chat-attachment-summary-item";
+    const icon = document.createElement("span");
+    icon.className = "material-symbols-outlined";
+    icon.textContent = String(attachment.mime || "").startsWith("image/") ? "image" : "draft";
+    const label = document.createElement("span");
+    label.textContent = attachment.file_name || attachment.name || "attachment";
+    item.appendChild(icon);
+    item.appendChild(label);
+    wrapper.appendChild(item);
+  });
+  return wrapper;
+}
+
 function buildCitationCard(citations) {
   const card = document.createElement("div");
   card.className = "chat-citation-card";
@@ -2223,7 +2625,7 @@ function buildPendingActionsCard(actions) {
   card.className = "chat-action-card";
   const title = document.createElement("p");
   title.className = "chat-policy-title";
-  title.textContent = "Pending confirmation";
+  title.textContent = "Bestaetigung ausstehend";
   card.appendChild(title);
 
   actions.forEach((action) => {
@@ -2233,16 +2635,16 @@ function buildPendingActionsCard(actions) {
     const copy = document.createElement("div");
     copy.className = "chat-action-copy";
     const label = document.createElement("strong");
-    label.textContent = action.title || action.type || "Pending action";
+    label.textContent = action.title || action.type || "Aktion";
     const type = document.createElement("span");
-    type.textContent = action.type || "";
+    type.textContent = formatPendingActionSummary(action);
     copy.appendChild(label);
     copy.appendChild(type);
 
     const button = document.createElement("button");
     button.className = "secondary-button";
     button.type = "button";
-    button.textContent = "Confirm";
+    button.textContent = "Bestaetigen";
     button.addEventListener("click", () => confirmPendingAgentAction(action.action_id, button));
 
     row.appendChild(copy);
@@ -2250,6 +2652,25 @@ function buildPendingActionsCard(actions) {
     card.appendChild(row);
   });
   return card;
+}
+
+function formatPendingActionSummary(action) {
+  const payload = action && action.payload && typeof action.payload === "object" ? action.payload : {};
+  const type = String((action && action.type) || "").trim();
+  const title = payload.title || (payload.matched_event && payload.matched_event.title) || "";
+  const date = payload.date || (payload.matched_event && payload.matched_event.date) || "";
+  const time = payload.time || (payload.matched_event && payload.matched_event.time) || "";
+  const startAt = payload.start_at || "";
+  const parts = [type];
+  if (title) {
+    parts.push(String(title));
+  }
+  if (date || time) {
+    parts.push(`${date}${time ? ` ${time}` : ""}`.trim());
+  } else if (startAt) {
+    parts.push(String(startAt));
+  }
+  return parts.filter(Boolean).join(" - ");
 }
 
 function scrollChatToBottom() {
@@ -2262,6 +2683,261 @@ function scrollChatToBottom() {
 
 function createChatId() {
   return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getInvoicesSessionId() {
+  let sid = localStorage.getItem("invoices_sid");
+  if (!sid) {
+    sid = Math.random().toString(36).slice(2, 10);
+    localStorage.setItem("invoices_sid", sid);
+  }
+  return sid;
+}
+
+function isSupportedChatAttachment(file) {
+  const fileName = String((file && file.name) || "").toLowerCase();
+  return Boolean(file && (
+    String(file.type || "").startsWith("image/")
+    || chatAttachmentMimeTypes.has(file.type)
+    || /\.(pdf|png|jpe?g|txt|docx)$/.test(fileName)
+  ));
+}
+
+function setChatAttachmentStatus(message, variant = "") {
+  state.chatAttachmentStatus = message || "";
+  state.chatAttachmentStatusVariant = variant || "";
+  renderChatAttachments();
+}
+
+function fileToBase64Payload(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",").pop() : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderChatAttachments() {
+  if (!elements.chatAttachmentTray || !elements.chatAttachmentList || !elements.chatAttachmentStatus) {
+    return;
+  }
+
+  const hasAttachments = state.chatAttachments.length > 0;
+  const hasStatus = Boolean(state.chatAttachmentStatus);
+  elements.chatAttachmentTray.classList.toggle("hidden", !hasAttachments && !hasStatus);
+  elements.chatAttachmentStatus.textContent = state.chatAttachmentStatus;
+  elements.chatAttachmentStatus.dataset.variant = state.chatAttachmentStatusVariant;
+
+  elements.chatAttachmentList.innerHTML = "";
+  state.chatAttachments.forEach((attachment) => {
+    const chip = document.createElement("span");
+    chip.className = "chat-attachment-chip";
+    chip.innerHTML = `
+      <span class="material-symbols-outlined">${String(attachment.mime || "").startsWith("image/") ? "image" : "picture_as_pdf"}</span>
+      <span class="chat-attachment-name">${escapeHtml(attachment.name)}</span>
+      <span class="chat-attachment-size">${escapeHtml(formatFileSize(attachment.size))}</span>
+      <button type="button" data-chat-attachment-remove="${escapeHtml(attachment.id)}" aria-label="Remove ${escapeHtml(attachment.name)}">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    `;
+    elements.chatAttachmentList.appendChild(chip);
+  });
+}
+
+async function addChatAttachmentFiles(fileList) {
+  const incomingFiles = Array.from(fileList || []);
+  if (!incomingFiles.length || state.chatPending) {
+    return;
+  }
+
+  const accepted = [];
+  const rejected = [];
+  incomingFiles.forEach((file) => {
+    if (!isSupportedChatAttachment(file)) {
+      rejected.push(`${file.name || "File"}: unsupported type`);
+      return;
+    }
+    if (file.size > chatAttachmentMaxBytes) {
+      rejected.push(`${file.name || "File"}: larger than 10 MB`);
+      return;
+    }
+    accepted.push(file);
+  });
+
+  const availableSlots = chatAttachmentMaxFiles - state.chatAttachments.length;
+  const filesToRead = accepted.slice(0, Math.max(availableSlots, 0));
+  if (accepted.length > filesToRead.length) {
+    rejected.push(`Maximum ${chatAttachmentMaxFiles} files can be attached.`);
+  }
+
+  if (!filesToRead.length) {
+    setChatAttachmentStatus(rejected.join(" ") || "No supported files selected.", "error");
+    return;
+  }
+
+  setChatAttachmentStatus(`Attaching ${filesToRead.length} file${filesToRead.length === 1 ? "" : "s"}...`);
+
+  try {
+    for (const file of filesToRead) {
+      const contentBase64 = await fileToBase64Payload(file);
+      state.chatAttachments.push({
+        id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: "file",
+        name: file.name || "attachment",
+        file_name: file.name || "attachment",
+        mime: file.type || "application/octet-stream",
+        size: file.size,
+        content_base64: contentBase64,
+      });
+    }
+    setChatAttachmentStatus(
+      rejected.length ? rejected.join(" ") : `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached.`,
+      rejected.length ? "error" : "success"
+    );
+  } catch (error) {
+    setChatAttachmentStatus(error.message || "Could not attach file.", "error");
+  } finally {
+    if (elements.chatFileInput) {
+      elements.chatFileInput.value = "";
+    }
+  }
+}
+
+function removeChatAttachment(attachmentId) {
+  state.chatAttachments = state.chatAttachments.filter((attachment) => attachment.id !== attachmentId);
+  setChatAttachmentStatus(
+    state.chatAttachments.length ? `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached.` : ""
+  );
+}
+
+function getChatAttachmentPayload() {
+  return state.chatAttachments.map((attachment) => ({
+    type: attachment.type,
+    name: attachment.name,
+    file_name: attachment.file_name,
+    mime: attachment.mime,
+    size: attachment.size,
+    content_base64: attachment.content_base64,
+  }));
+}
+
+function clearChatAttachments() {
+  state.chatAttachments = [];
+  setChatAttachmentStatus("");
+}
+
+function handleChatAttachmentListClick(event) {
+  const removeButton = event.target.closest("[data-chat-attachment-remove]");
+  if (!removeButton) {
+    return;
+  }
+  removeChatAttachment(removeButton.getAttribute("data-chat-attachment-remove"));
+}
+
+function isFileDragEvent(event) {
+  return Boolean(event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files"));
+}
+
+function resetChatDragState() {
+  state.chatDragDepth = 0;
+  if (elements.adviserShell) {
+    elements.adviserShell.classList.remove("is-dragging-files");
+  }
+}
+
+function handleGlobalFileDragOver(event) {
+  if (!isFileDragEvent(event)) {
+    return;
+  }
+  event.preventDefault();
+}
+
+function handleGlobalFileDrop(event) {
+  if (!isFileDragEvent(event)) {
+    return;
+  }
+  event.preventDefault();
+  if (!elements.adviserShell || !elements.adviserShell.contains(event.target)) {
+    resetChatDragState();
+  }
+}
+
+function handleChatDragEvent(event) {
+  if (!isFileDragEvent(event)) {
+    return;
+  }
+  event.preventDefault();
+
+  if (event.type === "dragenter") {
+    state.chatDragDepth += 1;
+    elements.adviserShell.classList.add("is-dragging-files");
+  } else if (event.type === "dragover") {
+    event.dataTransfer.dropEffect = "copy";
+  } else if (event.type === "dragleave") {
+    const nextTarget = event.relatedTarget;
+    if (!nextTarget || !elements.adviserShell.contains(nextTarget)) {
+      resetChatDragState();
+    } else {
+      state.chatDragDepth = Math.max(state.chatDragDepth - 1, 0);
+    }
+  } else if (event.type === "drop") {
+    resetChatDragState();
+    addChatAttachmentFiles(event.dataTransfer.files).catch((error) => {
+      setChatAttachmentStatus(error.message || "Could not attach dropped files.", "error");
+    });
+  }
+}
+
+async function openChatQrModal(triggerElement) {
+  if (state.chatQrLoading) {
+    return;
+  }
+
+  const sid = getInvoicesSessionId();
+  if (elements.chatQrStatus) {
+    elements.chatQrStatus.textContent = "QR-Code wird geladen...";
+    elements.chatQrStatus.dataset.variant = "";
+  }
+  if (elements.chatQrImage) {
+    elements.chatQrImage.removeAttribute("src");
+  }
+  openModal("chat-qr-modal", triggerElement || elements.chatQrButton || document.activeElement);
+
+  state.chatQrLoading = true;
+  try {
+    const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/scan-url`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "QR-Code konnte nicht geladen werden.");
+    }
+    const url = data.camera_url || data.scan_url;
+    if (!url) {
+      throw new Error("QR-Code konnte nicht geladen werden.");
+    }
+    if (elements.chatQrImage) {
+      elements.chatQrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=420x420&margin=8&data=${encodeURIComponent(url)}`;
+      elements.chatQrImage.title = url;
+    }
+    if (elements.chatCameraLink) {
+      elements.chatCameraLink.href = url;
+      elements.chatCameraLink.title = url;
+    }
+    if (elements.chatQrStatus) {
+      elements.chatQrStatus.textContent = "Bereit zum Scannen.";
+      elements.chatQrStatus.dataset.variant = "success";
+    }
+  } catch (error) {
+    if (elements.chatQrStatus) {
+      elements.chatQrStatus.textContent = error.message || "QR-Code konnte nicht geladen werden.";
+      elements.chatQrStatus.dataset.variant = "error";
+    }
+  } finally {
+    state.chatQrLoading = false;
+  }
 }
 
 function normalizeChatSession(rawChat, index = 0) {
@@ -2746,6 +3422,18 @@ function setChatPending(isPending) {
   if (elements.adviserCancelButton) {
     elements.adviserCancelButton.classList.toggle("hidden", !isPending);
   }
+  if (elements.chatAttachButton) {
+    elements.chatAttachButton.disabled = isPending;
+  }
+  if (elements.chatQrButton) {
+    elements.chatQrButton.disabled = isPending;
+  }
+  if (elements.chatVoiceButton) {
+    elements.chatVoiceButton.disabled = isPending || state.chatVoiceProcessing || !isOpenAiConfigured();
+  }
+  if (elements.chatFileInput) {
+    elements.chatFileInput.disabled = isPending;
+  }
   if (elements.chatChips) {
     elements.chatChips.forEach((button) => {
       button.disabled = isPending;
@@ -2790,19 +3478,28 @@ async function confirmPendingAgentAction(actionId, button) {
   }
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = "Confirming";
+  button.textContent = "Bestaetige";
   try {
     const payload = await apiFetch(`/api/agent/actions/${encodeURIComponent(actionId)}/confirm`, {
       method: "POST",
       showLoading: false,
+      body: JSON.stringify({
+        thread_id: state.threadId,
+        profile_id: getActiveProfileId(),
+        client_context: {
+          profile_id: getActiveProfileId(),
+          timezone: getBrowserTimezone(),
+          now: new Date().toISOString(),
+        },
+      }),
     });
-    button.textContent = "Confirmed";
+    button.textContent = "Bestaetigt";
     if (payload && payload.result) {
-      appendChatMessage("bot", "Confirmed. I applied the pending action.");
+      appendChatMessage("bot", "Bestaetigt. Ich habe die Aktion ausgefuehrt.");
     }
     clearCalendarDataCache();
     await Promise.all([refreshAutomations(), refreshDashboardData().catch(() => {})]);
-    if (state.calendar) {
+    if (state.calendar && (!payload || payload.calendar_updated !== false)) {
       state.calendar.refetchEvents();
       await refreshCalendarData();
     }
@@ -2819,7 +3516,8 @@ async function submitAdviserPrompt(rawPrompt) {
   }
 
   markChatStarted();
-  appendChatMessage("user", prompt);
+  const attachmentPayload = getChatAttachmentPayload();
+  appendChatMessage("user", prompt, null, { attachments: attachmentPayload });
   pushChatHistory("user", prompt);
   const chatAbortController = new AbortController();
   state.chatAbortController = chatAbortController;
@@ -2834,11 +3532,14 @@ async function submitAdviserPrompt(rawPrompt) {
       body: JSON.stringify({
         message: prompt,
         thread_id: state.threadId,
-        attachments: [],
+        attachments: attachmentPayload,
         client_context: {
           active_panel: state.activeAppView === "adviser" ? "" : state.activeAppView,
           current_month: state.currentMonth,
           calendar_view: state.currentView,
+          profile_id: getActiveProfileId(),
+          timezone: getBrowserTimezone(),
+          now: new Date().toISOString(),
         },
         history: state.chatHistory,
       }),
@@ -2866,10 +3567,15 @@ async function submitAdviserPrompt(rawPrompt) {
       throw new Error("The agent returned an empty response.");
     }
 
+    if (attachmentPayload.length) {
+      clearChatAttachments();
+    }
     removeChatPendingIndicator();
     appendChatMessage("bot", replyText, replyPolicy, {
       citations: Array.isArray(data.citations) ? data.citations : [],
-      pendingActions: Array.isArray(data.pending_actions) ? data.pending_actions : [],
+      pendingActions: Array.isArray(data.pending_actions)
+        ? data.pending_actions
+        : (Array.isArray(data.structured_actions) ? data.structured_actions : []),
       toolEvents: Array.isArray(data.tool_events) ? data.tool_events : [],
     });
     pushChatHistory("assistant", replyText);
@@ -3639,6 +4345,35 @@ function bindEvents() {
     elements.adviserForm.addEventListener("submit", handleAdviserSubmit);
   }
 
+  if (elements.chatAttachButton && elements.chatFileInput) {
+    elements.chatAttachButton.addEventListener("click", () => elements.chatFileInput.click());
+    elements.chatFileInput.addEventListener("change", () => {
+      addChatAttachmentFiles(elements.chatFileInput.files).catch((error) => {
+        setChatAttachmentStatus(error.message || "Could not attach files.", "error");
+      });
+    });
+  }
+
+  if (elements.chatQrButton) {
+    elements.chatQrButton.addEventListener("click", () => {
+      openChatQrModal(elements.chatQrButton).catch(() => {});
+    });
+  }
+
+  if (elements.chatVoiceButton) {
+    elements.chatVoiceButton.addEventListener("click", handleChatVoiceButtonClick);
+  }
+
+  if (elements.chatAttachmentList) {
+    elements.chatAttachmentList.addEventListener("click", handleChatAttachmentListClick);
+  }
+
+  if (elements.adviserShell) {
+    ["dragenter", "dragover", "dragleave", "drop"].forEach((eventName) => {
+      elements.adviserShell.addEventListener(eventName, handleChatDragEvent);
+    });
+  }
+
   if (elements.adviserCancelButton) {
     elements.adviserCancelButton.addEventListener("click", cancelPendingAdviserRequest);
   }
@@ -3657,6 +4392,10 @@ function bindEvents() {
 
   document.addEventListener("click", handleDocumentClick);
   document.addEventListener("keydown", handleKeydown);
+  document.addEventListener("dragover", handleGlobalFileDragOver);
+  document.addEventListener("drop", handleGlobalFileDrop);
+  document.addEventListener("dragend", resetChatDragState);
+  window.addEventListener("blur", resetChatDragState);
   wireModalClosers();
 }
 
@@ -3693,11 +4432,7 @@ function initInvoices() {
   const uploadStatus = document.getElementById("invoice-upload-status");
   if (!qrImg || !list || !count) return;
 
-  let sid = localStorage.getItem("invoices_sid");
-  if (!sid) {
-    sid = Math.random().toString(36).slice(2, 10);
-    localStorage.setItem("invoices_sid", sid);
-  }
+  const sid = getInvoicesSessionId();
 
   fetch(`/api/invoices/${sid}/scan-url`)
     .then((r) => r.json())
