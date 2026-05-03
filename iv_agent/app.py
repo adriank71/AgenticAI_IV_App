@@ -32,6 +32,8 @@ try:
         fill_assistenz_form_auto_bytes,
     )
     from .storage import (
+        _create_supabase_client,
+        _supabase_storage_configured,
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
@@ -48,6 +50,7 @@ try:
         _get_openai_client,
     )
     from . import reminders as reminders_module
+    from .agent_orchestrator import confirm_pending_action, run_agent_chat
     from .reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 except ImportError:
     from calendar_manager import (
@@ -67,6 +70,8 @@ except ImportError:
         fill_assistenz_form_auto_bytes,
     )
     from storage import (
+        _create_supabase_client,
+        _supabase_storage_configured,
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
@@ -83,6 +88,7 @@ except ImportError:
         _get_openai_client,
     )
     import reminders as reminders_module
+    from agent_orchestrator import confirm_pending_action, run_agent_chat
     from reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 
 
@@ -658,6 +664,62 @@ def generate_assistenz_report(
     }
 
 
+def build_report_webhook_payload(month: str, report_record: dict) -> dict:
+    base_url = request.host_url.rstrip("/")
+    return {
+        "month": month,
+        "report_id": report_record["report_id"],
+        "report_type": report_record["type"],
+        "file_name": report_record["file_name"],
+        "download_url": f"{base_url}{build_report_download_path(report_record)}",
+        "preview_url": f"{base_url}{build_report_preview_path(report_record)}",
+        "storage_backend": report_record.get("storage_backend"),
+    }
+
+
+def send_report_via_webhook(month: str, report_record: dict) -> dict:
+    if not N8N_WEBHOOK_URL:
+        raise RuntimeError("Send endpoint not configured (missing IV_AGENT_N8N_WEBHOOK_URL)")
+
+    trigger_n8n_webhook(build_report_webhook_payload(month, report_record))
+    return {
+        "sent": True,
+        "report_id": report_record["report_id"],
+        "file_name": report_record["file_name"],
+        "month": month,
+    }
+
+
+def generate_reports_payload(
+    month: str,
+    report_types: list[str],
+    profile_payload: dict,
+    *,
+    profile_id: str | None = None,
+    transport_unavailable_message: str,
+) -> dict:
+    generated_reports = []
+    unavailable_reports = []
+
+    if "assistenzbeitrag" in report_types:
+        generated_reports.append(generate_assistenz_report(month, profile_payload, profile_id=profile_id))
+
+    if "transportkostenabrechnung" in report_types:
+        unavailable_reports.append(
+            {
+                "type": "transportkostenabrechnung",
+                "label": "Transportkostenabrechnung report",
+                "message": transport_unavailable_message,
+            }
+        )
+
+    return {
+        "month": month,
+        "generated_reports": generated_reports,
+        "unavailable_reports": unavailable_reports,
+    }
+
+
 def parse_chat_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("JSON body is required")
@@ -839,6 +901,112 @@ def api_chat():
         return json_error(f"Failed to process chat request: {exc}", 500)
 
 
+def execute_pending_agent_action(action: dict) -> dict:
+    action_type = str(action.get("type") or "").strip()
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+
+    if action_type == "create_event":
+        event_payload = parse_event_payload(payload)
+        created_events = add_events(**event_payload)
+        return {
+            "event": created_events[0],
+            "events": created_events,
+            "created_count": len(created_events),
+        }
+
+    if action_type == "update_event":
+        event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
+        if not event_id:
+            raise ValueError("event_id is required")
+        event_payload = parse_event_payload(payload)
+        event_payload.pop("recurrence", None)
+        event_payload.pop("repeat_count", None)
+        updated_event = update_event(event_id=event_id, **event_payload)
+        if not updated_event:
+            raise FileNotFoundError("Event not found")
+        return {"updated": True, "event": updated_event}
+
+    if action_type == "delete_event":
+        event_id = str(payload.get("event_id") or payload.get("id") or "").strip()
+        if not event_id:
+            raise ValueError("event_id is required")
+        if not delete_event(event_id):
+            raise FileNotFoundError("Event not found")
+        return {"deleted": True, "event_id": event_id}
+
+    if action_type == "create_reminder":
+        reminder = reminders_module.create_reminder(payload)
+        return {"reminder": reminder}
+
+    if action_type == "generate_report":
+        month = parse_month(str(payload.get("month", "")).strip())
+        report_types = parse_report_types(payload)
+        raw_profile_id = payload.get("profile_id")
+        profile_id = str(raw_profile_id).strip() if raw_profile_id is not None else None
+        profile_payload = load_profile_payload(profile_id or None)
+        return generate_reports_payload(
+            month,
+            report_types,
+            profile_payload,
+            profile_id=profile_id,
+            transport_unavailable_message="Transport report generation is not available yet.",
+        )
+
+    if action_type == "send_report":
+        month = parse_month(str(payload.get("month", "")).strip())
+        report_id = str(payload.get("report_id", "") or "").strip() or None
+        file_name = str(payload.get("file_name", "") or "").strip()
+        if not report_id and (not file_name or not file_name.lower().endswith(".pdf")):
+            raise ValueError("report_id or valid file_name (.pdf) is required")
+        report_record = resolve_report_record(report_id=report_id, file_name=file_name or None, month=month)
+        if not report_record:
+            raise FileNotFoundError("Report file not found")
+        return send_report_via_webhook(month, report_record)
+
+    raise ValueError(f"Unsupported pending action type: {action_type}")
+
+
+@app.post("/api/agent/chat")
+def api_agent_chat():
+    try:
+        response_payload = run_agent_chat(
+            get_json_payload(required=True),
+            rag_callback=trigger_chat_webhook,
+        )
+        return jsonify(make_json_safe(response_payload))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except urllib.error.URLError as exc:
+        logger.error("agent chat webhook request failed: %s", exc)
+        return json_error("Failed to reach chat webhook", 502)
+    except RuntimeError as exc:
+        logger.error("agent chat runtime error: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.exception("Unexpected agent chat error: %s", exc)
+        return json_error(f"Failed to process agent chat request: {exc}", 500)
+
+
+@app.post("/api/agent/actions/<action_id>/confirm")
+def api_confirm_agent_action(action_id: str):
+    try:
+        confirmation = confirm_pending_action(action_id, execute_pending_agent_action)
+        return jsonify({"confirmed": True, **make_json_safe(confirmation)})
+    except KeyError:
+        return json_error("Pending action not found", 404)
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except FileNotFoundError as exc:
+        return json_error(str(exc), 404)
+    except RuntimeError as exc:
+        message = str(exc)
+        status_code = 409 if "already been handled" in message else 502
+        return json_error(message, status_code)
+    except Exception as exc:
+        logger.exception("Unexpected pending action confirmation error: %s", exc)
+        return json_error(f"Failed to confirm pending action: {exc}", 500)
+
+
 @app.post("/api/calendar/voice/draft")
 def api_calendar_voice_draft():
     try:
@@ -880,29 +1048,18 @@ def api_generate_report():
         raw_profile_id = payload.get("profile_id")
         profile_id = str(raw_profile_id).strip() if raw_profile_id is not None else None
         profile_payload = load_profile_payload(profile_id or None)
-        generated_reports = []
-        unavailable_reports = []
+        response_payload = generate_reports_payload(
+            month,
+            report_types,
+            profile_payload,
+            profile_id=profile_id,
+            transport_unavailable_message=(
+                "Transport report generation will be wired once the updated PDF form and field mapping are available."
+            ),
+        )
 
-        if "assistenzbeitrag" in report_types:
-            generated_reports.append(generate_assistenz_report(month, profile_payload, profile_id=profile_id))
-
-        if "transportkostenabrechnung" in report_types:
-            unavailable_reports.append(
-                {
-                    "type": "transportkostenabrechnung",
-                    "label": "Transportkostenabrechnung report",
-                    "message": "Transport report generation will be wired once the updated PDF form and field mapping are available.",
-                }
-            )
-
-        response_payload = {
-            "month": month,
-            "generated_reports": generated_reports,
-            "unavailable_reports": unavailable_reports,
-        }
-
-        if len(generated_reports) == 1 and not unavailable_reports:
-            first_report = generated_reports[0]
+        if len(response_payload["generated_reports"]) == 1 and not response_payload["unavailable_reports"]:
+            first_report = response_payload["generated_reports"][0]
             response_payload.update(
                 {
                     "report_id": first_report["report_id"],
@@ -994,30 +1151,7 @@ def api_send_report():
         if not report_record:
             return json_error("Report file not found", 404)
 
-        if not N8N_WEBHOOK_URL:
-            return json_error("Send endpoint not configured (missing IV_AGENT_N8N_WEBHOOK_URL)", 501)
-
-        base_url = request.host_url.rstrip("/")
-        download_path = build_report_download_path(report_record)
-        preview_path = build_report_preview_path(report_record)
-        webhook_payload = {
-            "month": month,
-            "report_id": report_record["report_id"],
-            "report_type": report_record["type"],
-            "file_name": report_record["file_name"],
-            "download_url": f"{base_url}{download_path}",
-            "preview_url": f"{base_url}{preview_path}",
-            "storage_backend": report_record.get("storage_backend"),
-        }
-        trigger_n8n_webhook(webhook_payload)
-        return jsonify(
-            {
-                "sent": True,
-                "report_id": report_record["report_id"],
-                "file_name": report_record["file_name"],
-                "month": month,
-            }
-        )
+        return jsonify(send_report_via_webhook(month, report_record))
     except ValueError as exc:
         return json_error(str(exc), 400)
     except urllib.error.URLError as exc:
@@ -1025,7 +1159,8 @@ def api_send_report():
         return json_error("Failed to reach n8n webhook", 502)
     except RuntimeError as exc:
         logger.error("n8n webhook runtime error: %s", exc)
-        return json_error(str(exc), 502)
+        status_code = 501 if "Send endpoint not configured" in str(exc) else 502
+        return json_error(str(exc), status_code)
     except Exception as exc:
         logger.exception("Unexpected report send error: %s", exc)
         return json_error("Failed to send report", 500)
@@ -1125,6 +1260,136 @@ def serialize_invoice_capture(capture_record: dict) -> dict:
         "file_url": build_invoice_image_path(capture_record),
         "previewable": str(content_type or "").startswith("image/"),
     }
+
+
+def _storage_model_to_dict(value) -> dict:
+    if isinstance(value, dict):
+        return {str(key): make_json_safe(item) for key, item in value.items()}
+
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                result = method()
+                if isinstance(result, dict):
+                    return {str(key): make_json_safe(item) for key, item in result.items()}
+            except TypeError:
+                continue
+
+    result = {}
+    for field in (
+        "id",
+        "name",
+        "public",
+        "created_at",
+        "updated_at",
+        "last_accessed_at",
+        "metadata",
+        "owner",
+        "file_size_limit",
+        "allowed_mime_types",
+    ):
+        if hasattr(value, field):
+            result[field] = make_json_safe(getattr(value, field))
+    return result
+
+
+def _storage_item_is_folder(item: dict) -> bool:
+    if str(item.get("type") or "").lower() == "folder":
+        return True
+    return not item.get("id") and not item.get("metadata") and not item.get("created_at")
+
+
+def _format_storage_object(bucket_name: str, item: dict, parent_path: str) -> dict:
+    name = str(item.get("name") or "").strip()
+    object_path = "/".join(part for part in (parent_path.strip("/"), name) if part)
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    is_folder = _storage_item_is_folder(item)
+    return {
+        "bucket": bucket_name,
+        "name": name,
+        "path": object_path,
+        "type": "folder" if is_folder else "file",
+        "size": metadata.get("size") or item.get("size"),
+        "content_type": metadata.get("mimetype") or metadata.get("contentType") or item.get("content_type"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at") or item.get("last_accessed_at"),
+        "storage_url": None if is_folder else f"supabase://{bucket_name}/{object_path}",
+    }
+
+
+def _list_supabase_bucket_objects(client, bucket_name: str, *, path: str = "", depth: int = 0, max_depth: int = 4) -> list[dict]:
+    try:
+        raw_items = client.storage.from_(bucket_name).list(
+            path,
+            {
+                "limit": 200,
+                "offset": 0,
+                "sortBy": {"column": "name", "order": "asc"},
+            },
+        )
+    except TypeError:
+        raw_items = client.storage.from_(bucket_name).list(path)
+
+    objects = []
+    for raw_item in raw_items or []:
+        item = _storage_model_to_dict(raw_item)
+        formatted = _format_storage_object(bucket_name, item, path)
+        if not formatted["name"]:
+            continue
+        objects.append(formatted)
+        if formatted["type"] == "folder" and depth < max_depth:
+            objects.extend(
+                _list_supabase_bucket_objects(
+                    client,
+                    bucket_name,
+                    path=formatted["path"],
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                )
+            )
+    return objects
+
+
+@app.get("/api/storage/browser")
+def api_storage_browser():
+    if not _supabase_storage_configured():
+        return jsonify(
+            {
+                "configured": False,
+                "buckets": [],
+                "message": "Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+            }
+        )
+
+    try:
+        client = _create_supabase_client()
+        raw_buckets = client.storage.list_buckets()
+        buckets = []
+        for raw_bucket in raw_buckets or []:
+            bucket = _storage_model_to_dict(raw_bucket)
+            bucket_name = str(bucket.get("id") or bucket.get("name") or "").strip()
+            if not bucket_name:
+                continue
+            objects = _list_supabase_bucket_objects(client, bucket_name)
+            buckets.append(
+                {
+                    "id": bucket_name,
+                    "name": str(bucket.get("name") or bucket_name),
+                    "public": bool(bucket.get("public")),
+                    "created_at": bucket.get("created_at"),
+                    "updated_at": bucket.get("updated_at"),
+                    "file_count": len([item for item in objects if item["type"] == "file"]),
+                    "objects": objects,
+                }
+            )
+        return jsonify({"configured": True, "buckets": buckets})
+    except RuntimeError as exc:
+        logger.error("Supabase Storage browser configuration error: %s", exc)
+        return json_error(str(exc), 503)
+    except Exception as exc:
+        logger.exception("Supabase Storage browser failed")
+        return json_error(f"Failed to list Supabase Storage buckets: {exc}", 502)
 
 
 def capture_invoice(sid: str, payload: dict):
@@ -1290,19 +1555,6 @@ def _call_openai_vision(image_b64: str, mime: str) -> dict:
 
 
 @app.post("/api/invoices/<sid>/extract")
-def api_invoices_extract(sid: str):
-    try:
-        return capture_invoice(sid, get_json_payload(required=True))
-    except ValueError as exc:
-        return json_error(str(exc), 400)
-    except RuntimeError as exc:
-        logger.error("Invoice capture storage error: %s", exc)
-        return json_error(f"Failed to store invoice capture: {exc}", 503)
-    except Exception as exc:
-        logger.exception("Unexpected invoice capture error")
-        return json_error(f"Failed to store invoice capture: {exc}", 500)
-
-
 @app.post("/api/invoices/<sid>/capture")
 def api_invoices_capture(sid: str):
     try:

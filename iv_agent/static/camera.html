@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IV-Helper Camera</title>
+  <title>IV Desk Camera</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -214,7 +214,7 @@
 <body>
   <main class="shell">
     <section class="panel">
-      <p class="eyebrow">IV-Helper</p>
+      <p class="eyebrow">IV Desk</p>
       <h1>Open Camera</h1>
       <p>Take a photo of the invoice or receipt. The image is uploaded back into the web app and stored in your <strong>Invoices</strong> folder.</p>
       <div class="meta-grid">
@@ -241,7 +241,7 @@
         Take Photo
         <input id="file-input" type="file" accept="image/*" capture="environment" />
       </label>
-      <a class="button-secondary" href="/" id="back-link">Back To IV-Helper</a>
+      <a class="button-secondary" href="/" id="back-link">Back To IV Desk</a>
       <div id="status" class="status">Ready.</div>
     </section>
   </main>
@@ -344,7 +344,7 @@
     if (!sid) {
       captureButton.setAttribute("disabled", "");
       fileInput.disabled = true;
-      setStatus("This camera link is missing its invoice session. Re-open it from the QR code inside IV-Helper.", true);
+      setStatus("This camera link is missing its invoice session. Re-open it from the QR code inside IV Desk.", true);
     }
 
     fileInput.addEventListener("change", async (event) => {

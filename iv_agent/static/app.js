@@ -31,9 +31,10 @@ const reportTypeLabelMap = {
 const appViewTitleMap = {
   dashboard: "Dashboard",
   calendar: "Calendar",
-  adviser: "IV-Adviser",
+  adviser: "IV Desk",
   community: "Community",
-  reports: "File Storage",
+  reports: "Storage",
+  automations: "Automations",
   settings: "Settings",
 };
 
@@ -44,6 +45,8 @@ const communityChannelTitleMap = {
 };
 
 const communityStorageKey = "iv_helper_parent_community";
+const chatSessionsStorageKey = "iv_agent_chat_sessions";
+const activeChatStorageKey = "iv_agent_active_chat_id";
 
 const communitySeedMessages = [
   {
@@ -79,9 +82,16 @@ const communitySeedMessages = [
 const state = {
   currentMonth: formatMonth(new Date()),
   currentView: "timeGridWeek",
-  activeAppView: "dashboard",
+  activeAppView: "adviser",
   activeCommunityChannel: "daily",
   calendar: null,
+  sidebarCollapsed: localStorage.getItem("iv_helper_sidebar_collapsed") === "true",
+  inspectorCollapsed: true,
+  lastPanelView: "calendar",
+  threadId: localStorage.getItem("iv_agent_thread_id") || "",
+  activeChatId: localStorage.getItem(activeChatStorageKey) || "",
+  chats: [],
+  openThreadMenuId: "",
   loadingCount: 0,
   errorTimer: null,
   activeModalId: null,
@@ -113,16 +123,23 @@ const state = {
   automationLiveRecognition: null,
   automationInterimTranscript: "",
   automationFinalTranscript: "",
-  notificationsOpen: false,
   communityMessages: [],
   aiStatus: null,
   profile: null,
   profileLoaded: false,
   calendarDataCache: {},
   calendarDataRequests: {},
+  chatStarted: false,
+  storageBrowser: null,
+  activeStorageBucket: "",
 };
 
 const elements = {
+  layoutShell: document.querySelector(".layout-shell"),
+  sidebarToggle: document.getElementById("toggle-sidebar"),
+  inspectorToggle: document.getElementById("toggle-inspector"),
+  storageToggle: document.getElementById("toggle-storage"),
+  automationsToggle: document.getElementById("toggle-automations"),
   monthPicker: document.getElementById("month-picker"),
   heading: document.getElementById("calendar-heading"),
   hoursValue: document.getElementById("hours-value"),
@@ -199,12 +216,8 @@ const elements = {
   voiceDraftTranscript: document.getElementById("voice-draft-transcript"),
   voiceDraftStatus: document.getElementById("voice-draft-status"),
   automationsModal: document.getElementById("automations-modal"),
-  notificationButton: document.getElementById("open-notifications-popover"),
-  notificationsPopover: document.getElementById("notifications-popover"),
-  notificationsList: document.getElementById("notifications-list"),
   openAutomationsCardButton: document.getElementById("open-automations-card"),
   quickAddAutomationButton: document.getElementById("quick-add-automation"),
-  automationsPill: document.getElementById("automations-pill"),
   automationVoiceCard: document.querySelector(".automation-voice-card"),
   automationVoiceButton: document.getElementById("automation-voice-button"),
   automationVoiceStatus: document.getElementById("automation-voice-status"),
@@ -221,12 +234,20 @@ const elements = {
   automationList: document.getElementById("automation-list"),
   automationCountPill: document.getElementById("automation-count"),
   automationSummary: document.getElementById("automation-summary"),
+  automationPanelList: document.getElementById("automation-panel-list"),
+  automationPanelCount: document.getElementById("automation-panel-count"),
+  automationPanelSummary: document.getElementById("automation-panel-summary"),
+  panelNewAutomationButton: document.getElementById("panel-new-automation"),
   adviserForm: document.getElementById("adviser-form"),
+  adviserShell: document.getElementById("adviser-shell"),
+  chatWelcome: document.getElementById("chat-welcome"),
   adviserInput: document.getElementById("adviser-input"),
   adviserSendButton: document.getElementById("adviser-send"),
   adviserCancelButton: document.getElementById("adviser-cancel"),
   chatThread: document.getElementById("chat-thread"),
   chatChips: document.querySelectorAll(".chat-chip"),
+  newThreadButton: document.getElementById("new-thread"),
+  chatList: document.getElementById("chat-list"),
   communityThread: document.getElementById("community-thread"),
   communityForm: document.getElementById("community-form"),
   communityInput: document.getElementById("community-input"),
@@ -240,6 +261,12 @@ const elements = {
   profileInputs: document.querySelectorAll("[data-profile-path]"),
   profileSaveStatus: document.getElementById("profile-save-status"),
   reloadProfileButton: document.getElementById("reload-profile"),
+  refreshStorageBrowserButton: document.getElementById("refresh-storage-browser"),
+  storageBrowserStatus: document.getElementById("storage-browser-status"),
+  storageBucketList: document.getElementById("storage-bucket-list"),
+  storageActiveBucket: document.getElementById("storage-active-bucket"),
+  storageFileCount: document.getElementById("storage-file-count"),
+  storageFileList: document.getElementById("storage-file-list"),
 };
 
 function formatMonth(date) {
@@ -944,6 +971,69 @@ function ensureCalendarInitialized() {
   initCalendar();
 }
 
+function syncWorkspaceLayout() {
+  const panelOpen = state.activeAppView !== "adviser" && !state.inspectorCollapsed;
+  document.body.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  document.body.classList.toggle("workspace-panel-open", panelOpen);
+  document.body.classList.toggle("workspace-panel-closed", !panelOpen);
+
+  if (elements.sidebarToggle) {
+    const label = state.sidebarCollapsed ? "Open sidebar" : "Collapse sidebar";
+    elements.sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
+    elements.sidebarToggle.setAttribute("aria-label", label);
+    elements.sidebarToggle.setAttribute("title", label);
+    const icon = elements.sidebarToggle.querySelector(".material-symbols-outlined");
+    if (icon) {
+      icon.textContent = state.sidebarCollapsed ? "left_panel_open" : "left_panel_close";
+    }
+  }
+
+  if (elements.inspectorToggle) {
+    const calendarOpen = panelOpen && state.activeAppView === "calendar";
+    elements.inspectorToggle.setAttribute("aria-expanded", String(calendarOpen));
+    elements.inspectorToggle.classList.toggle("is-active", calendarOpen);
+  }
+
+  if (elements.storageToggle) {
+    const storageOpen = panelOpen && state.activeAppView === "reports";
+    elements.storageToggle.setAttribute("aria-expanded", String(storageOpen));
+    elements.storageToggle.classList.toggle("is-active", storageOpen);
+  }
+
+  if (elements.automationsToggle) {
+    const automationsOpen = panelOpen && state.activeAppView === "automations";
+    elements.automationsToggle.setAttribute("aria-expanded", String(automationsOpen));
+    elements.automationsToggle.classList.toggle("is-active", automationsOpen);
+  }
+
+  if (elements.calendarToolbar) {
+    elements.calendarToolbar.classList.toggle("hidden", state.activeAppView !== "calendar" || !panelOpen);
+  }
+  if (elements.defaultToolbar) {
+    elements.defaultToolbar.classList.remove("hidden");
+  }
+}
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem("iv_helper_sidebar_collapsed", String(state.sidebarCollapsed));
+  syncWorkspaceLayout();
+}
+
+function toggleInspector() {
+  toggleWorkspacePanel("calendar");
+}
+
+function toggleWorkspacePanel(viewName) {
+  const isOpen = state.activeAppView === viewName && !state.inspectorCollapsed;
+  if (isOpen) {
+    state.inspectorCollapsed = true;
+    syncWorkspaceLayout();
+    return;
+  }
+  switchAppView(viewName).catch(() => {});
+}
+
 function navigatePeriod(offset) {
   if (!state.calendar) {
     return;
@@ -968,7 +1058,15 @@ function changeCalendarView(viewName) {
 }
 
 async function switchAppView(viewName) {
+  const panelViews = new Set(["calendar", "reports", "automations", "settings"]);
+  const isPanelView = panelViews.has(viewName);
   state.activeAppView = viewName;
+  if (isPanelView) {
+    state.lastPanelView = viewName;
+    state.inspectorCollapsed = false;
+  } else {
+    state.inspectorCollapsed = true;
+  }
 
   elements.navLinks.forEach((button) => {
     const isActive = button.dataset.viewTarget === viewName;
@@ -982,17 +1080,22 @@ async function switchAppView(viewName) {
   }
 
   elements.viewSections.forEach((section) => {
-    section.classList.toggle("is-active", section.dataset.view === viewName);
+    const isChatBase = section.dataset.view === "adviser" && (viewName === "adviser" || isPanelView);
+    const isTargetView = section.dataset.view === viewName;
+    const isTargetPanel = isPanelView && isTargetView;
+    section.classList.toggle("is-active", isChatBase || isTargetView);
+    section.classList.toggle("is-panel-active", isTargetPanel);
   });
+  syncWorkspaceLayout();
 
   if (elements.activeViewTitle) {
-    elements.activeViewTitle.textContent = appViewTitleMap[viewName] || "IV-Helper";
+    elements.activeViewTitle.textContent = appViewTitleMap[viewName] || "IV Desk";
   }
   if (elements.calendarToolbar) {
-    elements.calendarToolbar.classList.toggle("hidden", viewName !== "calendar");
+    elements.calendarToolbar.classList.toggle("hidden", viewName !== "calendar" || state.inspectorCollapsed);
   }
   if (elements.defaultToolbar) {
-    elements.defaultToolbar.classList.toggle("hidden", viewName === "calendar");
+    elements.defaultToolbar.classList.remove("hidden");
   }
 
   if (viewName === "calendar") {
@@ -1004,6 +1107,16 @@ async function switchAppView(viewName) {
 
   if (viewName === "dashboard") {
     await refreshDashboardData();
+    return;
+  }
+
+  if (viewName === "automations") {
+    await refreshAutomations();
+    return;
+  }
+
+  if (viewName === "reports") {
+    await refreshStorageBrowser();
     return;
   }
 
@@ -1905,16 +2018,15 @@ function handleDocumentClick(event) {
   if (!clickInsidePopover && !clickInsideEvent) {
     closeDeletePopover();
   }
-  const clickInsideNotifications = event.target.closest(".notification-wrap");
-  if (!clickInsideNotifications) {
-    closeNotificationsPopover();
+  if (!event.target.closest(".thread-item") && state.openThreadMenuId) {
+    closeThreadMenus();
   }
 }
 
 function handleKeydown(event) {
   if (event.key === "Escape") {
-    if (state.notificationsOpen) {
-      closeNotificationsPopover();
+    if (state.openThreadMenuId) {
+      closeThreadMenus();
       return;
     }
     if (state.activeModalId) {
@@ -1949,12 +2061,15 @@ function initCalendar() {
   state.calendar = new FullCalendar.Calendar(calendarEl, {
     initialView: state.currentView,
     headerToolbar: false,
-    height: "auto",
+    height: "100%",
     initialDate: `${state.currentMonth}-01`,
     nowIndicator: true,
     allDaySlot: true,
-    slotMinTime: "06:00:00",
-    slotMaxTime: "22:00:00",
+    weekends: false,
+    hiddenDays: [0, 6],
+    slotMinTime: "07:00:00",
+    slotMaxTime: "19:00:00",
+    scrollTime: "07:00:00",
     slotDuration: "00:30:00",
     forceEventDuration: true,
     eventClick: handleEventClick,
@@ -2004,7 +2119,7 @@ function seedFormDefaults() {
   toggleRepeatCountField();
 }
 
-function appendChatMessage(role, messageText, policyCard = null) {
+function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
   if (!elements.chatThread) {
     return;
   }
@@ -2050,9 +2165,27 @@ function appendChatMessage(role, messageText, policyCard = null) {
     bubble.appendChild(card);
   }
 
+  if (extras && Array.isArray(extras.citations) && extras.citations.length) {
+    bubble.appendChild(buildCitationCard(extras.citations));
+  }
+
+  if (extras && Array.isArray(extras.pendingActions) && extras.pendingActions.length) {
+    bubble.appendChild(buildPendingActionsCard(extras.pendingActions));
+  }
+
+  if (extras && Array.isArray(extras.toolEvents) && extras.toolEvents.length) {
+    const completedTools = extras.toolEvents.filter((event) => event && event.status === "completed").length;
+    if (completedTools > 0) {
+      const toolsMeta = document.createElement("span");
+      toolsMeta.className = "chat-tool-meta";
+      toolsMeta.textContent = `${completedTools} tool${completedTools === 1 ? "" : "s"} used`;
+      bubble.appendChild(toolsMeta);
+    }
+  }
+
   const meta = document.createElement("span");
   meta.className = "chat-meta";
-  meta.textContent = role === "user" ? "You" : "IV-Helper";
+  meta.textContent = role === "user" ? "You" : "IV Desk";
   bubble.appendChild(meta);
 
   row.appendChild(avatar);
@@ -2061,12 +2194,402 @@ function appendChatMessage(role, messageText, policyCard = null) {
   scrollChatToBottom();
 }
 
+function buildCitationCard(citations) {
+  const card = document.createElement("div");
+  card.className = "chat-citation-card";
+  const title = document.createElement("p");
+  title.className = "chat-policy-title";
+  title.textContent = "Sources";
+  card.appendChild(title);
+
+  citations.slice(0, 5).forEach((citation) => {
+    const row = document.createElement(citation.url ? "a" : "div");
+    row.className = "chat-citation-row";
+    if (citation.url) {
+      row.href = citation.url;
+      row.target = "_blank";
+      row.rel = "noreferrer";
+    }
+    const rowTitle = document.createElement("strong");
+    rowTitle.textContent = citation.title || "Source";
+    row.appendChild(rowTitle);
+    if (citation.snippet) {
+      const snippet = document.createElement("span");
+      snippet.textContent = citation.snippet;
+      row.appendChild(snippet);
+    }
+    card.appendChild(row);
+  });
+  return card;
+}
+
+function buildPendingActionsCard(actions) {
+  const card = document.createElement("div");
+  card.className = "chat-action-card";
+  const title = document.createElement("p");
+  title.className = "chat-policy-title";
+  title.textContent = "Pending confirmation";
+  card.appendChild(title);
+
+  actions.forEach((action) => {
+    const row = document.createElement("div");
+    row.className = "chat-action-row";
+
+    const copy = document.createElement("div");
+    copy.className = "chat-action-copy";
+    const label = document.createElement("strong");
+    label.textContent = action.title || action.type || "Pending action";
+    const type = document.createElement("span");
+    type.textContent = action.type || "";
+    copy.appendChild(label);
+    copy.appendChild(type);
+
+    const button = document.createElement("button");
+    button.className = "secondary-button";
+    button.type = "button";
+    button.textContent = "Confirm";
+    button.addEventListener("click", () => confirmPendingAgentAction(action.action_id, button));
+
+    row.appendChild(copy);
+    row.appendChild(button);
+    card.appendChild(row);
+  });
+  return card;
+}
+
 function scrollChatToBottom() {
   if (!elements.chatThread) {
     return;
   }
 
   elements.chatThread.scrollTop = elements.chatThread.scrollHeight;
+}
+
+function createChatId() {
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeChatSession(rawChat, index = 0) {
+  const now = new Date().toISOString();
+  const fallbackTitle = index === 0 ? "IV Desk planning" : `Chat ${index + 1}`;
+  const messages = Array.isArray(rawChat && rawChat.messages)
+    ? rawChat.messages
+      .map((message) => ({
+        role: String((message && message.role) || "").trim(),
+        text: String((message && message.text) || "").trim(),
+        timestamp: String((message && message.timestamp) || now),
+      }))
+      .filter((message) => message.role && message.text)
+    : [];
+
+  return {
+    id: String((rawChat && rawChat.id) || createChatId()),
+    title: String((rawChat && rawChat.title) || fallbackTitle).trim() || fallbackTitle,
+    threadId: String((rawChat && rawChat.threadId) || "").trim(),
+    messages,
+    createdAt: String((rawChat && rawChat.createdAt) || now),
+    updatedAt: String((rawChat && rawChat.updatedAt) || now),
+  };
+}
+
+function seedChatSessions() {
+  const now = new Date().toISOString();
+  return [
+    "IV Desk planning",
+    "Assistenzbeitrag report",
+    "Transport receipts",
+    "Calendar cleanup",
+  ].map((title, index) => normalizeChatSession({
+    id: `seed-chat-${index + 1}`,
+    title,
+    createdAt: now,
+    updatedAt: now,
+  }, index));
+}
+
+function loadChatSessions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(chatSessionsStorageKey) || "[]");
+    state.chats = Array.isArray(parsed) && parsed.length
+      ? parsed.map(normalizeChatSession)
+      : seedChatSessions();
+  } catch (error) {
+    state.chats = seedChatSessions();
+  }
+
+  if (!state.chats.some((chat) => chat.id === state.activeChatId)) {
+    state.activeChatId = state.chats[0] ? state.chats[0].id : "";
+  }
+  syncActiveChatState();
+}
+
+function saveChatSessions() {
+  localStorage.setItem(chatSessionsStorageKey, JSON.stringify(state.chats));
+  if (state.activeChatId) {
+    localStorage.setItem(activeChatStorageKey, state.activeChatId);
+  } else {
+    localStorage.removeItem(activeChatStorageKey);
+  }
+}
+
+function getActiveChatSession() {
+  return state.chats.find((chat) => chat.id === state.activeChatId) || null;
+}
+
+function syncActiveChatState() {
+  const activeChat = getActiveChatSession();
+  state.threadId = activeChat ? activeChat.threadId : "";
+  state.chatHistory = activeChat ? [...activeChat.messages] : [];
+  state.chatStarted = state.chatHistory.length > 0;
+  if (state.threadId) {
+    localStorage.setItem("iv_agent_thread_id", state.threadId);
+  } else {
+    localStorage.removeItem("iv_agent_thread_id");
+  }
+  syncChatStage();
+}
+
+function formatChatTime(value) {
+  const parsed = new Date(value || "");
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  const now = new Date();
+  const elapsedMs = now.getTime() - parsed.getTime();
+  if (elapsedMs < 60 * 1000) {
+    return "now";
+  }
+  if (elapsedMs < 60 * 60 * 1000) {
+    return `${Math.max(1, Math.floor(elapsedMs / (60 * 1000)))}m`;
+  }
+  if (elapsedMs < 24 * 60 * 60 * 1000) {
+    return `${Math.floor(elapsedMs / (60 * 60 * 1000))}h`;
+  }
+  if (elapsedMs < 7 * 24 * 60 * 60 * 1000) {
+    return `${Math.floor(elapsedMs / (24 * 60 * 60 * 1000))}d`;
+  }
+  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function closeThreadMenus() {
+  state.openThreadMenuId = "";
+  renderChatList();
+}
+
+function renderChatList() {
+  if (!elements.chatList) {
+    return;
+  }
+
+  elements.chatList.innerHTML = "";
+  state.chats.forEach((chat) => {
+    const item = document.createElement("div");
+    item.className = "thread-item";
+    item.classList.toggle("is-active", chat.id === state.activeChatId);
+    item.classList.toggle("is-menu-open", chat.id === state.openThreadMenuId);
+    item.dataset.chatId = chat.id;
+
+    const threadButton = document.createElement("button");
+    threadButton.className = "thread-link";
+    threadButton.type = "button";
+    threadButton.dataset.threadTitle = chat.title;
+
+    const title = document.createElement("span");
+    title.className = "thread-title";
+    title.textContent = chat.title;
+
+    const time = document.createElement("span");
+    time.className = "thread-time";
+    time.textContent = formatChatTime(chat.updatedAt);
+
+    threadButton.appendChild(title);
+    threadButton.appendChild(time);
+    threadButton.addEventListener("click", () => switchChatSession(chat.id));
+
+    const menuButton = document.createElement("button");
+    menuButton.className = "thread-menu-button";
+    menuButton.type = "button";
+    menuButton.setAttribute("aria-label", `Options for ${chat.title}`);
+    menuButton.setAttribute("aria-expanded", String(chat.id === state.openThreadMenuId));
+
+    const menuIcon = document.createElement("span");
+    menuIcon.className = "material-symbols-outlined";
+    menuIcon.textContent = "more_horiz";
+    menuButton.appendChild(menuIcon);
+    menuButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.openThreadMenuId = state.openThreadMenuId === chat.id ? "" : chat.id;
+      renderChatList();
+    });
+
+    const menu = document.createElement("div");
+    menu.className = "thread-menu";
+
+    const renameButton = document.createElement("button");
+    renameButton.type = "button";
+    renameButton.dataset.chatAction = "rename";
+    renameButton.innerHTML = '<span class="material-symbols-outlined">edit</span><span>Rename</span>';
+    renameButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      renameChatSession(chat.id);
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "danger-menu-item";
+    deleteButton.dataset.chatAction = "delete";
+    deleteButton.innerHTML = '<span class="material-symbols-outlined">delete</span><span>Delete</span>';
+    deleteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteChatSession(chat.id);
+    });
+
+    menu.appendChild(renameButton);
+    menu.appendChild(deleteButton);
+    item.appendChild(threadButton);
+    item.appendChild(menuButton);
+    item.appendChild(menu);
+    elements.chatList.appendChild(item);
+  });
+}
+
+function renderActiveChatMessages() {
+  if (elements.chatThread) {
+    elements.chatThread.innerHTML = "";
+  }
+  state.chatHistory.forEach((message) => {
+    const role = message.role === "assistant" ? "bot" : message.role;
+    appendChatMessage(role, message.text);
+  });
+  syncChatStage();
+}
+
+function setActiveChatSession(chatId) {
+  if (!state.chats.some((chat) => chat.id === chatId)) {
+    return;
+  }
+  state.activeChatId = chatId;
+  state.openThreadMenuId = "";
+  syncActiveChatState();
+  saveChatSessions();
+  renderChatList();
+  renderActiveChatMessages();
+}
+
+function createNewChatSession() {
+  const now = new Date().toISOString();
+  const chat = normalizeChatSession({
+    id: createChatId(),
+    title: "New chat",
+    createdAt: now,
+    updatedAt: now,
+  });
+  state.chats.unshift(chat);
+  setActiveChatSession(chat.id);
+}
+
+function makeChatTitle(text) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "New chat";
+  }
+  return normalized.length > 34 ? `${normalized.slice(0, 31)}...` : normalized;
+}
+
+function renameChatSession(chatId) {
+  const chat = state.chats.find((item) => item.id === chatId);
+  if (!chat) {
+    return;
+  }
+  const nextTitle = window.prompt("Rename chat", chat.title);
+  if (nextTitle === null) {
+    closeThreadMenus();
+    return;
+  }
+  const normalizedTitle = nextTitle.trim();
+  if (!normalizedTitle) {
+    closeThreadMenus();
+    return;
+  }
+  chat.title = normalizedTitle;
+  chat.updatedAt = new Date().toISOString();
+  state.openThreadMenuId = "";
+  saveChatSessions();
+  renderChatList();
+  if (chat.id === state.activeChatId && elements.activeViewTitle) {
+    elements.activeViewTitle.textContent = chat.title;
+  }
+}
+
+function deleteChatSession(chatId) {
+  const chat = state.chats.find((item) => item.id === chatId);
+  if (!chat || !window.confirm(`Delete "${chat.title}"?`)) {
+    closeThreadMenus();
+    return;
+  }
+
+  state.chats = state.chats.filter((item) => item.id !== chatId);
+  if (!state.chats.length) {
+    state.chats.push(normalizeChatSession({
+      id: createChatId(),
+      title: "New chat",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+  if (state.activeChatId === chatId) {
+    state.activeChatId = state.chats[0].id;
+  }
+  state.openThreadMenuId = "";
+  syncActiveChatState();
+  saveChatSessions();
+  renderChatList();
+  renderActiveChatMessages();
+}
+
+function switchChatSession(chatId) {
+  if (state.chatPending || chatId === state.activeChatId) {
+    closeThreadMenus();
+    return;
+  }
+  setActiveChatSession(chatId);
+  switchAppView("adviser").catch(() => {});
+  if (elements.activeViewTitle) {
+    const activeChat = getActiveChatSession();
+    elements.activeViewTitle.textContent = activeChat ? activeChat.title : appViewTitleMap.adviser;
+  }
+  if (elements.adviserInput) {
+    elements.adviserInput.focus();
+  }
+}
+
+function syncChatStage() {
+  if (elements.adviserShell) {
+    elements.adviserShell.classList.toggle("is-welcome", !state.chatStarted);
+  }
+  document.body.classList.toggle("chat-has-started", state.chatStarted);
+}
+
+function markChatStarted() {
+  if (state.chatStarted) {
+    return;
+  }
+  state.chatStarted = true;
+  syncChatStage();
+}
+
+function resetChatSession() {
+  const activeChat = getActiveChatSession();
+  if (activeChat) {
+    activeChat.threadId = "";
+    activeChat.messages = [];
+    activeChat.updatedAt = new Date().toISOString();
+  }
+  syncActiveChatState();
+  saveChatSessions();
+  renderChatList();
+  renderActiveChatMessages();
 }
 
 function removeChatPendingIndicator() {
@@ -2249,9 +2772,48 @@ function cancelPendingAdviserRequest() {
 }
 
 function pushChatHistory(role, text) {
-  state.chatHistory.push({ role, text, timestamp: new Date().toISOString() });
+  const now = new Date().toISOString();
+  const activeChat = getActiveChatSession();
+  state.chatHistory.push({ role, text, timestamp: now });
   if (state.chatHistory.length > 30) {
     state.chatHistory = state.chatHistory.slice(-30);
+  }
+  if (activeChat) {
+    if (role === "user" && (!activeChat.messages.length || activeChat.title === "New chat")) {
+      activeChat.title = makeChatTitle(text);
+    }
+    activeChat.messages = [...state.chatHistory];
+    activeChat.updatedAt = now;
+    saveChatSessions();
+    renderChatList();
+  }
+}
+
+async function confirmPendingAgentAction(actionId, button) {
+  if (!actionId || !button || button.disabled) {
+    return;
+  }
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Confirming";
+  try {
+    const payload = await apiFetch(`/api/agent/actions/${encodeURIComponent(actionId)}/confirm`, {
+      method: "POST",
+      showLoading: false,
+    });
+    button.textContent = "Confirmed";
+    if (payload && payload.result) {
+      appendChatMessage("bot", "Confirmed. I applied the pending action.");
+    }
+    clearCalendarDataCache();
+    await Promise.all([refreshAutomations(), refreshDashboardData().catch(() => {})]);
+    if (state.calendar) {
+      state.calendar.refetchEvents();
+      await refreshCalendarData();
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = originalText;
   }
 }
 
@@ -2261,6 +2823,7 @@ async function submitAdviserPrompt(rawPrompt) {
     return;
   }
 
+  markChatStarted();
   appendChatMessage("user", prompt);
   pushChatHistory("user", prompt);
   const chatAbortController = new AbortController();
@@ -2268,29 +2831,52 @@ async function submitAdviserPrompt(rawPrompt) {
   setChatPending(true);
 
   try {
-    const data = await apiFetch("/api/chat", {
+    const data = await apiFetch("/api/agent/chat", {
       method: "POST",
       showLoading: false,
       suppressErrorBanner: true,
       signal: chatAbortController.signal,
       body: JSON.stringify({
         message: prompt,
+        thread_id: state.threadId,
+        attachments: [],
+        client_context: {
+          active_panel: state.activeAppView === "adviser" ? "" : state.activeAppView,
+          current_month: state.currentMonth,
+          calendar_view: state.currentView,
+        },
         history: state.chatHistory,
       }),
     });
 
+    if (data.thread_id) {
+      state.threadId = data.thread_id;
+      const activeChat = getActiveChatSession();
+      if (activeChat) {
+        activeChat.threadId = state.threadId;
+        activeChat.updatedAt = new Date().toISOString();
+        saveChatSessions();
+        renderChatList();
+      }
+      localStorage.setItem("iv_agent_thread_id", state.threadId);
+    }
+
     const webhookPayload = data.webhook_response || data;
-    const webhookText = extractWebhookReplyText(webhookPayload);
+    const webhookText = data.answer || extractWebhookReplyText(webhookPayload);
     const webhookPolicy = extractWebhookPolicyCard(webhookPayload);
     const replyText = webhookText || stringifyWebhookPayload(webhookPayload);
     const replyPolicy = webhookPolicy || null;
 
     if (!replyText) {
-      throw new Error("n8n returned an empty response.");
+      throw new Error("The agent returned an empty response.");
     }
 
     removeChatPendingIndicator();
-    appendChatMessage("bot", replyText, replyPolicy);
+    appendChatMessage("bot", replyText, replyPolicy, {
+      citations: Array.isArray(data.citations) ? data.citations : [],
+      pendingActions: Array.isArray(data.pending_actions) ? data.pending_actions : [],
+      toolEvents: Array.isArray(data.tool_events) ? data.tool_events : [],
+    });
     pushChatHistory("assistant", replyText);
   } catch (error) {
     if (error.name === "AbortError") {
@@ -2298,7 +2884,7 @@ async function submitAdviserPrompt(rawPrompt) {
     }
 
     const errorText = String(error && error.message ? error.message : error || "").trim()
-      || "Failed to get a response from n8n.";
+      || "Failed to get an agent response.";
     removeChatPendingIndicator();
     appendChatMessage("bot", errorText, null);
     pushChatHistory("assistant", errorText);
@@ -2550,92 +3136,51 @@ function renderAutomations() {
   if (elements.automationCountPill) {
     elements.automationCountPill.textContent = String(items.length);
   }
-  if (elements.automationsPill) {
-    elements.automationsPill.textContent = String(items.length);
-    elements.automationsPill.classList.toggle("hidden", items.length === 0);
+  if (elements.automationPanelCount) {
+    elements.automationPanelCount.textContent = String(items.length);
   }
   renderAutomationList(items);
   renderAutomationSummary(items);
-  renderNotifications(items);
-}
-
-function closeNotificationsPopover() {
-  state.notificationsOpen = false;
-  if (elements.notificationsPopover) {
-    elements.notificationsPopover.classList.add("hidden");
-  }
-  if (elements.notificationButton) {
-    elements.notificationButton.setAttribute("aria-expanded", "false");
-  }
-}
-
-async function toggleNotificationsPopover() {
-  if (!elements.notificationsPopover || !elements.notificationButton) {
-    return;
-  }
-  if (state.notificationsOpen) {
-    closeNotificationsPopover();
-    return;
-  }
-  if (!state.automationsLoaded) {
-    await refreshAutomations();
-  } else {
-    renderNotifications(state.automations || []);
-  }
-  state.notificationsOpen = true;
-  elements.notificationsPopover.classList.remove("hidden");
-  elements.notificationButton.setAttribute("aria-expanded", "true");
-}
-
-function renderNotifications(items) {
-  if (!elements.notificationsList) {
-    return;
-  }
-  const notifications = (items || []).filter((item) => item.status !== "completed").slice(0, 5);
-  if (!notifications.length) {
-    elements.notificationsList.innerHTML = '<p class="muted-copy">No notifications right now.</p>';
-    return;
-  }
-  elements.notificationsList.innerHTML = "";
-  notifications.forEach((item) => {
-    const node = document.createElement("article");
-    node.className = "notification-item";
-    node.innerHTML = `
-      <span class="notification-icon material-symbols-outlined">${item.action === "generate_assistenzbeitrag" ? "description" : "notifications_active"}</span>
-      <div class="notification-body">
-        <span class="notification-title">${escapeHtml(item.title || "Reminder")}</span>
-        <span class="notification-meta">${escapeHtml(formatNotificationMeta(item))}</span>
-      </div>`;
-    elements.notificationsList.appendChild(node);
-  });
-}
-
-function formatNotificationMeta(item) {
-  const nextRun = item.next_run_at ? `Next: ${formatAutomationDate(item.next_run_at)}` : "No scheduled time";
-  const note = item.note ? ` - ${item.note}` : "";
-  return `${nextRun}${note}`;
 }
 
 function renderAutomationList(items) {
-  if (!elements.automationList) return;
+  renderAutomationListInto(
+    elements.automationList,
+    items,
+    "No automations yet. Use voice or pick a preset above."
+  );
+  renderAutomationListInto(
+    elements.automationPanelList,
+    items,
+    "No automations yet. Use the button above to add one."
+  );
+}
+
+function renderAutomationListInto(container, items, emptyMessage) {
+  if (!container) return;
   if (!items.length) {
-    elements.automationList.innerHTML = '<p class="muted-copy">No automations yet. Use voice or pick a preset above.</p>';
+    container.innerHTML = `<p class="muted-copy">${escapeHtml(emptyMessage)}</p>`;
     return;
   }
-  elements.automationList.innerHTML = "";
+  container.innerHTML = "";
   items.forEach((item) => {
-    elements.automationList.appendChild(buildAutomationItemNode(item));
+    container.appendChild(buildAutomationItemNode(item));
   });
 }
 
 function renderAutomationSummary(items) {
-  if (!elements.automationSummary) return;
+  renderAutomationSummaryInto(elements.automationSummary, items, "No automations yet. Tap the dial to add one.");
+  renderAutomationSummaryInto(elements.automationPanelSummary, items, "No automations yet.");
+}
+
+function renderAutomationSummaryInto(container, items, emptyMessage) {
+  if (!container) return;
   if (!items.length) {
-    elements.automationSummary.innerHTML = '<p class="muted-copy">No automations yet. Tap the dial to add one.</p>';
+    container.innerHTML = `<p class="muted-copy">${escapeHtml(emptyMessage)}</p>`;
     return;
   }
   const top = items.slice(0, 3);
-  elements.automationSummary.innerHTML = "";
+  container.innerHTML = "";
   top.forEach((item) => {
     const node = document.createElement("div");
     node.className = "automation-summary-item";
@@ -2645,7 +3190,7 @@ function renderAutomationSummary(items) {
         <div>${escapeHtml(item.title || "(untitled)")}</div>
         <div class="automation-summary-item-meta">${escapeHtml(formatAutomationMeta(item))}</div>
       </div>`;
-    elements.automationSummary.appendChild(node);
+    container.appendChild(node);
   });
 }
 
@@ -2801,7 +3346,151 @@ async function tickAutomationsLazy() {
   }
 }
 
+async function refreshStorageBrowser(options = {}) {
+  if (!elements.storageBucketList || !elements.storageFileList) {
+    return;
+  }
+  if (!options.force && state.storageBrowser) {
+    renderStorageBrowser();
+    return;
+  }
+  if (elements.storageBrowserStatus) {
+    elements.storageBrowserStatus.textContent = "Loading storage...";
+    elements.storageBrowserStatus.dataset.variant = "";
+  }
+  try {
+    const data = await apiFetch("/api/storage/browser", { showLoading: false });
+    state.storageBrowser = data;
+    if (!state.activeStorageBucket && data.buckets && data.buckets.length) {
+      state.activeStorageBucket = data.buckets[0].id || data.buckets[0].name;
+    }
+    renderStorageBrowser();
+  } catch (error) {
+    if (elements.storageBrowserStatus) {
+      elements.storageBrowserStatus.textContent = error.message || "Storage could not be loaded.";
+      elements.storageBrowserStatus.dataset.variant = "error";
+    }
+  }
+}
+
+function renderStorageBrowser() {
+  const data = state.storageBrowser || {};
+  const buckets = Array.isArray(data.buckets) ? data.buckets : [];
+  if (elements.storageBrowserStatus) {
+    if (!data.configured) {
+      elements.storageBrowserStatus.textContent = data.message || "Supabase Storage is not configured.";
+      elements.storageBrowserStatus.dataset.variant = "muted";
+    } else {
+      const fileTotal = buckets.reduce((total, bucket) => total + Number(bucket.file_count || 0), 0);
+      elements.storageBrowserStatus.textContent = `${buckets.length} bucket${buckets.length === 1 ? "" : "s"} - ${fileTotal} file${fileTotal === 1 ? "" : "s"}`;
+      elements.storageBrowserStatus.dataset.variant = "";
+    }
+  }
+
+  if (!buckets.length) {
+    if (elements.storageBucketList) {
+      elements.storageBucketList.innerHTML = "";
+    }
+    if (elements.storageActiveBucket) {
+      elements.storageActiveBucket.textContent = "No bucket selected";
+    }
+    if (elements.storageFileCount) {
+      elements.storageFileCount.textContent = "0 files";
+    }
+    if (elements.storageFileList) {
+      elements.storageFileList.innerHTML = `<div class="storage-empty">No buckets or files available.</div>`;
+    }
+    return;
+  }
+
+  const activeBucket = buckets.find((bucket) => (bucket.id || bucket.name) === state.activeStorageBucket) || buckets[0];
+  state.activeStorageBucket = activeBucket.id || activeBucket.name;
+  if (elements.storageBucketList) {
+    elements.storageBucketList.innerHTML = buckets.map((bucket) => renderStorageBucketButton(bucket, activeBucket)).join("");
+    elements.storageBucketList.querySelectorAll("[data-storage-bucket]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.activeStorageBucket = button.dataset.storageBucket || "";
+        renderStorageBrowser();
+      });
+    });
+  }
+
+  const objects = Array.isArray(activeBucket.objects) ? activeBucket.objects : [];
+  const files = objects.filter((item) => item.type === "file");
+  if (elements.storageActiveBucket) {
+    elements.storageActiveBucket.textContent = activeBucket.name || activeBucket.id || "Bucket";
+  }
+  if (elements.storageFileCount) {
+    elements.storageFileCount.textContent = `${files.length} file${files.length === 1 ? "" : "s"}`;
+  }
+  if (elements.storageFileList) {
+    elements.storageFileList.innerHTML = objects.length
+      ? objects.map(renderStorageObject).join("")
+      : `<div class="storage-empty">This bucket is empty.</div>`;
+  }
+}
+
+function renderStorageBucketButton(bucket, activeBucket) {
+  const bucketId = bucket.id || bucket.name || "";
+  const activeId = activeBucket.id || activeBucket.name || "";
+  const fileCount = Number(bucket.file_count || 0);
+  const isActive = bucketId === activeId;
+  return `
+    <button class="storage-bucket-button${isActive ? " is-active" : ""}" type="button" data-storage-bucket="${escapeHtml(bucketId)}">
+      <span class="material-symbols-outlined">database</span>
+      <span class="storage-bucket-copy">
+        <strong>${escapeHtml(bucket.name || bucketId || "Bucket")}</strong>
+        <span>${fileCount} file${fileCount === 1 ? "" : "s"}${bucket.public ? " - public" : ""}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderStorageObject(item) {
+  const isFolder = item.type === "folder";
+  const label = item.name || item.path || "Object";
+  const meta = isFolder
+    ? "Folder"
+    : [formatFileSize(item.size), item.content_type, formatStorageTime(item.updated_at)].filter(Boolean).join(" - ");
+  return `
+    <article class="storage-file-row">
+      <span class="storage-file-icon material-symbols-outlined">${isFolder ? "folder" : "draft"}</span>
+      <span class="storage-file-copy">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(item.path || "")}</span>
+        <small>${escapeHtml(meta || "Stored object")}</small>
+      </span>
+    </article>
+  `;
+}
+
+function formatStorageTime(value) {
+  if (!value) {
+    return "";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 function bindEvents() {
+  if (elements.sidebarToggle) {
+    elements.sidebarToggle.addEventListener("click", toggleSidebar);
+  }
+  if (elements.inspectorToggle) {
+    elements.inspectorToggle.addEventListener("click", toggleInspector);
+  }
+  if (elements.storageToggle) {
+    elements.storageToggle.addEventListener("click", () => toggleWorkspacePanel("reports"));
+  }
+  if (elements.automationsToggle) {
+    elements.automationsToggle.addEventListener("click", () => toggleWorkspacePanel("automations"));
+  }
+  if (elements.refreshStorageBrowserButton) {
+    elements.refreshStorageBrowserButton.addEventListener("click", () => refreshStorageBrowser({ force: true }));
+  }
   document.getElementById("prev-month").addEventListener("click", () => navigatePeriod(-1));
   document.getElementById("next-month").addEventListener("click", () => navigatePeriod(1));
   const openAddModalButton = document.getElementById("open-add-modal");
@@ -2814,17 +3503,14 @@ function bindEvents() {
   if (elements.automationVoiceButton) {
     elements.automationVoiceButton.addEventListener("click", handleAutomationVoiceButtonClick);
   }
-  if (elements.notificationButton) {
-    elements.notificationButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      toggleNotificationsPopover().catch(() => {});
-    });
-  }
   if (elements.openAutomationsCardButton) {
     elements.openAutomationsCardButton.addEventListener("click", () => openAutomationsModal(elements.openAutomationsCardButton));
   }
   if (elements.quickAddAutomationButton) {
     elements.quickAddAutomationButton.addEventListener("click", () => openAutomationsModal(elements.quickAddAutomationButton));
+  }
+  if (elements.panelNewAutomationButton) {
+    elements.panelNewAutomationButton.addEventListener("click", () => openAutomationsModal(elements.panelNewAutomationButton));
   }
   if (elements.automationForm) {
     elements.automationForm.addEventListener("submit", submitAutomationForm);
@@ -2846,9 +3532,24 @@ function bindEvents() {
 
   elements.navLinks.forEach((button) => {
     button.addEventListener("click", () => {
+      if (!button.dataset.viewTarget) {
+        return;
+      }
       switchAppView(button.dataset.viewTarget).catch(() => {});
     });
   });
+  if (elements.newThreadButton) {
+    elements.newThreadButton.addEventListener("click", () => {
+      createNewChatSession();
+      switchAppView("adviser").catch(() => {});
+      if (elements.activeViewTitle) {
+        elements.activeViewTitle.textContent = appViewTitleMap.adviser;
+      }
+      if (elements.adviserInput) {
+        elements.adviserInput.focus();
+      }
+    });
+  }
   if (elements.settingsButton) {
     elements.settingsButton.addEventListener("click", () => {
       switchAppView("settings").catch(() => {});
@@ -2970,6 +3671,10 @@ async function initialize() {
   seedFormDefaults();
   loadCommunityMessages();
   setCommunityChannel(state.activeCommunityChannel);
+  loadChatSessions();
+  renderChatList();
+  renderActiveChatMessages();
+  syncChatStage();
   bindEvents();
   setSelectedReportTypes(state.selectedReportTypes);
   setChatPending(false);
@@ -3064,6 +3769,10 @@ function initInvoices() {
 
       setUploadStatus("Upload saved to storage.", "success");
       await poll();
+      state.storageBrowser = null;
+      if (state.activeAppView === "reports") {
+        refreshStorageBrowser({ force: true }).catch(() => {});
+      }
     } catch (error) {
       setUploadStatus(error.message || "Upload failed.", "error");
     } finally {

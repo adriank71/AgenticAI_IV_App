@@ -1,6 +1,7 @@
 Flask
 flask-cors
 openai
+openai-agents
 pypdf
 psycopg[binary]
 supabase

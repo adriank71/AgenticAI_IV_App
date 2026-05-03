@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IV-Helper | IV Adviser</title>
+  <title>IV Desk | Agent Workspace</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
@@ -19,100 +19,56 @@
   <div class="layout-shell">
     <aside class="app-nav">
       <div class="app-nav-brand">
-        <h1 class="brand">IV-Helper</h1>
-        <p class="brand-kicker">Clinical Precision</p>
+        <div class="brand-copy">
+          <h1 class="brand">IV Desk</h1>
+          <p class="brand-kicker">Agent Workspace</p>
+        </div>
+        <button id="toggle-sidebar" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
+          <span class="material-symbols-outlined">left_panel_close</span>
+        </button>
       </div>
 
-      <nav class="app-nav-links" aria-label="Application sections">
-        <button class="nav-link is-active" type="button" data-view-target="dashboard">
-          <span class="material-symbols-outlined">grid_view</span>
-          <span>Dashboard</span>
+      <nav class="thread-nav" aria-label="Chats">
+        <button id="new-thread" class="nav-link new-thread-button" type="button">
+          <span class="material-symbols-outlined">edit_square</span>
+          <span>New chat</span>
         </button>
-        <button class="nav-link" type="button" data-view-target="adviser">
-          <span class="material-symbols-outlined">medical_services</span>
-          <span>IV Adviser</span>
+
+        <button class="nav-link all-chats-link" type="button" data-view-target="adviser">
+          <span class="material-symbols-outlined">forum</span>
+          <span>All chats</span>
         </button>
-        <button class="nav-link" type="button" data-view-target="calendar">
-          <span class="material-symbols-outlined">calendar_today</span>
-          <span>Calendar</span>
-        </button>
-        <button class="nav-link" type="button" data-view-target="reports">
-          <span class="material-symbols-outlined">folder_shared</span>
-          <span>File Storage</span>
-        </button>
-        <button class="nav-link" type="button" data-view-target="community">
+
+        <div id="chat-list" class="chat-list" aria-label="All chats"></div>
+
+        <button class="nav-link community-nav-link" type="button" data-view-target="community">
           <span class="material-symbols-outlined">groups</span>
           <span>Community</span>
         </button>
       </nav>
-
-      <div class="app-nav-footer">
-        <button id="open-settings-view" class="nav-aux" type="button">
-          <span class="material-symbols-outlined">settings</span>
-          <span>Settings</span>
-        </button>
-        <button class="nav-aux" type="button">
-          <span class="material-symbols-outlined">help</span>
-          <span>Support</span>
-        </button>
-      </div>
     </aside>
 
     <div class="layout-main">
       <header class="topbar glass-panel">
         <div class="topbar-brand-row">
-          <span id="active-view-title" class="topbar-brand">Dashboard</span>
+          <span id="active-view-title" class="topbar-brand">IV Desk</span>
         </div>
 
-        <div id="calendar-toolbar" class="topbar-controls">
-          <div class="view-switch" role="group" aria-label="Calendar view">
-            <button id="view-month" class="view-button" type="button" data-view="dayGridMonth">MONTH</button>
-            <button id="view-week" class="view-button is-active" type="button" data-view="timeGridWeek">WEEK</button>
-            <button id="view-day" class="view-button" type="button" data-view="timeGridDay">DAY</button>
-            <button id="view-list" class="view-button" type="button" data-view="listWeek">LIST</button>
-          </div>
-          <div class="month-controls" aria-label="Month navigation">
-            <button id="prev-month" class="icon-button" type="button" aria-label="Previous period">
-              <span class="material-symbols-outlined">chevron_left</span>
-            </button>
-            <input id="month-picker" class="month-picker" type="month" aria-label="Select month" />
-            <button id="next-month" class="icon-button" type="button" aria-label="Next period">
-              <span class="material-symbols-outlined">chevron_right</span>
-            </button>
-          </div>
-          <div class="notification-wrap">
-            <button id="open-notifications-popover" class="icon-button" type="button" aria-label="Notifications" aria-expanded="false" aria-controls="notifications-popover" title="Notifications">
-              <span class="material-symbols-outlined">notifications</span>
-              <span id="automations-pill" class="topbar-pill hidden" aria-hidden="true">0</span>
-            </button>
-            <div id="notifications-popover" class="notifications-popover hidden" role="dialog" aria-label="Notifications">
-              <div class="notifications-header">
-                <p class="section-title">Notifications</p>
-              </div>
-              <div id="notifications-list" class="notifications-list">
-                <p class="muted-copy">No notifications right now.</p>
-              </div>
-            </div>
-          </div>
-          <button id="open-add-modal" class="primary-button" type="button">New Event</button>
-        </div>
-
-        <div id="default-toolbar" class="topbar-utility hidden">
-          <div class="search-wrap">
-            <input type="text" placeholder="Search insights..." aria-label="Search insights" />
-            <span class="material-symbols-outlined">search</span>
-          </div>
-          <button class="icon-button" type="button" aria-label="Notifications">
-            <span class="material-symbols-outlined">notifications</span>
+        <div id="default-toolbar" class="topbar-utility">
+          <button id="toggle-inspector" class="icon-button panel-toggle-button" type="button" aria-label="Toggle calendar" title="Calendar">
+            <span class="material-symbols-outlined">calendar_today</span>
           </button>
-          <button class="icon-button" type="button" aria-label="Account">
-            <span class="material-symbols-outlined">account_circle</span>
+          <button id="toggle-storage" class="icon-button panel-toggle-button" type="button" aria-label="Toggle storage" title="Storage">
+            <span class="material-symbols-outlined">folder</span>
+          </button>
+          <button id="toggle-automations" class="icon-button panel-toggle-button" type="button" aria-label="Toggle automations" title="Automations">
+            <span class="material-symbols-outlined">automation</span>
           </button>
         </div>
       </header>
 
       <main class="app-views">
-        <section id="view-dashboard" class="app-view is-active" data-view="dashboard">
+        <section id="view-dashboard" class="app-view" data-view="dashboard">
           <div class="dashboard-shell">
             <article class="dashboard-card glass-panel">
               <p class="eyebrow">Total Assistant Hours</p>
@@ -133,7 +89,7 @@
               <p class="section-title">Next Steps</p>
               <ul class="dashboard-list">
                 <li><span class="material-symbols-outlined">description</span><span id="dashboard-report-label">Generate monthly report for --</span></li>
-                <li><span class="material-symbols-outlined">forum</span><span>Ask IV Adviser about policy updates</span></li>
+                <li><span class="material-symbols-outlined">forum</span><span>Ask IV Desk about policy updates</span></li>
                 <li><span class="material-symbols-outlined">event_upcoming</span><span>Review today's focus blocks</span></li>
               </ul>
               <div class="dashboard-actions">
@@ -148,6 +104,26 @@
           <div class="app-shell">
             <main class="main-content">
               <section class="calendar-shell glass-panel">
+                <div id="calendar-toolbar" class="calendar-panel-toolbar">
+                  <div class="view-switch" role="group" aria-label="Calendar view">
+                    <button id="view-month" class="view-button" type="button" data-view="dayGridMonth">Month</button>
+                    <button id="view-week" class="view-button is-active" type="button" data-view="timeGridWeek">Week</button>
+                    <button id="view-day" class="view-button" type="button" data-view="timeGridDay">Day</button>
+                  </div>
+                  <div class="month-controls" aria-label="Month navigation">
+                    <button id="prev-month" class="icon-button" type="button" aria-label="Previous period">
+                      <span class="material-symbols-outlined">chevron_left</span>
+                    </button>
+                    <input id="month-picker" class="month-picker" type="month" aria-label="Select month" />
+                    <button id="next-month" class="icon-button" type="button" aria-label="Next period">
+                      <span class="material-symbols-outlined">chevron_right</span>
+                    </button>
+                    <button id="open-add-modal" class="primary-button compact-action" type="button">
+                      <span class="material-symbols-outlined">add</span>
+                      <span>New</span>
+                    </button>
+                  </div>
+                </div>
                 <div class="calendar-header-row">
                   <h2 id="calendar-heading" class="calendar-heading">January 13 - 19, 2025</h2>
                 </div>
@@ -214,41 +190,25 @@
           </div>
         </section>
 
-        <section id="view-adviser" class="app-view" data-view="adviser">
-          <div class="adviser-shell">
+        <section id="view-adviser" class="app-view is-active" data-view="adviser">
+          <div id="adviser-shell" class="adviser-shell is-welcome">
+            <div id="chat-welcome" class="chat-welcome">
+              <h2>Woran arbeitest du?</h2>
+            </div>
             <section id="chat-thread" class="chat-thread glass-panel" aria-live="polite">
-              <div class="chat-row bot">
-                <div class="chat-avatar">
-                  <span class="material-symbols-outlined">medical_services</span>
-                </div>
-                <div class="chat-bubble">
-                  <p>Gruezi! I am your <strong>IV-Helper AI Adviser</strong>. I have reviewed your current disability insurance file.</p>
-                  <p>How can I assist you today with legal claims, expense reimbursements, or eligibility questions?</p>
-                  <span class="chat-meta">IV-Helper • 09:41 AM</span>
-                </div>
-              </div>
-              <div class="chat-row user">
-                <div class="chat-avatar">
-                  <span class="material-symbols-outlined">person</span>
-                </div>
-                <div class="chat-bubble">
-                  <p>I'm having trouble understanding the new transport allowance rules. Does TixiTaxi still qualify under the current scheme?</p>
-                  <span class="chat-meta">You • 09:43 AM</span>
-                </div>
-              </div>
             </section>
 
             <div class="chat-chips">
               <button class="chat-chip" type="button" data-chat-prompt="Habe ich Anspruch auf Assistenzbeitrag?">Habe ich Anspruch auf Assistenzbeitrag?</button>
               <button class="chat-chip" type="button" data-chat-prompt="Wie reiche ich TixiTaxi-Kosten ein?">Wie reiche ich TixiTaxi-Kosten ein?</button>
-              <button class="chat-chip" type="button" data-chat-prompt="Was hat sich bei IVG Art. 13 geändert?">Änderungen bei IVG Art. 13</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Was hat sich bei IVG Art. 13 geaendert?">Aenderungen bei IVG Art. 13</button>
             </div>
 
             <form id="adviser-form" class="chat-input-wrap glass-panel">
               <button class="chat-icon-button" type="button" aria-label="Attach">
                 <span class="material-symbols-outlined">attach_file</span>
               </button>
-              <input id="adviser-input" type="text" maxlength="500" placeholder="Ask IV-Helper anything about your case..." />
+              <input id="adviser-input" type="text" maxlength="500" placeholder="Ask IV Desk anything about your case..." />
               <button class="chat-icon-button" type="button" aria-label="Voice Input">
                 <span class="material-symbols-outlined">mic</span>
               </button>
@@ -257,7 +217,7 @@
                 <span class="material-symbols-outlined">send</span>
               </button>
             </form>
-            <p class="adviser-footnote">IV-Helper AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
+            <p class="adviser-footnote">IV Desk AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
           </div>
         </section>
 
@@ -322,6 +282,27 @@
         <section id="view-reports" class="app-view" data-view="reports">
           <div class="reports-shell">
             <article class="reports-card glass-panel invoices-card">
+              <section class="storage-browser" aria-label="Storage browser">
+                <div class="storage-browser-header">
+                  <div>
+                    <p class="eyebrow">Storage</p>
+                    <h2 class="panel-title">Buckets & Files</h2>
+                  </div>
+                  <button id="refresh-storage-browser" class="icon-button" type="button" aria-label="Refresh storage" title="Refresh storage">
+                    <span class="material-symbols-outlined">refresh</span>
+                  </button>
+                </div>
+                <div id="storage-browser-status" class="storage-browser-status" role="status">Loading storage...</div>
+                <div id="storage-bucket-list" class="storage-bucket-list" aria-label="Buckets"></div>
+                <div class="storage-file-panel">
+                  <div class="storage-file-panel-header">
+                    <span id="storage-active-bucket">No bucket selected</span>
+                    <span id="storage-file-count" class="status-pill ghost">0 files</span>
+                  </div>
+                  <div id="storage-file-list" class="storage-file-list"></div>
+                </div>
+              </section>
+
               <div class="storage-options" aria-label="Document upload options">
                 <section id="invoice-drop-zone" class="storage-option drop-option" tabindex="0" role="button" aria-label="Upload documents by drag and drop">
                   <div class="storage-option-label">Option 1</div>
@@ -368,6 +349,33 @@
                 </div>
               </div>
             </article>
+          </div>
+        </section>
+
+        <section id="view-automations" class="app-view" data-view="automations">
+          <div class="panel-shell automations-panel-shell">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Automations</p>
+                <h2 class="panel-title">Reminders & Drafts</h2>
+              </div>
+              <span id="automation-panel-count" class="status-pill">0</span>
+            </div>
+            <div class="panel-actions">
+              <button id="panel-new-automation" class="primary-button" type="button">
+                <span class="material-symbols-outlined">add</span>
+                <span>New automation</span>
+              </button>
+            </div>
+            <div id="automation-panel-summary" class="automation-summary">
+              <p class="muted-copy">No automations yet.</p>
+            </div>
+            <section class="automation-list-section">
+              <p class="section-title">Active automations</p>
+              <div id="automation-panel-list" class="automation-list">
+                <p class="muted-copy">No automations yet. Use the button above to add one.</p>
+              </div>
+            </section>
           </div>
         </section>
 
