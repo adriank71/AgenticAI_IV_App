@@ -281,7 +281,7 @@ def _supabase_reports_bucket() -> str:
 
 
 def _supabase_invoices_bucket() -> str:
-    return os.environ.get("SUPABASE_STORAGE_INVOICES_BUCKET", "iv-agent-invoices").strip() or "iv-agent-invoices"
+    return os.environ.get("SUPABASE_STORAGE_INVOICES_BUCKET", "invoice_upload").strip() or "invoice_upload"
 
 
 SUPABASE_TEMPLATE_FILES = {
@@ -1572,6 +1572,7 @@ class SupabaseStorageInvoiceCaptureStore:
             "sid": row["sid"],
             "file_name": row["file_name"],
             "storage_backend": row.get("storage_backend") or "supabase",
+            "storage_bucket": row.get("storage_bucket") or self._bucket,
             "storage_key": row["storage_key"],
             "storage_url": row.get("storage_url") or _supabase_storage_url(row.get("storage_bucket") or self._bucket, row["storage_key"]),
             "content_type": row.get("content_type") or "application/octet-stream",
@@ -1677,6 +1678,7 @@ class SupabaseStorageInvoiceCaptureStore:
             "sid": safe_sid,
             "file_name": safe_file_name,
             "storage_backend": "supabase",
+            "storage_bucket": self._bucket,
             "storage_key": storage_key,
             "storage_url": storage_url,
             "content_type": content_type,
@@ -1739,7 +1741,7 @@ class SupabaseStorageInvoiceCaptureStore:
             if not row:
                 raise FileNotFoundError(capture["invoice_id"])
             return _coerce_bytes(row["content"]), row.get("content_type") or capture.get("content_type") or "image/jpeg"
-        content = _supabase_download(self._client, bucket=self._bucket, path=storage_key)
+        content = _supabase_download(self._client, bucket=capture.get("storage_bucket") or self._bucket, path=storage_key)
         return content, capture.get("content_type") or _guess_content_type(storage_key, "image/jpeg")
 
 

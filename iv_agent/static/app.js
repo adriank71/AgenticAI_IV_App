@@ -1115,11 +1115,6 @@ async function switchAppView(viewName) {
     return;
   }
 
-  if (viewName === "reports") {
-    await refreshStorageBrowser();
-    return;
-  }
-
   if (viewName === "adviser" && elements.adviserInput) {
     elements.adviserInput.focus();
   }
@@ -3769,10 +3764,6 @@ function initInvoices() {
 
       setUploadStatus("Upload saved to storage.", "success");
       await poll();
-      state.storageBrowser = null;
-      if (state.activeAppView === "reports") {
-        refreshStorageBrowser({ force: true }).catch(() => {});
-      }
     } catch (error) {
       setUploadStatus(error.message || "Upload failed.", "error");
     } finally {
@@ -3846,7 +3837,7 @@ function renderInvoiceCapture(capture, index) {
     postgres: "Supabase DB",
     local: "Local",
   };
-  const storageLabel = storageLabels[capture.storage_backend] || capture.storage_backend || "Local";
+  const storageLabel = capture.storage_bucket || storageLabels[capture.storage_backend] || capture.storage_backend || "Local";
   const extractionNote = capture.extraction_error
     ? `<div class="invoice-note">${escapeHtml(capture.extraction_error)}</div>`
     : "";

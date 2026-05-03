@@ -216,7 +216,7 @@
     <section class="panel">
       <p class="eyebrow">IV Desk</p>
       <h1>Open Camera</h1>
-      <p>Take a photo of the invoice or receipt. The image is uploaded back into the web app and stored in your <strong>Invoices</strong> folder.</p>
+      <p>Take a photo of the invoice or receipt. The image is uploaded back into the web app and stored in the <strong>invoice_upload</strong> bucket.</p>
       <div class="meta-grid">
         <div class="meta-chip">
           <strong>Session</strong>
@@ -258,7 +258,7 @@
     const fileInput = document.getElementById("file-input");
 
     sidValue.textContent = sid || "Missing";
-    folderValue.textContent = sid ? `Invoices/${sid}` : "Invoices";
+    folderValue.textContent = sid ? `invoice_upload / Invoices/${sid}` : "invoice_upload";
 
     function setStatus(message, isError = false) {
       status.textContent = message;
@@ -328,7 +328,7 @@
       const capture = payload.capture || {};
       const fields = capture.fields || payload.fields || {};
       const lines = [
-        `Saved to ${capture.folder_path || "Invoices"}`,
+        `Saved to ${capture.storage_bucket || "invoice_upload"} / ${capture.folder_path || "Invoices"}`,
         capture.file_name ? `File: ${capture.file_name}` : null,
         fields.merchant ? `Merchant: ${fields.merchant}` : null,
         fields.date ? `Date: ${fields.date}` : null,

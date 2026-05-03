@@ -447,8 +447,8 @@ class StorageTests(unittest.TestCase):
                         "file_name": "receipt.jpg",
                         "storage_key": "Invoices/session123/inv-1_receipt.jpg",
                         "storage_backend": "supabase",
-                        "storage_bucket": "iv-agent-invoices",
-                        "storage_url": "supabase://iv-agent-invoices/Invoices/session123/inv-1_receipt.jpg",
+                        "storage_bucket": "invoice_upload",
+                        "storage_url": "supabase://invoice_upload/Invoices/session123/inv-1_receipt.jpg",
                         "content_type": "image/jpeg",
                         "content_size": 3,
                         "fields": {"merchant": "Cafe Example"},
@@ -464,7 +464,7 @@ class StorageTests(unittest.TestCase):
         store = SupabaseStorageInvoiceCaptureStore(
             "postgres://example",
             client=client,
-            bucket="iv-agent-invoices",
+            bucket="invoice_upload",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 
@@ -479,8 +479,10 @@ class StorageTests(unittest.TestCase):
         content, content_type = store.read_capture_bytes(saved)
 
         self.assertEqual(saved["storage_backend"], "supabase")
+        self.assertEqual(saved["storage_bucket"], "invoice_upload")
         self.assertTrue(saved["storage_key"].startswith("Invoices/session123/"))
         self.assertEqual(listed[0]["storage_backend"], "supabase")
+        self.assertEqual(listed[0]["storage_bucket"], "invoice_upload")
         self.assertEqual(content, b"\xff\xd8\xff")
         self.assertEqual(content_type, "image/jpeg")
         self.assertTrue(any("INSERT INTO invoice_captures" in query for query, _ in cursor.statements))
@@ -492,7 +494,7 @@ class StorageTests(unittest.TestCase):
         store = SupabaseStorageInvoiceCaptureStore(
             "postgres://example",
             client=FakeSupabaseClient(),
-            bucket="iv-agent-invoices",
+            bucket="invoice_upload",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 

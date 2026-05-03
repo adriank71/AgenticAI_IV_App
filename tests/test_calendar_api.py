@@ -138,8 +138,9 @@ class FakeInvoiceStore:
             "sid": kwargs["sid"],
             "file_name": kwargs["file_name"],
             "storage_backend": self.backend_name,
+            "storage_bucket": "invoice_upload" if self.backend_name == "supabase" else None,
             "storage_key": f"Invoices/{kwargs['sid']}/inv-{len(self.captures) + 1}_{kwargs['file_name']}",
-            "storage_url": "supabase://iv-agent-invoices/private/invoice.jpg",
+            "storage_url": "supabase://invoice_upload/private/invoice.jpg",
             "content_type": kwargs["content_type"],
             "content_size": len(kwargs["content"]),
             "fields": kwargs.get("fields"),
@@ -643,6 +644,7 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         payload = response.get_json()
         self.assertEqual(payload["capture"]["storage_backend"], "supabase")
+        self.assertEqual(payload["capture"]["storage_bucket"], "invoice_upload")
         self.assertIn("/api/invoices/session123/files/inv-1/phone.jpg", payload["capture"]["file_url"])
 
     def test_invoice_capture_returns_clear_storage_configuration_error(self):
@@ -651,7 +653,7 @@ class CalendarApiTests(unittest.TestCase):
         class FailingInvoiceStore:
             def save_capture(self, **kwargs):
                 raise RuntimeError(
-                    "Supabase Storage upload failed for bucket 'iv-agent-invoices'. "
+                    "Supabase Storage upload failed for bucket 'invoice_upload'. "
                     "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files."
                 )
 

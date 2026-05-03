@@ -1256,6 +1256,7 @@ def serialize_invoice_capture(capture_record: dict) -> dict:
         "summary": summary,
         "extraction_error": capture_record.get("extraction_error"),
         "storage_backend": capture_record.get("storage_backend"),
+        "storage_bucket": capture_record.get("storage_bucket"),
         "image_url": build_invoice_image_path(capture_record),
         "file_url": build_invoice_image_path(capture_record),
         "previewable": str(content_type or "").startswith("image/"),
