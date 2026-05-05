@@ -87,6 +87,8 @@ def build_storage_tools(
     def list_documents(
         year: int = 0,
         month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
         document_type: str = "",
         institution: str = "",
         tags_json: str = "[]",
@@ -101,6 +103,8 @@ def build_storage_tools(
                     user_id=context_user_id,
                     year=_optional_int(year),
                     month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
                     document_type=document_type,
                     institution=institution,
                     tags=_json_list(tags_json),
@@ -113,13 +117,34 @@ def build_storage_tools(
     tools.append(list_documents)
 
     @function_tool
-    def search_documents(query: str, limit: int = 10) -> str:
+    def search_documents(
+        query: str,
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        limit: int = 10,
+    ) -> str:
         """Search stored documents for the current user by filename, summary, metadata, or extracted text."""
         return _storage_tool_result(
             "search_documents",
             lambda: {
                 "query": query,
-                "documents": service_search_documents(user_id=context_user_id, query=query, limit=limit),
+                "documents": service_search_documents(
+                    user_id=context_user_id,
+                    query=query,
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=_json_list(tags_json),
+                    limit=limit,
+                ),
             },
         )
 
@@ -129,6 +154,8 @@ def build_storage_tools(
     def count_documents(
         year: int = 0,
         month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
         document_type: str = "",
         institution: str = "",
         tags_json: str = "[]",
@@ -141,6 +168,8 @@ def build_storage_tools(
                 user_id=context_user_id,
                 year=_optional_int(year),
                 month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
                 document_type=document_type,
                 institution=institution,
                 tags=_json_list(tags_json),
@@ -187,7 +216,16 @@ def build_storage_tools(
     tools.append(classify_document)
 
     @function_tool
-    def group_documents(group_by: str = "month", year: int = 0, month: int = 0) -> str:
+    def group_documents(
+        group_by: str = "month",
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+    ) -> str:
         """Group the current user's documents by month, type, institution, or folder."""
         return _storage_tool_result(
             "group_documents",
@@ -196,6 +234,11 @@ def build_storage_tools(
                 group_by=group_by,
                 year=_optional_int(year),
                 month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                document_type=document_type,
+                institution=institution,
+                tags=_json_list(tags_json),
             ),
         )
 
@@ -222,28 +265,36 @@ def build_storage_tools(
     tools.append(match_documents)
 
     @function_tool
-    def create_document_folder(name: str, parent_folder_id: str = "", color: str = "") -> str:
-        """Draft folder creation for user confirmation. This does not write until confirmed."""
+    def create_document_folder(name: str, parent_folder_id: str = "", color: str = "", document_ids_json: str = "[]") -> str:
+        """Draft folder creation for user confirmation. Optionally include document_ids_json to assign documents after confirmation."""
         return _storage_tool_result(
             "create_document_folder",
             lambda: _register_storage_pending_action(
                 "storage.create_folder",
                 f"Ordner erstellen: {name}",
-                {"name": name, "parent_folder_id": parent_folder_id or None, "color": color},
+                {
+                    "name": name,
+                    "parent_folder_id": parent_folder_id or None,
+                    "color": color,
+                    "document_ids": _json_list(document_ids_json),
+                },
             ),
         )
 
     tools.append(create_document_folder)
 
     @function_tool
-    def move_document(document_id: str, folder_id: str = "") -> str:
-        """Draft moving one document into a folder for user confirmation."""
+    def move_document(document_id: str = "", folder_id: str = "", document_ids_json: str = "[]") -> str:
+        """Draft moving one or more documents into a folder for user confirmation."""
+        document_ids = _json_list(document_ids_json)
+        if document_id:
+            document_ids = [document_id, *[item for item in document_ids if item != document_id]]
         return _storage_tool_result(
             "move_document",
             lambda: _register_storage_pending_action(
                 "storage.move_document",
                 "Dokument verschieben",
-                {"document_id": document_id, "folder_id": folder_id or None},
+                {"document_id": document_id, "document_ids": document_ids, "folder_id": folder_id or None},
             ),
         )
 

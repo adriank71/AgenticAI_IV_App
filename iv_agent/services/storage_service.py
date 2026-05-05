@@ -104,6 +104,19 @@ def _date_iso(value: Any) -> str | None:
     return raw[:10] if raw else None
 
 
+def _parse_filter_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+
+
 def sanitize_document_filename(file_name: str, *, content_type: str = "application/octet-stream") -> str:
     base_name = os.path.basename(str(file_name or "").strip())
     safe_name = re.sub(r"[^0-9A-Za-z._-]+", "_", base_name).strip("._-")
@@ -200,18 +213,6 @@ def extract_document_text(content: bytes, content_type: str) -> tuple[str, str, 
     return normalized_text, "completed", None
 
 
-def summarize_text_locally(text: str, *, max_chars: int = 700) -> str:
-    compact = " ".join(str(text or "").split())
-    if not compact:
-        return "Text konnte nicht extrahiert werden."
-    if len(compact) <= max_chars:
-        return compact
-    sentence_match = re.match(r"^(.{120,700}?[.!?])\s", compact)
-    if sentence_match:
-        return sentence_match.group(1)
-    return f"{compact[:max_chars].rstrip()}..."
-
-
 def _extract_document_date(text: str) -> str | None:
     for pattern in (r"\b(\d{4})-(\d{2})-(\d{2})\b", r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b"):
         match = re.search(pattern, text)
@@ -226,42 +227,199 @@ def _extract_document_date(text: str) -> str | None:
     return None
 
 
+def _extract_service_period(text: str) -> str:
+    patterns = (
+        r"(?:leistungszeitraum|zeitraum|periode|fuer den monat|für den monat)\s*[:\-]?\s*([A-Za-zÄÖÜäöü]+\.?\s+\d{4})",
+        r"(?:leistungszeitraum|zeitraum|periode)\s*[:\-]?\s*(\d{1,2}\.\d{1,2}\.\d{4}\s*(?:-|bis)\s*\d{1,2}\.\d{1,2}\.\d{4})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return " ".join(match.group(1).split())
+    return ""
+
+
+def _extract_amount(text: str) -> str:
+    match = re.search(r"\b(?:CHF|Fr\.?)\s*([0-9][0-9'.,]*)\b|\b([0-9][0-9'.,]*)\s*(?:CHF|Fr\.?)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    amount = match.group(1) or match.group(2)
+    return f"CHF {amount}"
+
+
+def _extract_deadline(text: str) -> str:
+    patterns = (
+        r"(?:frist|bis spaetestens|bis spätestens|zahlbar bis|einzureichen bis)\s*[:\-]?\s*(\d{1,2}\.\d{1,2}\.\d{4})",
+        r"(?:frist|bis spaetestens|bis spätestens|zahlbar bis|einzureichen bis)\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _extract_reference(text: str) -> str:
+    match = re.search(
+        r"\b(?:referenz|ref\.?|aktenzeichen|kundennummer|rechnungsnummer|rechnung nr\.?|invoice no\.?)\s*[:#\-]?\s*([A-Za-z0-9][A-Za-z0-9._/\-]{2,})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _extract_todos(text: str) -> list[str]:
+    todos = []
+    for pattern in (
+        r"((?:bitte|wir bitten sie|reichen sie|senden sie|bezahlen sie).{12,180}?[.!?])",
+        r"((?:einzureichen|nachzureichen|zu bezahlen).{12,160}?[.!?])",
+    ):
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+            todo = " ".join(match.group(1).split())
+            if todo and todo not in todos:
+                todos.append(todo)
+            if len(todos) >= 3:
+                return todos
+    return todos
+
+
+def _extract_institution(text: str) -> str:
+    haystack = text.lower()
+    for keyword, label in (
+        ("iv-stelle", "IV-Stelle"),
+        ("invalidenversicherung", "IV-Stelle"),
+        ("sva", "SVA"),
+        ("ahv", "AHV"),
+        ("suva", "SUVA"),
+        ("css", "CSS"),
+        ("helsana", "Helsana"),
+        ("pro infirmis", "Pro Infirmis"),
+        ("spitex", "Spitex"),
+        ("apotheke", "Apotheke"),
+        ("fahrdienst", "Fahrdienst"),
+        ("therapie", "Therapie"),
+    ):
+        if keyword in haystack:
+            return label
+    return ""
+
+
+def extract_structured_facts(text: str) -> dict[str, Any]:
+    return {
+        "institution": _extract_institution(text),
+        "document_date": _extract_document_date(text),
+        "service_period": _extract_service_period(text),
+        "amount": _extract_amount(text),
+        "deadline": _extract_deadline(text),
+        "reference": _extract_reference(text),
+        "todos": _extract_todos(text),
+    }
+
+
+def summarize_text_locally(text: str, *, max_chars: int = 900) -> str:
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return "Text konnte nicht extrahiert werden."
+    facts = extract_structured_facts(text)
+    lines = []
+    if facts.get("institution"):
+        lines.append(f"Institution: {facts['institution']}")
+    if facts.get("document_date"):
+        lines.append(f"Datum: {facts['document_date']}")
+    if facts.get("service_period"):
+        lines.append(f"Zeitraum: {facts['service_period']}")
+    if facts.get("amount"):
+        lines.append(f"Betrag: {facts['amount']}")
+    if facts.get("deadline"):
+        lines.append(f"Frist: {facts['deadline']}")
+    if facts.get("reference"):
+        lines.append(f"Referenz: {facts['reference']}")
+    if facts.get("todos"):
+        lines.append(f"To-do: {facts['todos'][0]}")
+    sentence_match = re.match(r"^(.{80,420}?[.!?])\s", compact)
+    preview = sentence_match.group(1) if sentence_match else compact[:420].rstrip()
+    if len(compact) > len(preview):
+        preview = f"{preview}..."
+    lines.append(f"Kurzinhalt: {preview}")
+    return "\n".join(lines)[:max_chars]
+
+
+def normalize_document_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = raw.replace("ü", "ue").replace("ä", "ae").replace("ö", "oe")
+    aliases = {
+        "rechnung": "invoice",
+        "invoice": "invoice",
+        "bill": "invoice",
+        "brief": "letter",
+        "letter": "letter",
+        "schreiben": "letter",
+        "verfuegung": "decision",
+        "verfügung": "decision",
+        "entscheid": "decision",
+        "bescheid": "decision",
+        "arztbericht": "medical_report",
+        "medical": "medical_report",
+        "medical_report": "medical_report",
+        "bericht": "medical_report",
+        "therapiebestaetigung": "therapy_confirmation",
+        "therapiebestätigung": "therapy_confirmation",
+        "therapy_confirmation": "therapy_confirmation",
+        "iv-dokument": "iv_document",
+        "iv dokument": "iv_document",
+        "iv_document": "iv_document",
+        "quittung": "receipt",
+        "receipt": "receipt",
+        "vertrag": "contract",
+        "contract": "contract",
+        "sonstiges dokument": "document",
+        "document": "document",
+        "image": "image",
+    }
+    return aliases.get(normalized, normalized)
+
+
 def classify_text_locally(text: str, file_name: str = "") -> dict[str, Any]:
     haystack = f"{file_name}\n{text}".lower()
     document_type = "document"
     type_keywords = (
-        ("invoice", ("rechnung", "invoice", "betrag", "mwst", "vat")),
-        ("letter", ("brief", "anschreiben", "korrespondenz")),
+        ("invoice", ("rechnung", "invoice", "betrag", "mwst", "vat", "zahlbar", "total")),
+        ("receipt", ("quittung", "kassenbon", "receipt", "bezahlt", "zahlung erhalten")),
+        ("letter", ("brief", "anschreiben", "korrespondenz", "schreiben")),
         ("decision", ("verfuegung", "verfügung", "entscheid", "bescheid")),
-        ("report", ("bericht", "protokoll", "rapport")),
-        ("medical", ("arzt", "spital", "klinik", "therapie", "diagnose")),
+        ("therapy_confirmation", ("therapiebestaetigung", "therapiebestätigung", "therapie bestaetigung", "therapie bestätigung")),
+        ("medical_report", ("arztbericht", "arzt", "spital", "klinik", "diagnose", "befund")),
+        ("iv_document", ("iv-stelle", "invalidenversicherung", "assistenzbeitrag", "hilflosenentschaedigung", "hilflosenentschädigung")),
+        ("contract", ("vertrag", "vereinbarung", "contract", "vertragsnummer")),
     )
     for candidate, keywords in type_keywords:
         if any(keyword in haystack for keyword in keywords):
             document_type = candidate
             break
 
-    institution = ""
-    for candidate in ("iv-stelle", "sva", "ahv", "suva", "css", "helsana", "pro infirmis", "spitex"):
-        if candidate in haystack:
-            institution = candidate.upper() if candidate in {"sva", "ahv", "suva", "css"} else candidate.title()
-            break
+    facts = extract_structured_facts(text)
+    institution = facts["institution"]
 
     tags = []
     for tag, keywords in {
         "rechnung": ("rechnung", "invoice"),
         "iv": ("iv-stelle", "invalidenversicherung"),
-        "medizin": ("arzt", "spital", "klinik", "therapie"),
+        "medizin": ("arzt", "spital", "klinik", "diagnose"),
+        "therapie": ("therapie", "therapeut", "therapiebestaetigung", "therapiebestätigung"),
         "transport": ("transport", "fahrt", "taxi"),
+        "frist": ("frist", "bis spaetestens", "bis spätestens", "einzureichen"),
     }.items():
         if any(keyword in haystack for keyword in keywords):
             tags.append(tag)
 
     return {
-        "document_type": document_type,
+        "document_type": normalize_document_type(document_type),
         "institution": institution,
-        "document_date": _extract_document_date(text),
+        "document_date": facts["document_date"],
         "tags": tags,
+        "facts": facts,
         "confidence": "low" if document_type == "document" else "medium",
     }
 
@@ -417,11 +575,14 @@ class StorageService:
                 cursor.execute("ALTER TABLE document_matches ENABLE ROW LEVEL SECURITY")
 
     def _row_to_document(self, row: dict[str, Any]) -> dict[str, Any]:
+        metadata = _coerce_json_dict(row.get("metadata"))
         return {
             "document_id": str(row.get("document_id") or ""),
             "user_id": normalize_user_id(row.get("user_id")),
             "folder_id": str(row.get("folder_id") or "") or None,
             "file_name": row.get("file_name") or "",
+            "title": str(metadata.get("title") or row.get("file_name") or "").strip(),
+            "notes": str(metadata.get("notes") or "").strip(),
             "safe_file_name": row.get("safe_file_name") or "",
             "storage_bucket": row.get("storage_bucket") or self._bucket,
             "storage_key": row.get("storage_key") or "",
@@ -439,7 +600,7 @@ class StorageService:
             "extracted_text": row.get("extracted_text") or "",
             "extraction_status": row.get("extraction_status") or "",
             "extraction_error": row.get("extraction_error") or "",
-            "metadata": _coerce_json_dict(row.get("metadata")),
+            "metadata": metadata,
             "created_at": _iso(row.get("created_at")),
             "updated_at": _iso(row.get("updated_at")),
         }
@@ -484,10 +645,6 @@ class StorageService:
         now = _utcnow()
         document_id = str(uuid.uuid4())
         safe_file_name = sanitize_document_filename(file_name, content_type=normalized_content_type)
-        storage_key = (
-            f"{DOCUMENT_PREFIX}/{normalized_user_id}/{now.year}/{now.month:02d}/"
-            f"{document_id}-{safe_file_name}"
-        )
         checksum = hashlib.sha256(content).hexdigest()
         extracted_text, extraction_status, extraction_error = extract_document_text(content, normalized_content_type)
         classification = classify_text_locally(extracted_text, safe_file_name) if extracted_text else {
@@ -495,9 +652,16 @@ class StorageService:
             "institution": "",
             "document_date": None,
             "tags": [],
+            "facts": {},
             "confidence": "low",
         }
         summary = summarize_text_locally(extracted_text) if extracted_text else "Text konnte nicht extrahiert werden."
+        document_date = _parse_filter_date(classification.get("document_date"))
+        record_date = document_date or now.date()
+        storage_key = (
+            f"{DOCUMENT_PREFIX}/{normalized_user_id}/{record_date.year}/{record_date.month:02d}/"
+            f"{document_id}-{safe_file_name}"
+        )
 
         _supabase_upload(
             self._client,
@@ -523,8 +687,8 @@ class StorageService:
             "document_type": classification.get("document_type") or "",
             "institution": classification.get("institution") or "",
             "document_date": classification.get("document_date"),
-            "year": now.year,
-            "month": now.month,
+            "year": record_date.year,
+            "month": record_date.month,
             "tags": classification.get("tags") or [],
             "summary": summary,
             "extracted_text": extracted_text,
@@ -566,8 +730,8 @@ class StorageService:
                         row_fallback["document_type"],
                         row_fallback["institution"],
                         row_fallback["document_date"],
-                        now.year,
-                        now.month,
+                        record_date.year,
+                        record_date.month,
                         row_fallback["tags"],
                         summary,
                         extracted_text,
@@ -594,18 +758,20 @@ class StorageService:
         institution: str = "",
         tags: list[str] | None = None,
         folder_id: str | None = None,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
     ) -> tuple[str, list[Any]]:
         where = ["user_id = %s"]
         params: list[Any] = [normalize_user_id(user_id)]
         if year:
-            where.append("year = %s")
+            where.append("COALESCE(EXTRACT(YEAR FROM document_date)::int, year) = %s")
             params.append(int(year))
         if month:
-            where.append("month = %s")
+            where.append("COALESCE(EXTRACT(MONTH FROM document_date)::int, month) = %s")
             params.append(int(month))
         if document_type:
             where.append("lower(document_type) = lower(%s)")
-            params.append(document_type)
+            params.append(normalize_document_type(document_type))
         if institution:
             where.append("institution ILIKE %s")
             params.append(f"%{institution}%")
@@ -616,6 +782,14 @@ class StorageService:
         if folder_id:
             where.append("folder_id = %s::uuid")
             params.append(folder_id)
+        parsed_start_date = _parse_filter_date(start_date)
+        parsed_end_date = _parse_filter_date(end_date)
+        if parsed_start_date:
+            where.append("COALESCE(document_date, created_at::date) >= %s::date")
+            params.append(parsed_start_date.isoformat())
+        if parsed_end_date:
+            where.append("COALESCE(document_date, created_at::date) <= %s::date")
+            params.append(parsed_end_date.isoformat())
         if query:
             where.append(
                 """
@@ -643,6 +817,8 @@ class StorageService:
         institution: str = "",
         tags: list[str] | None = None,
         folder_id: str | None = None,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
         where_sql, params = self._document_where_clause(
@@ -654,6 +830,8 @@ class StorageService:
             institution=institution,
             tags=tags,
             folder_id=folder_id,
+            start_date=start_date,
+            end_date=end_date,
         )
         params.append(max(1, min(int(limit or 25), 100)))
         with self._connection_factory() as connection:
@@ -736,6 +914,11 @@ class StorageService:
             document["extracted_text"],
             document["file_name"],
         )
+        classification["document_type"] = normalize_document_type(classification.get("document_type") or "")
+        if "facts" not in classification:
+            classification["facts"] = extract_structured_facts(document["extracted_text"])
+        if not classification.get("document_date"):
+            classification["document_date"] = classification["facts"].get("document_date")
         updated = self.update_document_metadata(
             user_id=user_id,
             document_id=document_id,
@@ -865,11 +1048,23 @@ class StorageService:
             raise FileNotFoundError("Document not found")
         return self._row_to_document(row)
 
+    def move_documents_to_folder(self, *, user_id: str, document_ids: list[str], folder_id: str | None = None) -> list[dict[str, Any]]:
+        moved_documents = []
+        normalized_ids = [str(document_id or "").strip() for document_id in document_ids]
+        for document_id in normalized_ids:
+            if document_id:
+                moved_documents.append(
+                    self.move_document_to_folder(user_id=user_id, document_id=document_id, folder_id=folder_id)
+                )
+        return moved_documents
+
     def update_document_metadata(self, *, user_id: str, document_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         existing = self.get_document(user_id=user_id, document_id=document_id)
         if not existing:
             raise FileNotFoundError("Document not found")
         allowed = {
+            "title",
+            "notes",
             "document_type",
             "institution",
             "document_date",
@@ -880,7 +1075,15 @@ class StorageService:
         clean_updates = {key: updates[key] for key in allowed if key in updates}
         metadata = dict(existing.get("metadata") or {})
         metadata.update(_coerce_json_dict(clean_updates.get("metadata")))
+        if "title" in clean_updates:
+            metadata["title"] = str(clean_updates.get("title") or "").strip()
+        if "notes" in clean_updates:
+            metadata["notes"] = str(clean_updates.get("notes") or "").strip()
         tags = _coerce_tags(clean_updates.get("tags", existing.get("tags") or []))
+        next_document_type = normalize_document_type(clean_updates.get("document_type", existing.get("document_type") or ""))
+        next_document_date = _parse_filter_date(clean_updates.get("document_date", existing.get("document_date")))
+        next_year = next_document_date.year if next_document_date else int(existing.get("year") or 0)
+        next_month = next_document_date.month if next_document_date else int(existing.get("month") or 0)
         with self._connection_factory() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -890,6 +1093,8 @@ class StorageService:
                         document_type = %s,
                         institution = %s,
                         document_date = %s::date,
+                        year = %s,
+                        month = %s,
                         tags = %s::text[],
                         summary = %s,
                         metadata = %s::jsonb,
@@ -898,9 +1103,11 @@ class StorageService:
                     RETURNING *
                     """,
                     (
-                        clean_updates.get("document_type", existing.get("document_type") or ""),
+                        next_document_type,
                         clean_updates.get("institution", existing.get("institution") or ""),
-                        clean_updates.get("document_date", existing.get("document_date")),
+                        next_document_date.isoformat() if next_document_date else None,
+                        next_year,
+                        next_month,
                         tags,
                         clean_updates.get("summary", existing.get("summary") or ""),
                         json.dumps(metadata),
@@ -1098,6 +1305,10 @@ def move_document_to_folder(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().move_document_to_folder(*args, **kwargs)
 
 
+def move_documents_to_folder(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    return get_storage_service().move_documents_to_folder(*args, **kwargs)
+
+
 def update_document_metadata(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().update_document_metadata(*args, **kwargs)
 
@@ -1116,6 +1327,7 @@ def prepare_document_for_agent(document: dict[str, Any]) -> dict[str, Any]:
         "document_id": document["document_id"],
         "name": document.get("file_name") or document.get("safe_file_name"),
         "file_name": document.get("file_name") or document.get("safe_file_name"),
+        "title": document.get("title") or document.get("file_name") or document.get("safe_file_name"),
         "mime": document.get("content_type"),
         "size": document.get("content_size"),
         "document_type": document.get("document_type"),
@@ -1123,6 +1335,7 @@ def prepare_document_for_agent(document: dict[str, Any]) -> dict[str, Any]:
         "document_date": document.get("document_date"),
         "tags": document.get("tags") or [],
         "summary": document.get("summary") or "",
+        "facts": (document.get("metadata") or {}).get("classification", {}).get("facts", {}),
         "text_preview": _safe_text_preview(document.get("extracted_text") or ""),
         "extraction_status": document.get("extraction_status"),
         "extraction_error": document.get("extraction_error"),
