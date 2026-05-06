@@ -5224,7 +5224,33 @@ body {
 }
 
 .brand-copy {
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.profile-nav-button {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #5f6368;
+  cursor: pointer;
+}
+
+.profile-nav-button .material-symbols-outlined {
+  font-size: 27px;
+}
+
+.profile-nav-button:hover,
+.profile-nav-button.is-active {
+  background: #e9eaed;
+  color: #1f1f1f;
 }
 
 .brand {
@@ -5417,11 +5443,15 @@ body {
 }
 
 .sidebar-collapsed .app-nav-brand {
+  display: grid;
   justify-content: center;
+  justify-items: center;
+  gap: 4px;
   min-height: 48px;
   padding: 0;
 }
 
+.sidebar-collapsed .profile-nav-button,
 .sidebar-collapsed .sidebar-toggle,
 .sidebar-collapsed .nav-link {
   width: 48px;
