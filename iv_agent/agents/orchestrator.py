@@ -592,6 +592,18 @@ def _run_agents_sdk(
             return None
         return parsed or None
 
+    def _json_list(value: str) -> list[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except json.JSONDecodeError:
+            pass
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
     @function_tool
     def list_calendar_range(start_at: str, end_at: str, query: str = "") -> str:
         """Read calendar events for mixed calendar/document questions using explicit ISO datetime bounds."""
@@ -609,15 +621,29 @@ def _run_agents_sdk(
     orchestrator_tools.append(list_calendar_range)
 
     @function_tool
-    def list_user_documents(year: int = 0, month: int = 0, document_type: str = "", institution: str = "", limit: int = 25) -> str:
+    def list_user_documents(
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        folder_id: str = "",
+        limit: int = 25,
+    ) -> str:
         """Read stored documents for mixed calendar/document questions."""
         tool_events.append(_tool_event("list_user_documents", "started", "Reading document metadata"))
         documents = service_list_documents(
             user_id=context_user_id,
             year=_optional_int(year),
             month=_optional_int(month),
+            start_date=start_date or None,
+            end_date=end_date or None,
             document_type=document_type,
             institution=institution,
+            tags=_json_list(tags_json),
+            folder_id=folder_id or None,
             limit=limit,
         )
         tool_events.append(_tool_event("list_user_documents", "completed", "Document metadata read"))
@@ -626,10 +652,33 @@ def _run_agents_sdk(
     orchestrator_tools.append(list_user_documents)
 
     @function_tool
-    def search_user_documents(query: str, limit: int = 10) -> str:
+    def search_user_documents(
+        query: str,
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        folder_id: str = "",
+        limit: int = 10,
+    ) -> str:
         """Search stored documents for mixed calendar/document questions."""
         tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
-        documents = service_search_documents(user_id=context_user_id, query=query, limit=limit)
+        documents = service_search_documents(
+            user_id=context_user_id,
+            query=query,
+            year=_optional_int(year),
+            month=_optional_int(month),
+            start_date=start_date or None,
+            end_date=end_date or None,
+            document_type=document_type,
+            institution=institution,
+            tags=_json_list(tags_json),
+            folder_id=folder_id or None,
+            limit=limit,
+        )
         tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
         return json.dumps(make_json_safe({"query": query, "documents": documents}), ensure_ascii=True)
 

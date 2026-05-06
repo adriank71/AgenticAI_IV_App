@@ -2779,7 +2779,9 @@ async function addChatAttachmentFiles(fileList) {
     return;
   }
 
-  setChatAttachmentStatus(`Attaching ${filesToRead.length} file${filesToRead.length === 1 ? "" : "s"}...`);
+  setChatAttachmentStatus(
+    filesToRead.length === 1 ? "Datei wird vorbereitet..." : "Dateien werden vorbereitet..."
+  );
 
   try {
     for (const file of filesToRead) {
@@ -2795,7 +2797,7 @@ async function addChatAttachmentFiles(fileList) {
       });
     }
     setChatAttachmentStatus(
-      rejected.length ? rejected.join(" ") : `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached.`,
+      rejected.length ? rejected.join(" ") : `${state.chatAttachments.length} Datei${state.chatAttachments.length === 1 ? "" : "en"} angehaengt. Upload startet beim Senden.`,
       rejected.length ? "error" : "success"
     );
   } catch (error) {
@@ -2810,7 +2812,7 @@ async function addChatAttachmentFiles(fileList) {
 function removeChatAttachment(attachmentId) {
   state.chatAttachments = state.chatAttachments.filter((attachment) => attachment.id !== attachmentId);
   setChatAttachmentStatus(
-    state.chatAttachments.length ? `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached.` : ""
+    state.chatAttachments.length ? `${state.chatAttachments.length} Datei${state.chatAttachments.length === 1 ? "" : "en"} angehaengt. Upload startet beim Senden.` : ""
   );
 }
 
@@ -2825,9 +2827,9 @@ function getChatAttachmentPayload() {
   }));
 }
 
-function clearChatAttachments() {
+function clearChatAttachments(statusMessage = "") {
   state.chatAttachments = [];
-  setChatAttachmentStatus("");
+  setChatAttachmentStatus(statusMessage);
 }
 
 function handleChatAttachmentListClick(event) {
@@ -3522,6 +3524,9 @@ async function submitAdviserPrompt(rawPrompt) {
   const chatAbortController = new AbortController();
   state.chatAbortController = chatAbortController;
   setChatPending(true);
+  if (attachmentPayload.length) {
+    setChatAttachmentStatus("Datei wird hochgeladen...");
+  }
 
   try {
     const data = await apiFetch("/api/agent/chat", {
@@ -3568,7 +3573,8 @@ async function submitAdviserPrompt(rawPrompt) {
     }
 
     if (attachmentPayload.length) {
-      clearChatAttachments();
+      setChatAttachmentStatus("Dokument wird analysiert...");
+      clearChatAttachments("Zusammenfassung fertig.");
     }
     removeChatPendingIndicator();
     appendChatMessage("bot", replyText, replyPolicy, {

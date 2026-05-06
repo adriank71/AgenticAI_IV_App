@@ -185,7 +185,8 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(model_payload["attachments"][0]["document_id"], "doc-1")
         payload = response.get_json()
         self.assertEqual(payload["uploaded_documents"][0]["document_id"], "doc-1")
-        self.assertIn("Gespeicherte Dokumente", payload["answer"])
+        self.assertIn("Datei gespeichert", payload["answer"])
+        self.assertIn("Zusammenfassung fertig", payload["answer"])
 
     def test_confirm_pending_action_executes_reminder_after_user_confirmation(self):
         client = app_module.app.test_client()
@@ -231,7 +232,7 @@ class AgentApiTests(unittest.TestCase):
                     {
                         "type": "storage.create_folder",
                         "title": "Ordner erstellen: Rechnungen",
-                        "payload": {"name": "Rechnungen", "user_id": "default"},
+                        "payload": {"name": "Rechnungen", "user_id": "default", "document_ids": ["doc-1", "doc-2"]},
                     }
                 ],
                 thread_id="thread-test",
@@ -241,7 +242,11 @@ class AgentApiTests(unittest.TestCase):
                 app_module,
                 "create_document_folder",
                 return_value={"folder_id": "folder-1", "name": "Rechnungen"},
-            ) as create_folder_mock:
+            ) as create_folder_mock, patch.object(
+                app_module,
+                "move_documents_to_folder",
+                return_value=[{"document_id": "doc-1"}, {"document_id": "doc-2"}],
+            ) as move_documents_mock:
                 response = client.post(
                     f"/api/agent/actions/{pending_actions[0]['action_id']}/confirm",
                     json={"thread_id": "thread-test", "profile_id": "default"},
@@ -254,6 +259,12 @@ class AgentApiTests(unittest.TestCase):
         self.assertFalse(payload["calendar_updated"])
         create_folder_mock.assert_called_once()
         self.assertEqual(create_folder_mock.call_args.kwargs["name"], "Rechnungen")
+        move_documents_mock.assert_called_once_with(
+            user_id="default",
+            document_ids=["doc-1", "doc-2"],
+            folder_id="folder-1",
+        )
+        self.assertEqual(payload["result"]["assigned_count"], 2)
 
     def test_existing_chat_webhook_route_is_unchanged(self):
         client = app_module.app.test_client()

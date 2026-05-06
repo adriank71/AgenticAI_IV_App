@@ -36,6 +36,7 @@ try:
         delete_document as delete_service_document,
         document_bucket_name,
         move_document_to_folder,
+        move_documents_to_folder,
         process_chat_attachments,
         update_document_metadata,
     )
@@ -89,6 +90,7 @@ except ImportError:
         delete_document as delete_service_document,
         document_bucket_name,
         move_document_to_folder,
+        move_documents_to_folder,
         process_chat_attachments,
         update_document_metadata,
     )
@@ -851,18 +853,31 @@ def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: di
 
     response_payload["artifacts"] = artifacts
     response_payload["uploaded_documents"] = uploaded_documents
-    names = [
-        str(document.get("file_name") or document.get("safe_file_name") or "").strip()
-        for document in uploaded_documents
-        if isinstance(document, dict)
-    ]
-    names = [name for name in names if name]
-    if names and response_payload.get("answer"):
-        response_payload["answer"] = (
-            str(response_payload["answer"]).rstrip()
-            + "\n\nGespeicherte Dokumente: "
-            + ", ".join(names[:5])
-        )
+    upload_lines = []
+    for document in uploaded_documents:
+        if not isinstance(document, dict):
+            continue
+        name = str(document.get("file_name") or document.get("safe_file_name") or "Dokument").strip()
+        document_type = str(document.get("document_type") or "Dokument").strip()
+        institution = str(document.get("institution") or "").strip()
+        document_date = str(document.get("document_date") or "").strip()
+        summary = str(document.get("summary") or "").strip()
+        details = [document_type]
+        if institution:
+            details.append(f"von {institution}")
+        if document_date:
+            details.append(f"vom {document_date}")
+        upload_lines.append(f"- {name}: als {' '.join(details)} erkannt.")
+        if summary:
+            first_summary_line = summary.splitlines()[0].strip()
+            if first_summary_line:
+                upload_lines.append(f"  {first_summary_line}")
+        if document.get("extraction_status") in {"no_text", "empty", "failed"}:
+            upload_lines.append("  Text konnte nicht extrahiert werden.")
+    if upload_lines:
+        upload_note = "Datei gespeichert. Dokument wird analysiert. Zusammenfassung fertig.\n" + "\n".join(upload_lines[:10])
+        existing_answer = str(response_payload.get("answer") or "").rstrip()
+        response_payload["answer"] = f"{existing_answer}\n\n{upload_note}".strip()
     return response_payload
 
 
@@ -1092,18 +1107,48 @@ def execute_pending_agent_action(action: dict) -> dict:
             color=str(payload.get("color") or "").strip(),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
-        return {"folder": folder}
+        document_ids = [
+            str(document_id or "").strip()
+            for document_id in (payload.get("document_ids") if isinstance(payload.get("document_ids"), list) else [])
+            if str(document_id or "").strip()
+        ]
+        moved_documents = []
+        if document_ids:
+            moved_documents = move_documents_to_folder(
+                user_id=user_id,
+                document_ids=document_ids,
+                folder_id=folder.get("folder_id"),
+            )
+        return {
+            "folder": folder,
+            "documents": moved_documents,
+            "assigned_count": len(moved_documents),
+        }
 
     if action_type == "storage.move_document":
+        document_ids = [
+            str(document_id or "").strip()
+            for document_id in (payload.get("document_ids") if isinstance(payload.get("document_ids"), list) else [])
+            if str(document_id or "").strip()
+        ]
         document_id = str(payload.get("document_id") or "").strip()
-        if not document_id:
+        if document_id and document_id not in document_ids:
+            document_ids.insert(0, document_id)
+        if not document_ids:
             raise ValueError("document_id is required")
-        document = move_document_to_folder(
+        if len(document_ids) == 1:
+            document = move_document_to_folder(
+                user_id=user_id,
+                document_id=document_ids[0],
+                folder_id=payload.get("folder_id") or None,
+            )
+            return {"document": document, "documents": [document], "moved": True, "moved_count": 1}
+        documents = move_documents_to_folder(
             user_id=user_id,
-            document_id=document_id,
+            document_ids=document_ids,
             folder_id=payload.get("folder_id") or None,
         )
-        return {"document": document, "moved": True}
+        return {"documents": documents, "moved": True, "moved_count": len(documents)}
 
     if action_type == "storage.delete_document":
         document_id = str(payload.get("document_id") or "").strip()

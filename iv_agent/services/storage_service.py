@@ -795,15 +795,18 @@ class StorageService:
                 """
                 (
                     file_name ILIKE %s
+                    OR metadata->>'title' ILIKE %s
+                    OR metadata->>'notes' ILIKE %s
                     OR summary ILIKE %s
                     OR extracted_text ILIKE %s
                     OR document_type ILIKE %s
                     OR institution ILIKE %s
+                    OR array_to_string(tags, ' ') ILIKE %s
                 )
                 """
             )
             pattern = f"%{query}%"
-            params.extend([pattern, pattern, pattern, pattern, pattern])
+            params.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern])
         return " AND ".join(where), params
 
     def list_documents(

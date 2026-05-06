@@ -183,11 +183,11 @@ class StorageTests(unittest.TestCase):
         )
 
         self.assertEqual(document["storage_bucket"], "Invoice_upload")
-        self.assertTrue(document["storage_key"].startswith("Documents/default/"))
+        self.assertTrue(document["storage_key"].startswith("Documents/default/2026/05/"))
         self.assertTrue(document["storage_key"].endswith("-Rechnung_Mai_2026.txt"))
         self.assertIn(("Invoice_upload", document["storage_key"]), client.objects)
         self.assertEqual(document["document_type"], "invoice")
-        self.assertEqual(document["institution"], "Iv-Stelle")
+        self.assertEqual(document["institution"], "IV-Stelle")
         self.assertTrue(any("INSERT INTO documents" in query for query, _ in cursor.statements))
 
     def test_storage_service_list_documents_scopes_and_filters_queries(self):
@@ -206,6 +206,8 @@ class StorageTests(unittest.TestCase):
             document_type="invoice",
             institution="IV",
             tags=["rechnung"],
+            start_date="2026-05-01",
+            end_date="2026-05-31",
             folder_id=None,
         )
 
@@ -213,8 +215,10 @@ class StorageTests(unittest.TestCase):
         query, params = cursor.statements[-1]
         self.assertIn("FROM documents", query)
         self.assertIn("user_id = %s", query)
-        self.assertIn("year = %s", query)
-        self.assertIn("month = %s", query)
+        self.assertIn("COALESCE(EXTRACT(YEAR FROM document_date)::int, year) = %s", query)
+        self.assertIn("COALESCE(EXTRACT(MONTH FROM document_date)::int, month) = %s", query)
+        self.assertIn("COALESCE(document_date, created_at::date) >= %s::date", query)
+        self.assertIn("COALESCE(document_date, created_at::date) <= %s::date", query)
         self.assertIn("tags && %s::text[]", query)
         self.assertEqual(params[0], "profile_a")
         self.assertEqual(params[1], 2026)
