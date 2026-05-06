@@ -37,6 +37,13 @@ STORAGE_AGENT_MODEL = (
     or "gpt-5.4-mini"
 ).strip() or "gpt-5.4-mini"
 
+KNOWLEDGE_AGENT_MODEL = (
+    os.environ.get("OPENAI_DOCUMENT_AGENT_MODEL")
+    or os.environ.get("OPENAI_KNOWLEDGE_AGENT_MODEL")
+    or os.environ.get("OPENAI_AGENT_MODEL")
+    or "gpt-5.4-mini"
+).strip() or "gpt-5.4-mini"
+
 ACTION_TYPE_ALIASES = {
     "calendar.create_event": "create_event",
     "calendar.update_event": "update_event",
@@ -126,95 +133,6 @@ def normalize_agent_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "history": history[-20:],
         "timestamp": utc_timestamp(),
     }
-
-
-def _extract_reply_text(payload: Any) -> str:
-    if payload is None:
-        return ""
-    if isinstance(payload, str):
-        return payload.strip()
-    if isinstance(payload, list):
-        for item in payload:
-            text = _extract_reply_text(item)
-            if text:
-                return text
-        return ""
-    if isinstance(payload, dict):
-        for key in ("answer", "reply", "response", "message", "text", "output", "content"):
-            if key in payload:
-                text = _extract_reply_text(payload.get(key))
-                if text:
-                    return text
-        if "data" in payload:
-            text = _extract_reply_text(payload.get("data"))
-            if text:
-                return text
-    return ""
-
-
-def _raw_list(payload: Any, *keys: str) -> list[Any]:
-    if not isinstance(payload, dict):
-        return []
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-    data = payload.get("data")
-    if isinstance(data, dict):
-        for key in keys:
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-    return []
-
-
-def normalize_citations(raw_citations: list[Any]) -> list[dict[str, Any]]:
-    citations: list[dict[str, Any]] = []
-    for index, raw_citation in enumerate(raw_citations, start=1):
-        if isinstance(raw_citation, str):
-            title = raw_citation.strip()
-            if not title:
-                continue
-            citations.append({"id": f"citation_{index}", "title": title, "url": "", "snippet": ""})
-            continue
-
-        if not isinstance(raw_citation, dict):
-            continue
-
-        title = str(
-            raw_citation.get("title")
-            or raw_citation.get("source")
-            or raw_citation.get("name")
-            or f"Source {index}"
-        ).strip()
-        url = str(raw_citation.get("url") or raw_citation.get("href") or raw_citation.get("link") or "").strip()
-        snippet = str(
-            raw_citation.get("snippet")
-            or raw_citation.get("summary")
-            or raw_citation.get("text")
-            or ""
-        ).strip()
-        citations.append(
-            {
-                "id": str(raw_citation.get("id") or f"citation_{index}").strip(),
-                "title": title,
-                "url": url,
-                "snippet": snippet[:800],
-            }
-        )
-    return citations
-
-
-def normalize_artifacts(raw_artifacts: list[Any]) -> list[dict[str, Any]]:
-    artifacts: list[dict[str, Any]] = []
-    for index, raw_artifact in enumerate(raw_artifacts, start=1):
-        if isinstance(raw_artifact, dict):
-            artifact = make_json_safe(raw_artifact)
-            artifact.setdefault("id", f"artifact_{index}")
-            artifacts.append(artifact)
-        elif isinstance(raw_artifact, str) and raw_artifact.strip():
-            artifacts.append({"id": f"artifact_{index}", "type": "text", "content": raw_artifact.strip()})
-    return artifacts
 
 
 def _normalize_action_type(value: Any) -> str:
@@ -359,41 +277,6 @@ def confirm_pending_action(
     }
 
 
-def _build_rag_payload(request_payload: dict[str, Any], *, message: str | None = None) -> dict[str, Any]:
-    return {
-        "message": message or request_payload["message"],
-        "history": request_payload.get("history", [])[-20:],
-        "thread_id": request_payload["thread_id"],
-        "attachments": request_payload.get("attachments", []),
-        "client_context": request_payload.get("client_context", {}),
-        "source": "iv-helper-agent",
-        "timestamp": utc_timestamp(),
-    }
-
-
-def _normalize_rag_response(
-    raw_response: Any,
-    *,
-    thread_id: str,
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    safe_response = make_json_safe(raw_response)
-    answer = _extract_reply_text(safe_response)
-    citations = normalize_citations(_raw_list(safe_response, "citations", "sources", "references"))
-    artifacts = normalize_artifacts(_raw_list(safe_response, "artifacts", "files", "documents"))
-    pending_actions = register_pending_actions(
-        _raw_list(safe_response, "pending_actions", "actions"),
-        thread_id=thread_id,
-    )
-
-    if not answer and safe_response:
-        try:
-            answer = json.dumps(safe_response, ensure_ascii=True)
-        except TypeError:
-            answer = str(safe_response)
-
-    return answer, citations, artifacts, pending_actions
-
-
 def _tool_event(name: str, status: str, message: str, *, event_type: str = "tool_call") -> dict[str, Any]:
     return {
         "id": _new_id("tool"),
@@ -403,32 +286,6 @@ def _tool_event(name: str, status: str, message: str, *, event_type: str = "tool
         "message": message,
         "timestamp": utc_timestamp(),
     }
-
-
-def _run_rag_fallback(
-    request_payload: dict[str, Any],
-    *,
-    rag_callback: Callable[[dict[str, Any]], dict[str, Any]],
-    preface_events: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    tool_events = list(preface_events or [])
-    tool_events.append(_tool_event("rag_tool", "started", "Querying IV knowledge webhook"))
-    raw_response = rag_callback(_build_rag_payload(request_payload))
-    answer, citations, artifacts, pending_actions = _normalize_rag_response(
-        raw_response,
-        thread_id=request_payload["thread_id"],
-    )
-    tool_events.append(_tool_event("rag_tool", "completed", "IV knowledge webhook response normalized"))
-    return {
-        "answer": answer or "I could not produce an answer from the IV knowledge webhook.",
-        "citations": citations,
-        "tool_events": tool_events,
-        "artifacts": artifacts,
-        "pending_actions": pending_actions,
-        "structured_actions": pending_actions,
-        "thread_id": request_payload["thread_id"],
-    }
-
 
 def _run_orchestrator_unavailable(
     request_payload: dict[str, Any],
@@ -466,7 +323,7 @@ def _run_orchestrator_unavailable(
         "answer": (
             "Der Chat ist jetzt auf den Orchestrator ausgerichtet, aber der OpenAI Agents SDK Lauf "
             f"kann aktuell nicht starten: {reason}.{calendar_hint} "
-            "Der alte n8n Webhook wird fuer /api/agent/chat nicht mehr automatisch aufgerufen."
+            "Lokale Kalender- und Dokumentfunktionen bleiben ueber die Backend-APIs verfuegbar."
         ),
         "citations": [],
         "tool_events": tool_events,
@@ -490,13 +347,13 @@ def _should_run_agents_sdk() -> bool:
 def _run_agents_sdk(
     request_payload: dict[str, Any],
     *,
-    rag_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     local_tools: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     from agents import Agent, Runner, function_tool, set_tracing_disabled, trace  # type: ignore
 
     try:
         from .calendar_agent import build_calendar_agent
+        from .knowledge_agent import build_knowledge_agent
         from .storage_agent import build_storage_agent
         from ..services.calendar_service import (
             list_calendar_events as service_list_calendar_events,
@@ -509,6 +366,7 @@ def _run_agents_sdk(
         )
     except ImportError:
         from agents.calendar_agent import build_calendar_agent
+        from agents.knowledge_agent import build_knowledge_agent
         from agents.storage_agent import build_storage_agent
         from services.calendar_service import (
             list_calendar_events as service_list_calendar_events,
@@ -535,32 +393,6 @@ def _run_agents_sdk(
     client_context = request_payload.get("client_context", {}) if isinstance(request_payload.get("client_context"), dict) else {}
     context_user_id = normalize_user_id(client_context.get("profile_id") or client_context.get("user_id") or "default")
     context_timezone = normalize_timezone(client_context.get("timezone"))
-
-    if rag_callback:
-        @function_tool
-        def query_external_knowledge(question: str) -> str:
-            """Query the configured external IV knowledge webhook when local tools are not enough."""
-            tool_events.append(_tool_event("external_knowledge", "started", "Querying external knowledge webhook"))
-            raw_response = rag_callback(_build_rag_payload(request_payload, message=question))
-            answer, citations, artifacts, pending_actions = _normalize_rag_response(
-                raw_response,
-                thread_id=request_payload["thread_id"],
-            )
-            collected_citations.extend(citations)
-            collected_artifacts.extend(artifacts)
-            drafted_actions.extend(pending_actions)
-            tool_events.append(_tool_event("external_knowledge", "completed", "External knowledge response normalized"))
-            return json.dumps(
-                {
-                    "answer": answer,
-                    "citations": citations,
-                    "artifacts": artifacts,
-                    "pending_actions": pending_actions,
-                },
-                ensure_ascii=True,
-            )
-
-        orchestrator_tools.append(query_external_knowledge)
 
     @function_tool
     def draft_pending_action(action_type: str, title: str, payload_json: str) -> str:
@@ -726,18 +558,32 @@ def _run_agents_sdk(
         tool_event_factory=_tool_event,
     )
 
+    knowledge_agent = build_knowledge_agent(
+        Agent,
+        function_tool,
+        model=KNOWLEDGE_AGENT_MODEL,
+        context_user_id=context_user_id,
+        now_value=now_value,
+        thread_id=request_payload["thread_id"],
+        tool_events=tool_events,
+        make_json_safe=make_json_safe,
+        tool_event_factory=_tool_event,
+    )
+
     instructions = (
         "You are the IV-Helper orchestrator. Every chat message reaches you first. "
         "Before answering, decide whether to answer directly, inspect local app state, draft a pending action, "
-        "or use external knowledge if that tool is available. "
+        "or hand off to a specialized agent. "
         "For every calendar, appointment, Termin, Therapie, scheduling, counting, or availability request, hand off to CalendarAgent. "
-        "For every document, storage, upload, Datei, Dokument, Rechnung, Brief, PDF, DOCX, TXT, or image document request, hand off to StorageAgent. "
-        "If the request combines calendar and documents, use the local read tools from both domains before answering or hand off to the best specialized agent. "
+        "For upload, delete, move, metadata, folder, Datei speichern, Dokument loeschen, or document organization requests, hand off to StorageAgent. "
+        "For 'Was bedeutet...', IV questions, deadlines, Fristen, document understanding, comparisons, action items, broader knowledge, "
+        "or 'frag den IV Assistant' requests, hand off to KnowledgeAgent. "
+        "If the request combines calendar and documents, use local read tools from both domains before answering or hand off to the best specialized agent. "
         "Raw file Base64 is never available to you; uploaded attachments are already persisted and represented as document metadata. "
         "Do not execute side effects directly. For create, update, delete, reminder creation, PDF generation, report sending, "
         "or automation saves, call draft_pending_action and explain that the user must confirm it. "
         "Supported generic action_type values are create_reminder, generate_report, and send_report. Calendar mutations belong to CalendarAgent. "
-        "Storage mutations belong to StorageAgent. "
+        "Storage mutations belong to StorageAgent. Document explanation and synthesis belongs to KnowledgeAgent. "
         "Answer in German unless the user explicitly requests another language. Format final answers as clean concise Markdown. "
         "Keep answers concise, mention which capability you used when useful, and cite retrieved sources when available."
     )
@@ -746,7 +592,7 @@ def _run_agents_sdk(
         instructions=instructions,
         model=AGENT_MODEL,
         tools=orchestrator_tools,
-        handoffs=[calendar_agent, storage_agent],
+        handoffs=[calendar_agent, storage_agent, knowledge_agent],
     )
 
     input_text = json.dumps(
@@ -777,7 +623,6 @@ def _run_agents_sdk(
 def run_agent_chat(
     payload: dict[str, Any],
     *,
-    rag_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     local_tools: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     request_payload = normalize_agent_chat_payload(payload)
@@ -811,7 +656,7 @@ def run_agent_chat(
 
     if _should_run_agents_sdk():
         try:
-            response = _run_agents_sdk(request_payload, rag_callback=rag_callback, local_tools=local_tools)
+            response = _run_agents_sdk(request_payload, local_tools=local_tools)
             if response.get("answer"):
                 return make_json_safe(response)
         except Exception as exc:

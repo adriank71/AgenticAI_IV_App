@@ -2,7 +2,6 @@ import logging
 import json
 import io
 import os
-import socket
 import base64
 import binascii
 import tempfile
@@ -158,36 +157,6 @@ N8N_WEBHOOK_URL = os.environ.get(
     "IV_AGENT_N8N_WEBHOOK_URL",
     "https://adrx.app.n8n.cloud/webhook/da1ab6f3-73d4-4eaa-9063-ebf8d0e6226f",
 ).strip()
-N8N_CHAT_WEBHOOK_PATH = "da1ab6f3-73d4-4eaa-9063-ebf8d0e6226f"
-N8N_CHAT_BASE_URL = os.environ.get("IV_AGENT_CHAT_BASE_URL", "https://adrx.app.n8n.cloud").strip().rstrip("/")
-N8N_CHAT_WEBHOOK_MODE = os.environ.get("IV_AGENT_CHAT_WEBHOOK_MODE", "production").strip().lower()
-N8N_CHAT_PRODUCTION_URL = f"{N8N_CHAT_BASE_URL}/webhook/{N8N_CHAT_WEBHOOK_PATH}"
-N8N_CHAT_TEST_URL = f"{N8N_CHAT_BASE_URL}/webhook-test/{N8N_CHAT_WEBHOOK_PATH}"
-N8N_CHAT_TIMEOUT_SECONDS = max(5, int(os.environ.get("IV_AGENT_CHAT_TIMEOUT_SECONDS", "90").strip() or "90"))
-
-
-def resolve_chat_webhook_url() -> str:
-    explicit_url = os.environ.get("IV_AGENT_CHAT_WEBHOOK_URL", "").strip()
-    if explicit_url:
-        return explicit_url
-
-    if N8N_CHAT_WEBHOOK_MODE == "test":
-        return N8N_CHAT_TEST_URL
-
-    return N8N_CHAT_PRODUCTION_URL
-
-
-N8N_CHAT_WEBHOOK_URL = resolve_chat_webhook_url()
-
-
-def agent_external_knowledge_enabled() -> bool:
-    explicit_url = os.environ.get("IV_AGENT_CHAT_WEBHOOK_URL", "").strip()
-    explicit_flag = str(os.environ.get("IV_AGENT_ENABLE_EXTERNAL_KNOWLEDGE", "true")).strip().lower()
-    legacy_flag = str(os.environ.get("IV_AGENT_ENABLE_LEGACY_N8N_RAG", "")).strip().lower()
-    return bool(
-        (explicit_url and explicit_flag not in {"0", "false", "no"})
-        or legacy_flag in {"1", "true", "yes"}
-    )
 
 
 def json_error(message: str, status_code: int):
@@ -230,29 +199,6 @@ def get_json_payload(*, required: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("JSON body is required")
     return payload
-
-
-def format_webhook_error_detail(raw_detail: bytes | str) -> str:
-    if isinstance(raw_detail, bytes):
-        detail = raw_detail.decode("utf-8", errors="replace").strip()
-    else:
-        detail = str(raw_detail or "").strip()
-
-    if not detail:
-        return ""
-
-    try:
-        parsed = json.loads(detail)
-    except json.JSONDecodeError:
-        return detail[:1500]
-
-    if isinstance(parsed, dict):
-        preferred_keys = ("message", "error", "reason", "description", "details", "hint")
-        parts = [str(parsed[key]).strip() for key in preferred_keys if str(parsed.get(key, "")).strip()]
-        if parts:
-            return " | ".join(parts)[:1500]
-
-    return json.dumps(parsed, ensure_ascii=True)[:1500]
 
 
 def make_json_safe(value):
@@ -457,78 +403,6 @@ def trigger_n8n_webhook(payload: dict) -> None:
     with urllib.request.urlopen(req, timeout=15) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"n8n webhook failed with status {response.status}")
-
-
-def trigger_chat_webhook(payload: dict) -> dict:
-    if not N8N_CHAT_WEBHOOK_URL:
-        raise RuntimeError("chat webhook is not configured. Set IV_AGENT_CHAT_WEBHOOK_URL.")
-
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        N8N_CHAT_WEBHOOK_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=N8N_CHAT_TIMEOUT_SECONDS) as response:
-            if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"chat webhook failed with status {response.status}")
-            response_body = response.read()
-    except urllib.error.HTTPError as exc:
-        detail = format_webhook_error_detail(exc.read())
-        if "webhook-test" in N8N_CHAT_WEBHOOK_URL:
-            raise RuntimeError(
-                "n8n test webhook is not listening. In n8n click 'Listen for test event' or switch the app to the production webhook URL."
-            ) from exc
-        if exc.code == 404:
-            raise RuntimeError(
-                "chat webhook returned 404. The production n8n webhook URL is "
-                f"{N8N_CHAT_PRODUCTION_URL}. In n8n either activate the workflow for the production URL "
-                "or switch the app to test mode with IV_AGENT_CHAT_WEBHOOK_MODE=test and click "
-                "'Listen for test event'."
-                + (f" n8n detail: {detail}" if detail else "")
-            ) from exc
-        logger.error(
-            "chat webhook HTTP error status=%s url=%s detail=%s payload=%s",
-            exc.code,
-            N8N_CHAT_WEBHOOK_URL,
-            detail or "<empty>",
-            json.dumps(payload, ensure_ascii=True),
-        )
-        raise RuntimeError(
-            f"chat webhook failed with status {exc.code}"
-            + (f": {detail}" if detail else ". n8n returned an empty error body.")
-        ) from exc
-    except socket.timeout as exc:
-        raise RuntimeError(
-            "chat webhook timed out after "
-            f"{N8N_CHAT_TIMEOUT_SECONDS} seconds. "
-            "n8n is taking too long to finish before the Respond to Webhook step."
-        ) from exc
-    except urllib.error.URLError as exc:
-        if isinstance(exc.reason, socket.timeout):
-            raise RuntimeError(
-                "chat webhook timed out after "
-                f"{N8N_CHAT_TIMEOUT_SECONDS} seconds. "
-                "n8n is taking too long to finish before the Respond to Webhook step."
-            ) from exc
-        raise RuntimeError(f"Failed to reach chat webhook at {N8N_CHAT_WEBHOOK_URL}: {exc.reason}") from exc
-
-    if not response_body:
-        return {}
-
-    decoded = response_body.decode("utf-8").strip()
-    if not decoded:
-        return {}
-
-    try:
-        parsed = json.loads(decoded)
-        if isinstance(parsed, dict):
-            return make_json_safe(parsed)
-        return {"data": make_json_safe(parsed)}
-    except json.JSONDecodeError:
-        return {"reply": decoded}
 
 
 def parse_event_payload(payload: dict) -> dict:
@@ -769,26 +643,6 @@ def generate_reports_payload(
         "month": month,
         "generated_reports": generated_reports,
         "unavailable_reports": unavailable_reports,
-    }
-
-
-def parse_chat_payload(payload: dict) -> dict:
-    if not isinstance(payload, dict):
-        raise ValueError("JSON body is required")
-
-    message = str(payload.get("message", "")).strip()
-    if not message:
-        raise ValueError("message is required")
-
-    raw_history = payload.get("history", [])
-    history = raw_history if isinstance(raw_history, list) else []
-
-    return {
-        "message": message,
-        "history": history[-20:],
-        "source": "iv-helper-web",
-        "path": N8N_CHAT_WEBHOOK_PATH,
-        "timestamp": utc_timestamp(),
     }
 
 
@@ -1034,21 +888,17 @@ def api_chat():
         agent_payload = build_agent_chat_payload(get_json_payload(required=True))
         response_payload = run_agent_chat(
             agent_payload,
-            rag_callback=trigger_chat_webhook if agent_external_knowledge_enabled() else None,
             local_tools={"calendar_snapshot": build_agent_calendar_snapshot},
         )
         response_payload = enrich_agent_response_with_uploads(response_payload, agent_payload)
         return jsonify(make_json_safe(response_payload))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    except urllib.error.URLError as exc:
-        logger.error("chat webhook request failed: %s", exc)
-        return json_error("Failed to reach chat webhook", 502)
     except RuntimeError as exc:
-        logger.error("chat webhook runtime error: %s", exc)
+        logger.error("chat runtime error: %s", exc)
         return json_error(str(exc), 502)
     except Exception as exc:
-        logger.exception("Unexpected chat webhook error: %s", exc)
+        logger.exception("Unexpected chat error: %s", exc)
         return json_error(f"Failed to process chat request: {exc}", 500)
 
 
@@ -1224,16 +1074,12 @@ def api_agent_chat():
         agent_payload = build_agent_chat_payload(get_json_payload(required=True))
         response_payload = run_agent_chat(
             agent_payload,
-            rag_callback=trigger_chat_webhook if agent_external_knowledge_enabled() else None,
             local_tools={"calendar_snapshot": build_agent_calendar_snapshot},
         )
         response_payload = enrich_agent_response_with_uploads(response_payload, agent_payload)
         return jsonify(make_json_safe(response_payload))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    except urllib.error.URLError as exc:
-        logger.error("agent chat webhook request failed: %s", exc)
-        return json_error("Failed to reach chat webhook", 502)
     except RuntimeError as exc:
         logger.error("agent chat runtime error: %s", exc)
         return json_error(str(exc), 502)

@@ -93,12 +93,16 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertIn("invalid file format", response.get_json()["error"])
 
-    def test_agent_chat_does_not_call_legacy_webhook_when_sdk_unavailable(self):
+    def test_agent_chat_ignores_legacy_chat_env_when_sdk_unavailable(self):
         client = app_module.app.test_client()
-        with isolated_pending_action_storage(), patch.object(
-            app_module,
-            "trigger_chat_webhook",
-            side_effect=AssertionError("legacy webhook should not be called"),
+        with isolated_pending_action_storage(), patch.dict(
+            os.environ,
+            {
+                "IV_AGENT_CHAT_WEBHOOK_URL": "https://example.invalid/legacy",
+                "IV_AGENT_ENABLE_EXTERNAL_KNOWLEDGE": "true",
+                "IV_AGENT_ENABLE_LEGACY_N8N_RAG": "true",
+            },
+            clear=False,
         ), patch.object(agent_orchestrator, "_agents_sdk_available", return_value=False):
             response = client.post(
                 "/api/agent/chat",
@@ -114,7 +118,7 @@ class AgentApiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["thread_id"], "thread-test")
         self.assertIn("Orchestrator", payload["answer"])
-        self.assertIn("nicht mehr automatisch aufgerufen", payload["answer"])
+        self.assertNotIn("n8n", payload["answer"].lower())
         self.assertEqual(payload["pending_actions"], [])
         self.assertTrue(any(event["name"] == "calendar_snapshot" for event in payload["tool_events"]))
 
@@ -181,6 +185,7 @@ class AgentApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         model_payload = run_agent_mock.call_args.args[0]
+        self.assertNotIn("rag_callback", run_agent_mock.call_args.kwargs)
         self.assertNotIn("content_base64", model_payload["attachments"][0])
         self.assertEqual(model_payload["attachments"][0]["document_id"], "doc-1")
         payload = response.get_json()
@@ -266,12 +271,12 @@ class AgentApiTests(unittest.TestCase):
         )
         self.assertEqual(payload["result"]["assigned_count"], 2)
 
-    def test_existing_chat_webhook_route_is_unchanged(self):
+    def test_basic_chat_route_uses_orchestrator_without_legacy_webhook(self):
         client = app_module.app.test_client()
-        with isolated_pending_action_storage(), patch.object(
-            app_module,
-            "trigger_chat_webhook",
-            side_effect=AssertionError("legacy webhook should not be called"),
+        with isolated_pending_action_storage(), patch.dict(
+            os.environ,
+            {"IV_AGENT_CHAT_WEBHOOK_URL": "https://example.invalid/legacy"},
+            clear=False,
         ), patch.object(agent_orchestrator, "_agents_sdk_available", return_value=False):
             response = client.post("/api/chat", json={"message": "hello", "history": []})
 
@@ -279,6 +284,7 @@ class AgentApiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertIn("answer", payload)
         self.assertNotIn("webhook_response", payload)
+        self.assertNotIn("n8n", payload["answer"].lower())
 
     def test_confirm_pending_calendar_create_executes_after_confirmation(self):
         client = app_module.app.test_client()
