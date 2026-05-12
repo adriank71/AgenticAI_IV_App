@@ -124,10 +124,15 @@
                     <button id="next-month" class="icon-button" type="button" aria-label="Next period">
                       <span class="material-symbols-outlined">chevron_right</span>
                     </button>
-                    <button id="open-add-modal" class="primary-button compact-action" type="button">
-                      <span class="material-symbols-outlined">add</span>
-                      <span>New</span>
-                    </button>
+                    <div class="toolbar-actions">
+                      <button id="open-add-modal" class="primary-button compact-action" type="button">
+                        <span class="material-symbols-outlined">add</span>
+                        <span>New</span>
+                      </button>
+                      <button id="export-calendar-pdf" class="icon-button" type="button" aria-label="Export calendar as PDF" title="Export as PDF">
+                        <span class="material-symbols-outlined">picture_as_pdf</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <div class="calendar-header-row">
@@ -189,7 +194,7 @@
                 <ul class="legend-list">
                   <li><span class="legend-chip assistant"></span><span>Assistant</span></li>
                   <li><span class="legend-chip transport"></span><span>Transport</span></li>
-                  <li><span class="legend-chip other"></span><span>Other</span></li>
+                  <li><span class="legend-chip other"></span><span>Therapie</span></li>
                 </ul>
               </section>
             </aside>
@@ -557,7 +562,7 @@
           <select id="event-category" name="category" required>
             <option value="assistant">Assistant</option>
             <option value="transport">Transport</option>
-            <option value="other">Other</option>
+            <option value="other">Therapie</option>
           </select>
         </label>
         <label id="event-title-field">

@@ -174,6 +174,9 @@ def _extract_todos(text: str) -> list[str]:
     return todos
 
 
+MCSP_TOKEN_URL = "https://iam.platform.saas.ibm.com/siusermgr/api/1.0/apikeys/token"
+
+
 class WatsonXOrchestrateClient:
     def __init__(
         self,
@@ -195,6 +198,26 @@ class WatsonXOrchestrateClient:
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.agent_id)
 
+    def _get_bearer_token(self) -> str:
+        """Exchange the ZenApiKey for an MCSP bearer token required by WatsonX Orchestrate SaaS."""
+        body = json.dumps({"apikey": self.api_key}).encode("utf-8")
+        request = urllib.request.Request(
+            MCSP_TOKEN_URL,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "iv-helper/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+        token = parsed.get("token") or parsed.get("access_token") or parsed.get("id_token") or ""
+        if not token:
+            raise ValueError(f"MCSP token exchange returned no token: {list(parsed.keys())}")
+        return str(token)
+
     def chat(
         self,
         *,
@@ -210,6 +233,15 @@ class WatsonXOrchestrateClient:
                 "answer": "",
                 "citations": [],
             }
+
+        try:
+            bearer_token = self._get_bearer_token()
+        except (socket.timeout, TimeoutError):
+            return {"available": False, "reason": "WatsonX MCSP Token-Exchange Timeout.", "answer": "", "citations": []}
+        except urllib.error.HTTPError as exc:
+            return {"available": False, "reason": f"WatsonX MCSP Token-Exchange HTTP-Fehler {exc.code}.", "answer": "", "citations": []}
+        except Exception as exc:
+            return {"available": False, "reason": f"WatsonX MCSP Token-Exchange fehlgeschlagen: {type(exc).__name__}: {exc}", "answer": "", "citations": []}
 
         endpoint = f"{self.base_url}/api/v1/orchestrate/{self.agent_id}/chat/completions"
         messages = [
@@ -236,7 +268,7 @@ class WatsonXOrchestrateClient:
             }
         ).encode("utf-8")
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
         }
         if thread_id:

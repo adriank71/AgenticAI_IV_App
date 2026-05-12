@@ -11,6 +11,7 @@ from iv_agent.calendar_manager import PostgresEventStore
 from iv_agent.reminders import PostgresReminderStore
 from iv_agent.services.storage_service import (
     StorageService,
+    build_chat_document_artifact,
     extract_document_text,
     process_chat_attachments,
     sanitize_document_filename,
@@ -240,6 +241,7 @@ class StorageTests(unittest.TestCase):
             start_date="2026-05-01",
             end_date="2026-05-31",
             folder_id=None,
+            storage_bucket="IV",
         )
 
         self.assertEqual(documents, [])
@@ -251,9 +253,90 @@ class StorageTests(unittest.TestCase):
         self.assertIn("COALESCE(document_date, created_at::date) >= %s::date", query)
         self.assertIn("COALESCE(document_date, created_at::date) <= %s::date", query)
         self.assertIn("tags && %s::text[]", query)
+        self.assertIn("storage_bucket = %s", query)
         self.assertEqual(params[0], "profile_a")
-        self.assertEqual(params[1], 2026)
-        self.assertEqual(params[2], 5)
+        self.assertEqual(params[1], "IV")
+        self.assertEqual(params[2], 2026)
+        self.assertEqual(params[3], 5)
+
+    def test_chat_document_artifact_contains_stable_download_url(self):
+        artifact = build_chat_document_artifact(
+            {
+                "document_id": "doc-1",
+                "user_id": "profile_a",
+                "file_name": "rechnung.txt",
+                "content_type": "text/plain",
+                "content_size": 12,
+                "document_type": "invoice",
+                "institution": "IV",
+                "document_date": "2026-05-01",
+                "storage_bucket": "IV",
+                "summary": "Betrag CHF 42.50",
+            }
+        )
+
+        self.assertEqual(artifact["type"], "document")
+        self.assertEqual(artifact["document_id"], "doc-1")
+        self.assertEqual(artifact["download_url"], "/api/documents/doc-1/file?profile_id=profile_a&download=1")
+        self.assertNotIn("signed_url", artifact)
+
+    def test_sum_invoice_amounts_filters_bucket_and_ignores_exact_duplicates(self):
+        first = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "folder_id": None,
+            "file_name": "tixi_1.txt",
+            "safe_file_name": "tixi_1.txt",
+            "storage_bucket": "TixiTaxi",
+            "storage_key": "Documents/default/2026/05/doc-1-tixi_1.txt",
+            "storage_url": "supabase://TixiTaxi/Documents/default/2026/05/doc-1-tixi_1.txt",
+            "content_type": "text/plain",
+            "content_size": 10,
+            "checksum_sha256": "same",
+            "document_type": "invoice",
+            "institution": "Tixi",
+            "document_date": "2026-05-01",
+            "year": 2026,
+            "month": 5,
+            "tags": ["transport"],
+            "summary": "Tixi Rechnung",
+            "extracted_text": "Tixi Rechnung CHF 10",
+            "extraction_status": "completed",
+            "extraction_error": None,
+            "metadata": {"invoice_fields": {"total": 10, "currency": "CHF"}},
+            "created_at": "2026-05-01T10:00:00+00:00",
+            "updated_at": "2026-05-01T10:00:00+00:00",
+        }
+        second = {**first, "document_id": "doc-2"}
+        missing = {
+            **first,
+            "document_id": "doc-3",
+            "checksum_sha256": "missing",
+            "metadata": {},
+            "summary": "Tixi Rechnung ohne Betrag",
+            "extracted_text": "Tixi Rechnung ohne Betrag",
+        }
+        cursor = RecordingCursor(fetchall_results=[[first, second, missing]])
+        service = StorageService(
+            "postgres://example",
+            client=FakeSupabaseClient(),
+            bucket="IV",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        result = service.sum_invoice_amounts(user_id="default", query="TixiTaxi Rechnungen")
+
+        self.assertEqual(result["storage_bucket"], "TixiTaxi")
+        self.assertEqual(result["query_filter"], "")
+        self.assertEqual(result["matched_document_count"], 3)
+        self.assertEqual(result["counted_document_count"], 1)
+        self.assertEqual(result["ignored_duplicate_count"], 1)
+        self.assertEqual(result["missing_amount_count"], 1)
+        self.assertEqual(result["total_amount_chf"], 10.0)
+        query, params = cursor.statements[-1]
+        self.assertIn("storage_bucket = %s", query)
+        self.assertIn("lower(document_type) = lower(%s)", query)
+        self.assertEqual(params[1], "TixiTaxi")
 
     def test_process_chat_attachments_uploads_and_removes_base64(self):
         uploaded = {

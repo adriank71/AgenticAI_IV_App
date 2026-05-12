@@ -18,6 +18,7 @@ def build_storage_agent(
     tool_events: list[dict[str, Any]],
     drafted_actions: list[dict[str, Any]],
     structured_actions: list[dict[str, Any]],
+    collected_artifacts: list[dict[str, Any]],
     register_pending_actions: Callable[..., list[dict[str, Any]]],
     make_json_safe: Callable[[Any], Any],
     tool_event_factory: Callable[..., dict[str, Any]],
@@ -29,6 +30,7 @@ def build_storage_agent(
         tool_events=tool_events,
         drafted_actions=drafted_actions,
         structured_actions=structured_actions,
+        collected_artifacts=collected_artifacts,
         register_pending_actions=register_pending_actions,
         make_json_safe=make_json_safe,
         tool_event_factory=tool_event_factory,
@@ -44,7 +46,10 @@ def build_storage_agent(
         f"Current user_id/profile_id: {context_user_id}. Current datetime: {now_value}. "
         f"Documents uploaded in this turn: {uploaded_summary or 'none'}. "
         "Use list_documents, search_documents, count_documents, get_document_details, summarize_document, classify_document, "
-        "group_documents, list_document_folders, and match_documents for reads. "
+        "group_documents, sum_invoice_amounts, list_document_folders, and match_documents for reads. "
+        "For any document retrieval request such as 'gib mir alle Dokumente', 'zeige Rechnungen', or 'finde Dateien', read storage first and return the documents from the tool result; never answer only from chat history. "
+        "For invoice total or sum questions, always apply the user's document filters first and call sum_invoice_amounts; do not add amounts from memory or from a plain text summary. "
+        "If the user mentions IV, TixiTaxi, Stiftung, or Versicherung, pass that value as storage_bucket to document read tools. "
         "Uploads have already been stored by the backend before you see the request. Never ask for or expose Base64 content. "
         "For folder creation, moving documents, deleting documents, bucket reassignment, or user-visible metadata updates, draft a pending action. "
         "Never claim a delete, move, bucket change, folder creation, or metadata update is complete before user confirmation. "

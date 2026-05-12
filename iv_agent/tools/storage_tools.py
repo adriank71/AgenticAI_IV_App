@@ -3,26 +3,32 @@ from typing import Any
 
 try:
     from ..services.storage_service import (
+        build_chat_document_artifact as service_build_chat_document_artifact,
         classify_document as service_classify_document,
         count_documents as service_count_documents,
         get_document as service_get_document,
         group_documents as service_group_documents,
+        infer_document_bucket_from_text,
         list_documents as service_list_documents,
         list_folders as service_list_folders,
         match_documents as service_match_documents,
         search_documents as service_search_documents,
+        sum_invoice_amounts as service_sum_invoice_amounts,
         summarize_document as service_summarize_document,
     )
 except ImportError:
     from services.storage_service import (
+        build_chat_document_artifact as service_build_chat_document_artifact,
         classify_document as service_classify_document,
         count_documents as service_count_documents,
         get_document as service_get_document,
         group_documents as service_group_documents,
+        infer_document_bucket_from_text,
         list_documents as service_list_documents,
         list_folders as service_list_folders,
         match_documents as service_match_documents,
         search_documents as service_search_documents,
+        sum_invoice_amounts as service_sum_invoice_amounts,
         summarize_document as service_summarize_document,
     )
 
@@ -56,6 +62,7 @@ def build_storage_tools(
     tool_events: list[dict[str, Any]],
     drafted_actions: list[dict[str, Any]],
     structured_actions: list[dict[str, Any]],
+    collected_artifacts: list[dict[str, Any]] | None = None,
     register_pending_actions: Any,
     make_json_safe: Any,
     tool_event_factory: Any,
@@ -83,6 +90,26 @@ def build_storage_tools(
         structured_actions.extend(actions)
         return {"pending_actions": actions}
 
+    def _collect_document_artifacts(documents: Any) -> None:
+        if collected_artifacts is None:
+            return
+        existing_ids = {
+            str(item.get("document_id") or item.get("id"))
+            for item in collected_artifacts
+            if isinstance(item, dict)
+        }
+        for document in documents if isinstance(documents, list) else [documents]:
+            if not isinstance(document, dict) or not document.get("document_id"):
+                continue
+            document_id = str(document.get("document_id"))
+            if document_id in existing_ids:
+                continue
+            artifact = dict(document) if document.get("download_url") else service_build_chat_document_artifact(document)
+            artifact.setdefault("id", document_id)
+            artifact.setdefault("type", "document")
+            collected_artifacts.append(artifact)
+            existing_ids.add(document_id)
+
     @function_tool
     def list_documents(
         year: int = 0,
@@ -93,25 +120,30 @@ def build_storage_tools(
         institution: str = "",
         tags_json: str = "[]",
         folder_id: str = "",
+        storage_bucket: str = "",
         limit: int = 25,
     ) -> str:
-        """List stored documents for the current user with optional year, month, type, institution, tags, and folder filters."""
+        """List stored documents for the current user with optional year, month, type, institution, tags, folder, and storage bucket filters."""
+        def read() -> dict[str, Any]:
+            documents = service_list_documents(
+                user_id=context_user_id,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                document_type=document_type,
+                institution=institution,
+                tags=_json_list(tags_json),
+                folder_id=folder_id or None,
+                storage_bucket=storage_bucket or infer_document_bucket_from_text(institution),
+                limit=limit,
+            )
+            _collect_document_artifacts(documents)
+            return {"documents": documents}
+
         return _storage_tool_result(
             "list_documents",
-            lambda: {
-                "documents": service_list_documents(
-                    user_id=context_user_id,
-                    year=_optional_int(year),
-                    month=_optional_int(month),
-                    start_date=start_date or None,
-                    end_date=end_date or None,
-                    document_type=document_type,
-                    institution=institution,
-                    tags=_json_list(tags_json),
-                    folder_id=folder_id or None,
-                    limit=limit,
-                )
-            },
+            read,
         )
 
     tools.append(list_documents)
@@ -126,26 +158,30 @@ def build_storage_tools(
         document_type: str = "",
         institution: str = "",
         tags_json: str = "[]",
+        storage_bucket: str = "",
         limit: int = 10,
     ) -> str:
-        """Search stored documents for the current user by filename, summary, metadata, or extracted text."""
+        """Search stored documents for the current user by filename, summary, metadata, extracted text, and optional storage bucket."""
+        def read() -> dict[str, Any]:
+            documents = service_search_documents(
+                user_id=context_user_id,
+                query=query,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                document_type=document_type,
+                institution=institution,
+                tags=_json_list(tags_json),
+                storage_bucket=storage_bucket or infer_document_bucket_from_text(query),
+                limit=limit,
+            )
+            _collect_document_artifacts(documents)
+            return {"query": query, "documents": documents}
+
         return _storage_tool_result(
             "search_documents",
-            lambda: {
-                "query": query,
-                "documents": service_search_documents(
-                    user_id=context_user_id,
-                    query=query,
-                    year=_optional_int(year),
-                    month=_optional_int(month),
-                    start_date=start_date or None,
-                    end_date=end_date or None,
-                    document_type=document_type,
-                    institution=institution,
-                    tags=_json_list(tags_json),
-                    limit=limit,
-                ),
-            },
+            read,
         )
 
     tools.append(search_documents)
@@ -160,6 +196,7 @@ def build_storage_tools(
         institution: str = "",
         tags_json: str = "[]",
         folder_id: str = "",
+        storage_bucket: str = "",
     ) -> str:
         """Count stored documents for the current user with optional filters."""
         return _storage_tool_result(
@@ -174,6 +211,7 @@ def build_storage_tools(
                 institution=institution,
                 tags=_json_list(tags_json),
                 folder_id=folder_id or None,
+                storage_bucket=storage_bucket or infer_document_bucket_from_text(institution),
             ),
         )
 
@@ -182,15 +220,18 @@ def build_storage_tools(
     @function_tool
     def get_document_details(document_id: str, include_signed_url: bool = False) -> str:
         """Get metadata, extracted text, and optionally a short-lived signed URL for one document."""
+        def read() -> dict[str, Any]:
+            document = service_get_document(
+                user_id=context_user_id,
+                document_id=document_id,
+                include_signed_url=include_signed_url,
+            )
+            _collect_document_artifacts(document)
+            return {"document": document}
+
         return _storage_tool_result(
             "get_document_details",
-            lambda: {
-                "document": service_get_document(
-                    user_id=context_user_id,
-                    document_id=document_id,
-                    include_signed_url=include_signed_url,
-                )
-            },
+            read,
         )
 
     tools.append(get_document_details)
@@ -225,6 +266,7 @@ def build_storage_tools(
         document_type: str = "",
         institution: str = "",
         tags_json: str = "[]",
+        storage_bucket: str = "",
     ) -> str:
         """Group the current user's documents by month, type, institution, or folder."""
         return _storage_tool_result(
@@ -239,10 +281,45 @@ def build_storage_tools(
                 document_type=document_type,
                 institution=institution,
                 tags=_json_list(tags_json),
+                storage_bucket=storage_bucket or infer_document_bucket_from_text(institution),
             ),
         )
 
     tools.append(group_documents)
+
+    @function_tool
+    def sum_invoice_amounts(
+        query: str = "",
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        storage_bucket: str = "",
+        limit: int = 100,
+    ) -> str:
+        """Sum stored invoice amounts after filtering documents first; exact duplicate checksums are ignored."""
+        def read() -> dict[str, Any]:
+            payload = service_sum_invoice_amounts(
+                user_id=context_user_id,
+                query=query,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                institution=institution,
+                tags=_json_list(tags_json),
+                storage_bucket=storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
+                limit=limit,
+            )
+            _collect_document_artifacts(payload.get("counted_documents") or [])
+            _collect_document_artifacts(payload.get("documents_without_amount") or [])
+            return payload
+
+        return _storage_tool_result("sum_invoice_amounts", read)
+
+    tools.append(sum_invoice_amounts)
 
     @function_tool
     def list_document_folders() -> str:

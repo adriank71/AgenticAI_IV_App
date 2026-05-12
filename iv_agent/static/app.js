@@ -7,7 +7,7 @@ const categoryClassMap = {
 const categoryLabelMap = {
   assistant: "Assistant",
   transport: "Transport",
-  other: "Other",
+  other: "Therapie",
 };
 
 const categorySubtitleMap = {
@@ -2404,8 +2404,13 @@ function initCalendar() {
     scrollTime: "07:00:00",
     slotDuration: "00:30:00",
     forceEventDuration: true,
+    selectable: true,
+    editable: true,
     eventClick: handleEventClick,
     eventContent: renderEventContent,
+    select: handleCalendarSelect,
+    eventDrop: handleEventDrop,
+    eventResize: handleEventResize,
     events: fetchEvents,
     datesSet: handleDatesSet,
     eventColor: "transparent",
@@ -2425,6 +2430,78 @@ function initCalendar() {
     },
   });
   state.calendar.render();
+}
+
+function exportCalendarPdf() {
+  const heading = document.getElementById("calendar-heading");
+  const originalTitle = document.title;
+  if (heading) {
+    document.title = `Calendar – ${heading.textContent}`;
+  }
+  window.print();
+  document.title = originalTitle;
+}
+
+function formatTimeFromDate(date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function handleCalendarSelect(info) {
+  seedFormDefaults();
+  resetEventFormMode();
+  elements.dateInput.value = formatIsoDate(info.start);
+  if (info.allDay) {
+    if (elements.allDayInput) {
+      elements.allDayInput.checked = true;
+    }
+    toggleAllDayFields();
+  } else {
+    elements.timeInput.value = formatTimeFromDate(info.start);
+    elements.endTimeInput.value = info.end ? formatTimeFromDate(info.end) : addMinutesToTime(formatTimeFromDate(info.start), 30);
+  }
+  toggleAssistantFields();
+  openModal("add-modal", document.getElementById("open-add-modal"));
+  if (state.calendar) {
+    state.calendar.unselect();
+  }
+}
+
+async function handleEventDrop(info) {
+  const rawEvent = info.event.extendedProps.rawEvent;
+  if (!rawEvent || !rawEvent.id) {
+    info.revert();
+    return;
+  }
+  const newDate = formatIsoDate(info.event.start);
+  const newTime = info.event.allDay ? "" : formatTimeFromDate(info.event.start);
+  const newEndTime = info.event.end ? formatTimeFromDate(info.event.end) : "";
+  try {
+    await apiFetch(`/api/events/${encodeURIComponent(rawEvent.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...rawEvent, date: newDate, time: newTime, end_time: newEndTime, all_day: info.event.allDay }),
+    });
+    await refreshCalendarData({ force: true });
+  } catch {
+    info.revert();
+  }
+}
+
+async function handleEventResize(info) {
+  const rawEvent = info.event.extendedProps.rawEvent;
+  if (!rawEvent || !rawEvent.id) {
+    info.revert();
+    return;
+  }
+  const newEndTime = info.event.end ? formatTimeFromDate(info.event.end) : "";
+  try {
+    await apiFetch(`/api/events/${encodeURIComponent(rawEvent.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ ...rawEvent, end_time: newEndTime }),
+    });
+    await refreshCalendarData({ force: true });
+  } catch {
+    info.revert();
+  }
 }
 
 function seedFormDefaults() {
@@ -2685,6 +2762,13 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
     bubble.appendChild(buildCitationCard(extras.citations));
   }
 
+  if (extras && Array.isArray(extras.artifacts) && extras.artifacts.length) {
+    const artifactList = buildChatArtifactList(extras.artifacts);
+    if (artifactList) {
+      bubble.appendChild(artifactList);
+    }
+  }
+
   if (extras && Array.isArray(extras.pendingActions) && extras.pendingActions.length) {
     bubble.appendChild(buildPendingActionsCard(extras.pendingActions));
   }
@@ -2726,6 +2810,107 @@ function buildChatAttachmentSummary(attachments) {
     wrapper.appendChild(item);
   });
   return wrapper;
+}
+
+function formatArtifactFileSize(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildChatArtifactList(artifacts) {
+  const documents = artifacts
+    .filter((artifact) => artifact && artifact.type === "document")
+    .filter((artifact, index, all) => {
+      const id = String(artifact.document_id || artifact.id || "");
+      return !id || all.findIndex((item) => String(item.document_id || item.id || "") === id) === index;
+    });
+  if (!documents.length) {
+    return null;
+  }
+  const card = document.createElement("div");
+  card.className = "chat-document-card";
+  const title = document.createElement("p");
+  title.className = "chat-policy-title";
+  title.textContent = documents.length === 1 ? "Dokument" : "Dokumente";
+  card.appendChild(title);
+
+  documents.slice(0, 8).forEach((artifact) => {
+    const row = document.createElement("div");
+    row.className = "chat-document-row";
+
+    const icon = document.createElement("span");
+    icon.className = "material-symbols-outlined";
+    icon.textContent = artifact.icon || (String(artifact.content_type || "").startsWith("image/") ? "image" : "draft");
+    row.appendChild(icon);
+
+    const body = document.createElement("div");
+    body.className = "chat-document-body";
+    const name = document.createElement("strong");
+    name.textContent = artifact.title || artifact.file_name || "Dokument";
+    body.appendChild(name);
+
+    const metaParts = [
+      artifact.storage_bucket,
+      artifact.document_type,
+      artifact.institution,
+      artifact.document_date,
+      formatArtifactFileSize(artifact.content_size),
+    ].filter(Boolean);
+    if (artifact.amount !== undefined && artifact.amount !== null) {
+      metaParts.push(`CHF ${Number(artifact.amount).toFixed(2)}`);
+    }
+    if (metaParts.length) {
+      const meta = document.createElement("span");
+      meta.textContent = metaParts.join(" · ");
+      body.appendChild(meta);
+    }
+    if (artifact.summary) {
+      const summary = document.createElement("small");
+      summary.textContent = String(artifact.summary).split("\n")[0].slice(0, 180);
+      body.appendChild(summary);
+    }
+    row.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "chat-document-actions";
+    const href = artifact.download_url || artifact.preview_url || "";
+    if (href) {
+      const link = document.createElement("a");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = "Download";
+      actions.appendChild(link);
+    }
+    if (artifact.preview_url && artifact.preview_url !== artifact.download_url) {
+      const preview = document.createElement("a");
+      preview.href = artifact.preview_url;
+      preview.target = "_blank";
+      preview.rel = "noreferrer";
+      preview.textContent = "Open";
+      actions.appendChild(preview);
+    }
+    row.appendChild(actions);
+    card.appendChild(row);
+  });
+
+  if (documents.length > 8) {
+    const more = document.createElement("span");
+    more.className = "chat-tool-meta";
+    more.textContent = `+${documents.length - 8} weitere Dokumente`;
+    card.appendChild(more);
+  }
+
+  return card;
 }
 
 function buildCitationCard(citations) {
@@ -3088,6 +3273,10 @@ function normalizeChatSession(rawChat, index = 0) {
         role: String((message && message.role) || "").trim(),
         text: String((message && message.text) || "").trim(),
         timestamp: String((message && message.timestamp) || now),
+        artifacts: Array.isArray(message && message.artifacts) ? message.artifacts : [],
+        pendingActions: Array.isArray(message && message.pendingActions) ? message.pendingActions : [],
+        citations: Array.isArray(message && message.citations) ? message.citations : [],
+        toolEvents: Array.isArray(message && message.toolEvents) ? message.toolEvents : [],
       }))
       .filter((message) => message.role && message.text)
     : [];
@@ -3270,7 +3459,12 @@ function renderActiveChatMessages() {
   }
   state.chatHistory.forEach((message) => {
     const role = message.role === "assistant" ? "bot" : message.role;
-    appendChatMessage(role, message.text);
+    appendChatMessage(role, message.text, null, {
+      artifacts: message.artifacts || [],
+      pendingActions: message.pendingActions || [],
+      citations: message.citations || [],
+      toolEvents: message.toolEvents || [],
+    });
   });
   syncChatStage();
 }
@@ -3593,10 +3787,18 @@ function cancelPendingAdviserRequest() {
   state.chatAbortController.abort();
 }
 
-function pushChatHistory(role, text) {
+function pushChatHistory(role, text, extras = {}) {
   const now = new Date().toISOString();
   const activeChat = getActiveChatSession();
-  state.chatHistory.push({ role, text, timestamp: now });
+  state.chatHistory.push({
+    role,
+    text,
+    timestamp: now,
+    artifacts: Array.isArray(extras.artifacts) ? extras.artifacts : [],
+    pendingActions: Array.isArray(extras.pendingActions) ? extras.pendingActions : [],
+    citations: Array.isArray(extras.citations) ? extras.citations : [],
+    toolEvents: Array.isArray(extras.toolEvents) ? extras.toolEvents : [],
+  });
   if (state.chatHistory.length > 30) {
     state.chatHistory = state.chatHistory.slice(-30);
   }
@@ -3731,17 +3933,20 @@ async function submitAdviserPrompt(rawPrompt) {
       ? data.pending_actions
       : (Array.isArray(data.structured_actions) ? data.structured_actions : []);
     const toolEvents = Array.isArray(data.tool_events) ? data.tool_events : [];
+    const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
     const responsePanelIntent = detectPanelIntentFromActions(pendingActions)
       || detectPanelIntentFromToolEvents(toolEvents)
       || detectPanelIntentFromText(replyText);
     removeChatPendingIndicator();
-    appendChatMessage("bot", replyText, replyPolicy, {
+    const messageExtras = {
       citations: Array.isArray(data.citations) ? data.citations : [],
+      artifacts,
       pendingActions,
       toolEvents,
-    });
+    };
+    appendChatMessage("bot", replyText, replyPolicy, messageExtras);
     openWorkspacePanelForIntent(responsePanelIntent, { source: "assistant-message" });
-    pushChatHistory("assistant", replyText);
+    pushChatHistory("assistant", replyText, messageExtras);
   } catch (error) {
     if (error.name === "AbortError") {
       return;
@@ -4389,6 +4594,10 @@ function bindEvents() {
   }
   document.getElementById("open-export-modal").addEventListener("click", openExportModal);
   document.getElementById("copy-export").addEventListener("click", copyExportSummary);
+  const exportPdfButton = document.getElementById("export-calendar-pdf");
+  if (exportPdfButton) {
+    exportPdfButton.addEventListener("click", exportCalendarPdf);
+  }
 
   elements.viewButtons.forEach((button) => {
     button.addEventListener("click", () => changeCalendarView(button.dataset.view));

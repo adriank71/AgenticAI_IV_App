@@ -32,6 +32,7 @@ try:
         update_calendar_event as update_service_calendar_event,
     )
     from .services.storage_service import (
+        build_chat_document_artifact,
         build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
@@ -92,6 +93,7 @@ except ImportError:
         update_calendar_event as update_service_calendar_event,
     )
     from services.storage_service import (
+        build_chat_document_artifact,
         build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
@@ -702,24 +704,18 @@ def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: di
         return response_payload
 
     artifacts = response_payload.get("artifacts") if isinstance(response_payload.get("artifacts"), list) else []
+    existing_artifact_ids = {
+        str(item.get("document_id") or item.get("id"))
+        for item in artifacts
+        if isinstance(item, dict)
+    }
     for document in uploaded_documents:
         if not isinstance(document, dict):
             continue
-        artifacts.append(
-            {
-                "id": document.get("document_id"),
-                "type": "document",
-                "title": document.get("file_name") or document.get("safe_file_name") or "Document",
-                "document_id": document.get("document_id"),
-                "content_type": document.get("content_type"),
-                "content_size": document.get("content_size"),
-                "summary": document.get("summary"),
-                "extraction_status": document.get("extraction_status"),
-                "storage_bucket": document.get("storage_bucket"),
-                "bucket_confirmed": document.get("bucket_confirmed"),
-                "bucket_reason": document.get("bucket_reason"),
-            }
-        )
+        document_id = str(document.get("document_id") or "")
+        if document_id and document_id not in existing_artifact_ids:
+            artifacts.append(build_chat_document_artifact(document))
+            existing_artifact_ids.add(document_id)
 
     response_payload["artifacts"] = artifacts
     response_payload["uploaded_documents"] = uploaded_documents
@@ -1673,6 +1669,29 @@ def api_documents_browser():
     except Exception as exc:
         logger.exception("Document browser failed")
         return json_error(f"Failed to load document browser: {exc}", 502)
+
+
+@app.get("/api/documents/<document_id>/file")
+def api_document_file(document_id: str):
+    user_id = normalize_user_id(request.args.get("profile_id") or request.args.get("user_id") or "default")
+    try:
+        content, document = get_storage_service().read_document_bytes(user_id=user_id, document_id=document_id)
+    except FileNotFoundError:
+        return json_error("Document not found", 404)
+    except RuntimeError as exc:
+        logger.error("Document download configuration error: %s", exc)
+        return json_error(str(exc), 503)
+    except Exception as exc:
+        logger.exception("Document download failed")
+        return json_error(f"Failed to load document: {exc}", 502)
+
+    file_name = document.get("file_name") or document.get("safe_file_name") or "document"
+    return send_file(
+        io.BytesIO(content),
+        mimetype=document.get("content_type") or "application/octet-stream",
+        as_attachment=str(request.args.get("download") or "").strip().lower() in {"1", "true", "yes"},
+        download_name=file_name,
+    )
 
 
 @app.patch("/api/documents/<document_id>/bucket")

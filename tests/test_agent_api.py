@@ -193,9 +193,73 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(model_payload["attachments"][0]["document_id"], "doc-1")
         payload = response.get_json()
         self.assertEqual(payload["uploaded_documents"][0]["document_id"], "doc-1")
+        self.assertEqual(payload["artifacts"][0]["download_url"], "/api/documents/doc-1/file?profile_id=default&download=1")
         self.assertIn("Datei gespeichert", payload["answer"])
         self.assertIn("Bucket IV", payload["answer"])
         self.assertIn("automatisch gesetzt", payload["answer"])
+
+    def test_agent_chat_preserves_document_artifacts_from_agent_response(self):
+        client = app_module.app.test_client()
+        artifact = {
+            "id": "doc-1",
+            "type": "document",
+            "document_id": "doc-1",
+            "title": "rechnung.txt",
+            "file_name": "rechnung.txt",
+            "content_type": "text/plain",
+            "storage_bucket": "IV",
+            "download_url": "/api/documents/doc-1/file?profile_id=default&download=1",
+        }
+
+        with isolated_pending_action_storage(), patch.object(
+            app_module,
+            "run_agent_chat",
+            return_value={
+                "answer": "Ich habe 1 Dokument gefunden.",
+                "citations": [],
+                "tool_events": [],
+                "artifacts": [artifact],
+                "pending_actions": [],
+                "structured_actions": [],
+                "thread_id": "thread-test",
+            },
+        ):
+            response = client.post(
+                "/api/agent/chat",
+                json={
+                    "message": "Zeige mir meine IV Dokumente",
+                    "thread_id": "thread-test",
+                    "attachments": [],
+                    "client_context": {"profile_id": "default"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["artifacts"], [artifact])
+
+    def test_document_download_endpoint_uses_requested_user_scope(self):
+        client = app_module.app.test_client()
+
+        class FakeStorageService:
+            def read_document_bytes(self, *, user_id, document_id):
+                self.user_id = user_id
+                self.document_id = document_id
+                if user_id != "profile_a":
+                    raise FileNotFoundError("Document not found")
+                return b"Hallo", {
+                    "file_name": "brief.txt",
+                    "content_type": "text/plain",
+                }
+
+        fake_service = FakeStorageService()
+        with patch.object(app_module, "get_storage_service", return_value=fake_service):
+            response = client.get("/api/documents/doc-1/file?profile_id=profile_a")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"Hallo")
+        self.assertEqual(fake_service.user_id, "profile_a")
+        self.assertEqual(fake_service.document_id, "doc-1")
 
     def test_confirm_pending_action_executes_reminder_after_user_confirmation(self):
         client = app_module.app.test_client()

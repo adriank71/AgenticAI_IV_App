@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import urllib.parse
 import uuid
 import zipfile
 from datetime import date, datetime, timezone
@@ -286,6 +287,31 @@ def _extract_amount(text: str) -> str:
     return f"CHF {amount}"
 
 
+def _parse_chf_amount(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"(?:CHF|Fr\.?)?\s*([0-9][0-9'.,\s]*)\s*(?:CHF|Fr\.?)?", raw, flags=re.IGNORECASE)
+    if not match:
+        return None
+    number = re.sub(r"\s+", "", match.group(1)).replace("'", "")
+    if "," in number and "." in number:
+        if number.rfind(",") > number.rfind("."):
+            number = number.replace(".", "").replace(",", ".")
+        else:
+            number = number.replace(",", "")
+    elif "," in number:
+        number = number.replace(",", ".")
+    try:
+        return round(float(number), 2)
+    except ValueError:
+        return None
+
+
 def _extract_deadline(text: str) -> str:
     patterns = (
         r"(?:frist|bis spaetestens|bis spätestens|zahlbar bis|einzureichen bis)\s*[:\-]?\s*(\d{1,2}\.\d{1,2}\.\d{4})",
@@ -470,6 +496,63 @@ def _coerce_bucket_name(value: Any, *, allowed: list[str], fallback: str) -> str
     return fallback
 
 
+def infer_document_bucket_from_text(value: Any) -> str:
+    haystack = _normalize_keyword_text(value)
+    for bucket_name, keywords in (
+        ("TixiTaxi", ("tixitaxi", "tixi taxi", "tixi", "taxi", "fahrdienst")),
+        ("Stiftung", ("stiftung", "pro infirmis", "proinfirmis")),
+        ("Versicherung", ("versicherung", "krankenkasse", "helsana", "css", "swica", "suva")),
+        ("IV", ("iv-stelle", "invalidenversicherung", "assistenzbeitrag")),
+    ):
+        if any(keyword in haystack for keyword in keywords):
+            return bucket_name
+    if re.search(r"\biv\b", haystack):
+        return "IV"
+    return ""
+
+
+def _invoice_sum_query_filter(query: str, bucket_filter: str) -> str:
+    raw = str(query or "").strip()
+    if not raw or not bucket_filter or infer_document_bucket_from_text(raw) != bucket_filter:
+        return raw
+    normalized = _normalize_keyword_text(raw)
+    for token in (
+        "tixitaxi",
+        "tixi taxi",
+        "tixi",
+        "taxi",
+        "iv-stelle",
+        "iv",
+        "stiftung",
+        "pro infirmis",
+        "proinfirmis",
+        "versicherung",
+        "krankenkasse",
+        "rechnung",
+        "rechnungen",
+        "invoice",
+        "summe",
+        "summiere",
+        "betrag",
+        "betraege",
+        "total",
+        "alle",
+        "dokumente",
+        "dateien",
+        "aus",
+        "von",
+        "im",
+        "in",
+        "der",
+        "die",
+        "das",
+        "chf",
+    ):
+        normalized = normalized.replace(token, " ")
+    compact = " ".join(part for part in normalized.split() if len(part) > 2)
+    return compact
+
+
 def _bucket_review_fields(document: dict[str, Any]) -> dict[str, Any]:
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
     return {
@@ -524,6 +607,48 @@ def _storage_response_to_url(response: Any) -> str:
         if hasattr(response, attr):
             return str(getattr(response, attr))
     return ""
+
+
+def build_stable_document_download_url(document: dict[str, Any], *, as_attachment: bool = True) -> str:
+    document_id = urllib.parse.quote(str(document.get("document_id") or ""), safe="")
+    query = {
+        "profile_id": normalize_user_id(document.get("user_id") or "default"),
+    }
+    if as_attachment:
+        query["download"] = "1"
+    return f"/api/documents/{document_id}/file?{urllib.parse.urlencode(query)}"
+
+
+def build_chat_document_artifact(document: dict[str, Any], *, include_preview_url: bool = False) -> dict[str, Any]:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    facts = metadata.get("classification", {}).get("facts", {}) if isinstance(metadata.get("classification"), dict) else {}
+    invoice_fields = metadata.get("invoice_fields") if isinstance(metadata.get("invoice_fields"), dict) else {}
+    amount = _parse_chf_amount(invoice_fields.get("total"))
+    if amount is None:
+        amount = _parse_chf_amount(facts.get("amount") or _extract_amount(document.get("summary") or document.get("extracted_text") or ""))
+    content_type = document.get("content_type") or "application/octet-stream"
+    artifact = {
+        "id": document.get("document_id"),
+        "type": "document",
+        "document_id": document.get("document_id"),
+        "file_name": document.get("file_name") or document.get("safe_file_name") or "Dokument",
+        "title": document.get("title") or document.get("file_name") or document.get("safe_file_name") or "Dokument",
+        "content_type": content_type,
+        "content_size": document.get("content_size"),
+        "document_type": document.get("document_type"),
+        "institution": document.get("institution"),
+        "document_date": document.get("document_date"),
+        "storage_bucket": document.get("storage_bucket"),
+        "summary": document.get("summary") or "",
+        "download_url": build_stable_document_download_url(document),
+        "icon": "image" if str(content_type).startswith("image/") else "draft",
+    }
+    if amount is not None:
+        artifact["amount"] = amount
+        artifact["amount_currency"] = "CHF"
+    if include_preview_url:
+        artifact["preview_url"] = str(document.get("signed_url") or "")
+    return artifact
 
 
 class NoopDocumentEmbeddingService:
@@ -694,6 +819,23 @@ class StorageService:
             expires_in or signed_url_ttl_seconds(),
         )
         return _storage_response_to_url(response)
+
+    def build_document_download_url(self, document: dict[str, Any], *, as_attachment: bool = True) -> str:
+        return build_stable_document_download_url(document, as_attachment=as_attachment)
+
+    def build_chat_document_artifact(
+        self,
+        document: dict[str, Any],
+        *,
+        include_preview_url: bool = False,
+    ) -> dict[str, Any]:
+        artifact = build_chat_document_artifact(document, include_preview_url=False)
+        if include_preview_url:
+            try:
+                artifact["preview_url"] = self._create_signed_url(document)
+            except Exception:
+                artifact["preview_url"] = ""
+        return artifact
 
     def _build_storage_key(
         self,
@@ -996,11 +1138,20 @@ class StorageService:
         institution: str = "",
         tags: list[str] | None = None,
         folder_id: str | None = None,
+        storage_bucket: str = "",
         start_date: str | date | None = None,
         end_date: str | date | None = None,
     ) -> tuple[str, list[Any]]:
         where = ["user_id = %s"]
         params: list[Any] = [normalize_user_id(user_id)]
+        normalized_bucket = _coerce_bucket_name(
+            storage_bucket,
+            allowed=self._document_buckets,
+            fallback="",
+        )
+        if normalized_bucket:
+            where.append("storage_bucket = %s")
+            params.append(normalized_bucket)
         if year:
             where.append("COALESCE(EXTRACT(YEAR FROM document_date)::int, year) = %s")
             params.append(int(year))
@@ -1058,6 +1209,7 @@ class StorageService:
         institution: str = "",
         tags: list[str] | None = None,
         folder_id: str | None = None,
+        storage_bucket: str = "",
         start_date: str | date | None = None,
         end_date: str | date | None = None,
         limit: int = 25,
@@ -1071,6 +1223,7 @@ class StorageService:
             institution=institution,
             tags=tags,
             folder_id=folder_id,
+            storage_bucket=storage_bucket,
             start_date=start_date,
             end_date=end_date,
         )
@@ -1100,6 +1253,116 @@ class StorageService:
                 cursor.execute(f"SELECT COUNT(*) AS count FROM documents WHERE {where_sql}", tuple(params))
                 row = cursor.fetchone()
         return {"user_id": normalize_user_id(user_id), "count": int((row or {}).get("count") or 0)}
+
+    def sum_invoice_amounts(
+        self,
+        *,
+        user_id: str,
+        query: str = "",
+        storage_bucket: str = "",
+        year: int | None = None,
+        month: int | None = None,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+        institution: str = "",
+        tags: list[str] | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        bucket_filter = _coerce_bucket_name(
+            storage_bucket or infer_document_bucket_from_text(query),
+            allowed=self._document_buckets,
+            fallback="",
+        )
+        query_filter = _invoice_sum_query_filter(query, bucket_filter)
+        documents = self.list_documents(
+            user_id=user_id,
+            query=query_filter,
+            year=year,
+            month=month,
+            start_date=start_date,
+            end_date=end_date,
+            document_type="invoice",
+            institution=institution,
+            tags=tags,
+            storage_bucket=bucket_filter,
+            limit=limit,
+        )
+        seen_checksums: set[str] = set()
+        counted_documents: list[dict[str, Any]] = []
+        ignored_duplicates: list[dict[str, Any]] = []
+        documents_without_amount: list[dict[str, Any]] = []
+        possible_duplicates: list[dict[str, Any]] = []
+        fuzzy_keys: dict[tuple[str, str, float], str] = {}
+        total = 0.0
+
+        for document in documents:
+            checksum = str(document.get("checksum_sha256") or "").strip()
+            artifact = self.build_chat_document_artifact(document)
+            if checksum and checksum in seen_checksums:
+                ignored_duplicates.append(artifact)
+                continue
+            if checksum:
+                seen_checksums.add(checksum)
+
+            metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+            invoice_fields = metadata.get("invoice_fields") if isinstance(metadata.get("invoice_fields"), dict) else {}
+            facts = metadata.get("classification", {}).get("facts", {}) if isinstance(metadata.get("classification"), dict) else {}
+            amount = _parse_chf_amount(invoice_fields.get("total"))
+            amount_source = "invoice_fields.total" if amount is not None else ""
+            if amount is None:
+                amount = _parse_chf_amount(facts.get("amount"))
+                amount_source = "classification.facts.amount" if amount is not None else ""
+            if amount is None:
+                amount = _parse_chf_amount(_extract_amount(document.get("summary") or document.get("extracted_text") or ""))
+                amount_source = "document_text" if amount is not None else ""
+            if amount is None:
+                documents_without_amount.append(artifact)
+                continue
+
+            total += amount
+            counted = {**artifact, "amount": amount, "amount_currency": "CHF", "amount_source": amount_source}
+            counted_documents.append(counted)
+            fuzzy_key = (
+                str(document.get("file_name") or "").strip().lower(),
+                str(document.get("document_date") or "").strip(),
+                amount,
+            )
+            if fuzzy_key in fuzzy_keys:
+                possible_duplicates.append(
+                    {
+                        "document_id": document.get("document_id"),
+                        "possible_duplicate_of": fuzzy_keys[fuzzy_key],
+                        "reason": "Gleicher Dateiname, gleiches Datum und gleicher Betrag.",
+                    }
+                )
+            else:
+                fuzzy_keys[fuzzy_key] = str(document.get("document_id") or "")
+
+        warnings = []
+        if documents_without_amount:
+            warnings.append("Einige Rechnungen hatten keinen verwertbaren Betrag und wurden nicht summiert.")
+        if possible_duplicates:
+            warnings.append("Moegliche Fuzzy-Duplikate wurden markiert, aber nicht automatisch ausgeschlossen.")
+        if not documents:
+            warnings.append("Keine passenden Rechnungen gefunden.")
+
+        return {
+            "user_id": normalize_user_id(user_id),
+            "query": query,
+            "query_filter": query_filter,
+            "document_type": "invoice",
+            "storage_bucket": bucket_filter,
+            "matched_document_count": len(documents),
+            "counted_document_count": len(counted_documents),
+            "ignored_duplicate_count": len(ignored_duplicates),
+            "missing_amount_count": len(documents_without_amount),
+            "total_amount_chf": round(total, 2),
+            "counted_documents": counted_documents,
+            "ignored_duplicates": ignored_duplicates,
+            "documents_without_amount": documents_without_amount,
+            "possible_duplicates": possible_duplicates,
+            "uncertainty_warnings": warnings,
+        }
 
     def get_document(self, *, user_id: str, document_id: str, include_signed_url: bool = False) -> dict[str, Any] | None:
         with self._connection_factory() as connection:
@@ -1749,6 +2012,10 @@ def count_documents(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().count_documents(*args, **kwargs)
 
 
+def sum_invoice_amounts(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return get_storage_service().sum_invoice_amounts(*args, **kwargs)
+
+
 def get_document(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
     return get_storage_service().get_document(*args, **kwargs)
 
@@ -1826,6 +2093,7 @@ def prepare_document_for_agent(document: dict[str, Any]) -> dict[str, Any]:
         "storage_backend": "supabase",
         "storage_bucket": document.get("storage_bucket"),
         "storage_key": document.get("storage_key"),
+        "download_url": build_stable_document_download_url(document),
         "suggested_bucket": document.get("suggested_bucket"),
         "bucket_reason": document.get("bucket_reason"),
         "bucket_confidence": document.get("bucket_confidence"),

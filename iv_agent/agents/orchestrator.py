@@ -362,8 +362,11 @@ def _run_agents_sdk(
             normalize_user_id,
         )
         from ..services.storage_service import (
+            build_chat_document_artifact as service_build_chat_document_artifact,
+            infer_document_bucket_from_text,
             list_documents as service_list_documents,
             search_documents as service_search_documents,
+            sum_invoice_amounts as service_sum_invoice_amounts,
         )
     except ImportError:
         from agents.calendar_agent import build_calendar_agent
@@ -375,8 +378,11 @@ def _run_agents_sdk(
             normalize_user_id,
         )
         from services.storage_service import (
+            build_chat_document_artifact as service_build_chat_document_artifact,
+            infer_document_bucket_from_text,
             list_documents as service_list_documents,
             search_documents as service_search_documents,
+            sum_invoice_amounts as service_sum_invoice_amounts,
         )
 
     if str(os.environ.get("IV_AGENT_ENABLE_OPENAI_TRACING", "")).strip().lower() not in {"1", "true", "yes"}:
@@ -394,6 +400,24 @@ def _run_agents_sdk(
     client_context = request_payload.get("client_context", {}) if isinstance(request_payload.get("client_context"), dict) else {}
     context_user_id = normalize_user_id(client_context.get("profile_id") or client_context.get("user_id") or "default")
     context_timezone = normalize_timezone(client_context.get("timezone"))
+
+    def _collect_document_artifacts(documents: Any) -> None:
+        existing_ids = {
+            str(item.get("document_id") or item.get("id"))
+            for item in collected_artifacts
+            if isinstance(item, dict)
+        }
+        for document in documents if isinstance(documents, list) else [documents]:
+            if not isinstance(document, dict) or not document.get("document_id"):
+                continue
+            document_id = str(document.get("document_id"))
+            if document_id in existing_ids:
+                continue
+            artifact = dict(document) if document.get("download_url") else service_build_chat_document_artifact(document)
+            artifact.setdefault("id", document_id)
+            artifact.setdefault("type", "document")
+            collected_artifacts.append(artifact)
+            existing_ids.add(document_id)
 
     @function_tool
     def draft_pending_action(action_type: str, title: str, payload_json: str) -> str:
@@ -463,9 +487,10 @@ def _run_agents_sdk(
         institution: str = "",
         tags_json: str = "[]",
         folder_id: str = "",
+        storage_bucket: str = "",
         limit: int = 25,
     ) -> str:
-        """Read stored documents for mixed calendar/document questions."""
+        """Read stored documents for mixed calendar/document questions with optional storage bucket."""
         tool_events.append(_tool_event("list_user_documents", "started", "Reading document metadata"))
         documents = service_list_documents(
             user_id=context_user_id,
@@ -477,8 +502,10 @@ def _run_agents_sdk(
             institution=institution,
             tags=_json_list(tags_json),
             folder_id=folder_id or None,
+            storage_bucket=storage_bucket or infer_document_bucket_from_text(institution),
             limit=limit,
         )
+        _collect_document_artifacts(documents)
         tool_events.append(_tool_event("list_user_documents", "completed", "Document metadata read"))
         return json.dumps(make_json_safe({"documents": documents}), ensure_ascii=True)
 
@@ -495,9 +522,10 @@ def _run_agents_sdk(
         institution: str = "",
         tags_json: str = "[]",
         folder_id: str = "",
+        storage_bucket: str = "",
         limit: int = 10,
     ) -> str:
-        """Search stored documents for mixed calendar/document questions."""
+        """Search stored documents for mixed calendar/document questions with optional storage bucket."""
         tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
         documents = service_search_documents(
             user_id=context_user_id,
@@ -509,13 +537,48 @@ def _run_agents_sdk(
             document_type=document_type,
             institution=institution,
             tags=_json_list(tags_json),
+            storage_bucket=storage_bucket or infer_document_bucket_from_text(query),
             folder_id=folder_id or None,
             limit=limit,
         )
+        _collect_document_artifacts(documents)
         tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
         return json.dumps(make_json_safe({"query": query, "documents": documents}), ensure_ascii=True)
 
     orchestrator_tools.append(search_user_documents)
+
+    @function_tool
+    def sum_user_invoice_amounts(
+        query: str = "",
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        storage_bucket: str = "",
+        limit: int = 100,
+    ) -> str:
+        """Sum stored invoices after applying document filters; exact duplicate checksums are ignored."""
+        tool_events.append(_tool_event("sum_user_invoice_amounts", "started", "Summing invoice amounts"))
+        payload = service_sum_invoice_amounts(
+            user_id=context_user_id,
+            query=query,
+            year=_optional_int(year),
+            month=_optional_int(month),
+            start_date=start_date or None,
+            end_date=end_date or None,
+            institution=institution,
+            tags=_json_list(tags_json),
+            storage_bucket=storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
+            limit=limit,
+        )
+        _collect_document_artifacts(payload.get("counted_documents") or [])
+        _collect_document_artifacts(payload.get("documents_without_amount") or [])
+        tool_events.append(_tool_event("sum_user_invoice_amounts", "completed", "Invoice sum completed"))
+        return json.dumps(make_json_safe(payload), ensure_ascii=True)
+
+    orchestrator_tools.append(sum_user_invoice_amounts)
 
     now_value = str(client_context.get("now") or request_payload.get("timestamp") or utc_timestamp())
     current_month = str(client_context.get("current_month") or "").strip()
@@ -538,6 +601,7 @@ def _run_agents_sdk(
         tool_events=tool_events,
         drafted_actions=drafted_actions,
         structured_actions=structured_actions,
+        collected_artifacts=collected_artifacts,
         register_pending_actions=register_pending_actions,
         make_json_safe=make_json_safe,
         tool_event_factory=_tool_event,
@@ -577,6 +641,9 @@ def _run_agents_sdk(
         "or hand off to a specialized agent. "
         "For every calendar, appointment, Termin, Therapie, scheduling, counting, or availability request, hand off to CalendarAgent. "
         "For upload, delete, move, metadata, folder, Datei speichern, Dokument loeschen, or document organization requests, hand off to StorageAgent. "
+        "For document retrieval requests ('gib mir alle Dokumente', 'zeige Rechnungen', 'download Datei') always read storage first and ensure document artifacts are produced. "
+        "For invoice total or sum requests, use sum_user_invoice_amounts or hand off to StorageAgent so the sum is based on filtered storage documents and checksum duplicate removal. "
+        "When the user mentions IV, TixiTaxi, Stiftung, or Versicherung, use it as the storage_bucket filter for storage reads. "
         "For 'Was bedeutet...', IV questions, deadlines, Fristen, document understanding, comparisons, action items, broader knowledge, "
         "or 'frag den IV Assistant' requests, hand off to KnowledgeAgent. "
         "If the request combines calendar and documents, use local read tools from both domains before answering or hand off to the best specialized agent. "
