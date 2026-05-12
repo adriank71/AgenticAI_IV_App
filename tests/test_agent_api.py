@@ -195,7 +195,7 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(payload["uploaded_documents"][0]["document_id"], "doc-1")
         self.assertIn("Datei gespeichert", payload["answer"])
         self.assertIn("Bucket IV", payload["answer"])
-        self.assertIn("Bitte bestaetige", payload["answer"])
+        self.assertIn("automatisch gesetzt", payload["answer"])
 
     def test_confirm_pending_action_executes_reminder_after_user_confirmation(self):
         client = app_module.app.test_client()

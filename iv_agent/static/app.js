@@ -154,6 +154,7 @@ const state = {
   documentsBrowser: null,
   activeStorageBucket: "",
   lastAutoOpenedPanel: "",
+  recentDocumentIds: {},
 };
 
 const elements = {
@@ -3723,6 +3724,7 @@ async function submitAdviserPrompt(rawPrompt) {
       clearChatAttachments("Zusammenfassung fertig.");
     }
     if (Array.isArray(data.uploaded_documents) && data.uploaded_documents.length) {
+      markRecentDocuments(data.uploaded_documents.map((document) => document && document.document_id));
       await refreshDocumentBucketBoard({ force: true }).catch(() => {});
     }
     const pendingActions = Array.isArray(data.pending_actions)
@@ -4638,6 +4640,7 @@ function initInvoices() {
     setUploadStatus(`Uploading ${files.length} document${files.length === 1 ? "" : "s"}...`);
 
     try {
+      const uploadedDocumentIds = [];
       for (const file of files) {
         const imageBase64 = await fileToBase64(file);
         const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/capture`, {
@@ -4653,9 +4656,13 @@ function initInvoices() {
         if (!response.ok) {
           throw new Error(payload.error || `Upload failed for ${file.name}`);
         }
+        if (payload && payload.capture && payload.capture.invoice_id) {
+          uploadedDocumentIds.push(payload.capture.invoice_id);
+        }
       }
 
-      setUploadStatus("Upload saved to document database.", "success");
+      markRecentDocuments(uploadedDocumentIds);
+      setUploadStatus("Upload gespeichert und automatisch zugeordnet.", "success");
       await refreshDocumentBucketBoard({ force: true });
     } catch (error) {
       setUploadStatus(error.message || "Upload failed.", "error");
@@ -4729,6 +4736,38 @@ function getDocumentBucketColumns() {
   return documentBucketOrder.slice();
 }
 
+function pruneRecentDocumentIds(maxAgeMs = 1000 * 60 * 30) {
+  const now = Date.now();
+  Object.keys(state.recentDocumentIds || {}).forEach((documentId) => {
+    if ((now - Number(state.recentDocumentIds[documentId] || 0)) > maxAgeMs) {
+      delete state.recentDocumentIds[documentId];
+    }
+  });
+}
+
+function markRecentDocuments(documentIds) {
+  pruneRecentDocumentIds();
+  (Array.isArray(documentIds) ? documentIds : []).forEach((documentId) => {
+    const safeId = String(documentId || "").trim();
+    if (safeId) {
+      state.recentDocumentIds[safeId] = Date.now();
+    }
+  });
+}
+
+function clearRecentDocument(documentId) {
+  const safeId = String(documentId || "").trim();
+  if (safeId && state.recentDocumentIds[safeId]) {
+    delete state.recentDocumentIds[safeId];
+  }
+}
+
+function isRecentDocument(document) {
+  pruneRecentDocumentIds();
+  const documentId = String(document?.document_id || "").trim();
+  return Boolean(documentId && state.recentDocumentIds[documentId] && !document?.bucket_confirmed);
+}
+
 function snapshotDocumentsBrowser() {
   return state.documentsBrowser ? JSON.parse(JSON.stringify(state.documentsBrowser)) : null;
 }
@@ -4769,11 +4808,13 @@ function applyDocumentBucketOptimistic(documentId, targetBucket) {
   }
   const buckets = Array.isArray(state.documentsBrowser.buckets) ? state.documentsBrowser.buckets : [];
   let movedDocument = null;
+  let sourceBucket = "";
   buckets.forEach((bucket) => {
     const docs = Array.isArray(bucket.documents) ? bucket.documents : [];
     const index = docs.findIndex((item) => item.document_id === documentId);
     if (index >= 0) {
       movedDocument = { ...docs[index] };
+      sourceBucket = bucket.id || bucket.name || "";
       docs.splice(index, 1);
       bucket.documents = docs;
     }
@@ -4786,6 +4827,9 @@ function applyDocumentBucketOptimistic(documentId, targetBucket) {
   movedDocument.bucket_confirmed = true;
   movedDocument.bucket_confirmed_at = new Date().toISOString();
   movedDocument.bucket_reason = movedDocument.bucket_reason || `Bucket ${targetBucket} wurde manuell bestaetigt.`;
+  if (sourceBucket === targetBucket) {
+    clearRecentDocument(documentId);
+  }
   const target = buckets.find((bucket) => bucket.id === targetBucket);
   if (target) {
     target.documents = [movedDocument, ...(Array.isArray(target.documents) ? target.documents : [])];
@@ -4831,7 +4875,9 @@ function renderDocumentBucketBoard() {
     elements.documentsTotalLabel.textContent = totalCount === 1 ? "document" : "documents";
   }
   if (elements.documentBrowserStatus) {
-    elements.documentBrowserStatus.textContent = `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} offen zur Pruefung.`;
+    elements.documentBrowserStatus.textContent = totalUnconfirmed
+      ? `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} noch nicht bestaetigt.`
+      : `${buckets.length} Buckets, ${totalCount} Dokumente.`;
     elements.documentBrowserStatus.dataset.variant = "";
   }
 
@@ -4870,38 +4916,22 @@ function renderDocumentBucketBoard() {
     });
   });
 
-  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-select]").forEach((select) => {
-    const applyButton = select.closest("[data-document-card]")?.querySelector("[data-document-bucket-apply]");
-    const syncButtonLabel = () => {
-      if (!applyButton) {
-        return;
-      }
-      const currentBucket = select.dataset.currentBucket || "";
-      applyButton.textContent = select.value === currentBucket ? "Bestaetigen" : "Verschieben";
-    };
-    select.addEventListener("change", syncButtonLabel);
-    syncButtonLabel();
-  });
-
-  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-apply]").forEach((button) => {
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-confirm]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const card = button.closest("[data-document-card]");
-      const select = card?.querySelector("[data-document-bucket-select]");
-      const documentId = card?.dataset.documentId || "";
-      if (!select || !documentId || !select.value) {
+      const documentId = button.dataset.documentBucketConfirm || "";
+      const targetBucket = button.dataset.documentBucket || "";
+      if (!documentId || !targetBucket) {
         return;
       }
       button.disabled = true;
       try {
         await saveDocumentBucketChange(
           documentId,
-          select.value,
-          select.value === (select.dataset.currentBucket || "")
-            ? `Bucket ${select.value} wurde bestaetigt.`
-            : `Bucket manuell auf ${select.value} gesetzt.`
+          targetBucket,
+          `Bucket ${targetBucket} wurde bestaetigt.`
         );
       } catch (error) {
-        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+        showError(error.message || "Bestaetigung fehlgeschlagen.");
       } finally {
         button.disabled = false;
       }
@@ -4967,6 +4997,135 @@ function renderDocumentBucketCard(document) {
           </select>
           <button type="button" class="secondary-button document-bucket-apply" data-document-bucket-apply>Verschieben</button>
         </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderDocumentBucketBoard() {
+  const data = state.documentsBrowser || {};
+  const buckets = Array.isArray(data.buckets) ? data.buckets : [];
+  const bucketMap = new Map(buckets.map((bucket) => [bucket.id, bucket]));
+  const totalCount = Number(data.total_count || 0);
+  const totalUnconfirmed = buckets.reduce((total, bucket) => total + Number(bucket.unconfirmed_count || 0), 0);
+
+  if (elements.documentsTotalCount) {
+    elements.documentsTotalCount.textContent = String(totalCount);
+  }
+  if (elements.documentsTotalLabel) {
+    elements.documentsTotalLabel.textContent = totalCount === 1 ? "document" : "documents";
+  }
+  if (elements.documentBrowserStatus) {
+    elements.documentBrowserStatus.textContent = totalUnconfirmed
+      ? `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} noch nicht bestaetigt.`
+      : `${buckets.length} Buckets, ${totalCount} Dokumente.`;
+    elements.documentBrowserStatus.dataset.variant = "";
+  }
+
+  elements.documentBucketBoard.innerHTML = getDocumentBucketColumns()
+    .map((bucketName) => renderDocumentBucketColumn(bucketMap.get(bucketName) || { id: bucketName, name: bucketName, documents: [], count: 0, confirmed_count: 0, unconfirmed_count: 0 }))
+    .join("");
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-column]").forEach((column) => {
+    const targetBucket = column.dataset.documentBucketColumn || "";
+    column.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      column.classList.add("is-drop-target");
+    });
+    column.addEventListener("dragleave", () => column.classList.remove("is-drop-target"));
+    column.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      column.classList.remove("is-drop-target");
+      const documentId = event.dataTransfer.getData("text/document-id");
+      const sourceBucket = event.dataTransfer.getData("text/document-bucket");
+      if (!documentId || !targetBucket || sourceBucket === targetBucket) {
+        return;
+      }
+      try {
+        await saveDocumentBucketChange(documentId, targetBucket, `Per Drag-and-drop nach ${targetBucket} verschoben.`);
+      } catch (error) {
+        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+      }
+    });
+  });
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-card]").forEach((card) => {
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer.setData("text/document-id", card.dataset.documentId || "");
+      event.dataTransfer.setData("text/document-bucket", card.dataset.documentBucket || "");
+      event.dataTransfer.effectAllowed = "move";
+    });
+  });
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const documentId = button.dataset.documentBucketConfirm || "";
+      const targetBucket = button.dataset.documentBucket || "";
+      if (!documentId || !targetBucket) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        await saveDocumentBucketChange(documentId, targetBucket, `Bucket ${targetBucket} wurde bestaetigt.`);
+      } catch (error) {
+        showError(error.message || "Bestaetigung fehlgeschlagen.");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+function renderDocumentBucketColumn(bucket) {
+  const documents = Array.isArray(bucket.documents) ? bucket.documents : [];
+  const cards = documents.length
+    ? documents.map((document) => renderDocumentBucketCard(document)).join("")
+    : `<div class="document-bucket-empty">Noch keine Dokumente in diesem Bucket.</div>`;
+  return `
+    <section class="document-bucket-column" data-document-bucket-column="${escapeHtml(bucket.id || bucket.name || "")}">
+      <div class="document-bucket-head">
+        <div>
+          <h3>${escapeHtml(bucket.name || bucket.id || "Bucket")}</h3>
+          <p>${Number(bucket.count || 0)} Dokumente</p>
+        </div>
+        <span class="document-count">${Number(bucket.count || 0)}</span>
+      </div>
+      <div class="document-bucket-cards">${cards}</div>
+    </section>
+  `;
+}
+
+function renderDocumentBucketCard(document) {
+  const fileUrl = document.signed_url || "#";
+  const iconName = String(document.content_type || "").startsWith("application/pdf") ? "picture_as_pdf" : "draft";
+  const recentClass = isRecentDocument(document) ? " is-recent" : "";
+  const createdLabel = formatInvoiceCaptureTime(document.created_at);
+  const title = document.file_name || "Dokument";
+  const hintParts = [];
+  if (document.document_type) {
+    hintParts.push(String(document.document_type));
+  }
+  if (document.institution) {
+    hintParts.push(String(document.institution));
+  }
+  const hintLabel = hintParts.join(" · ") || "Klicken zum Oeffnen";
+  const confirmControl = document.bucket_confirmed
+    ? `<span class="document-card-state is-confirmed" aria-label="Bucket bestaetigt" title="Bucket bestaetigt"><span class="material-symbols-outlined">check</span></span>`
+    : `<button type="button" class="document-card-confirm" data-document-bucket-confirm="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" aria-label="Bucket bestaetigen" title="Bucket bestaetigen"><span class="material-symbols-outlined">check</span></button>`;
+  return `
+    <article class="document-bucket-card${recentClass}" draggable="true" data-document-card data-document-id="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" title="${escapeHtml(document.bucket_reason || hintLabel)}">
+      <a class="document-card-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">
+        <span class="document-card-icon material-symbols-outlined">${iconName}</span>
+        <span class="document-card-copy">
+          <span class="document-card-title">${escapeHtml(title)}</span>
+          <span class="document-card-subline">${escapeHtml(createdLabel)}</span>
+          <span class="document-card-subline is-secondary">${escapeHtml(hintLabel)}</span>
+        </span>
+      </a>
+      <div class="document-card-side">
+        ${confirmControl}
       </div>
     </article>
   `;

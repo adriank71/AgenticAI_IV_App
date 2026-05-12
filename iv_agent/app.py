@@ -752,7 +752,7 @@ def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: di
         if bucket_confirmed:
             upload_lines.append(f"  Bucket {bucket_name} ist bestaetigt.")
         else:
-            upload_lines.append(f"  Bitte bestaetige Bucket {bucket_name} oder korrigiere ihn.")
+            upload_lines.append(f"  Bucket {bucket_name} wurde automatisch gesetzt. Du kannst ihn in der Storage-Leiste per Haken bestaetigen oder per Drag-and-drop verschieben.")
     if upload_lines:
         upload_note = "Datei gespeichert. Dokument wird analysiert.\n" + "\n".join(upload_lines[:16])
         existing_answer = str(response_payload.get("answer") or "").rstrip()
