@@ -4614,6 +4614,8 @@ body {
   border-left: 1px solid #dfe1e8;
   padding: 0;
   background: #ffffff;
+  height: calc(100vh - 64px);
+  min-height: 0;
 }
 
 .adviser-shell {
@@ -5224,6 +5226,14 @@ body {
   scrollbar-color: #aeb4c1 transparent;
   min-height: 0;
   scrollbar-gutter: stable;
+}
+
+#view-reports.app-view.is-panel-active {
+  height: calc(100vh - 64px);
+}
+
+#view-reports .reports-card {
+  min-height: 100%;
 }
 
 #view-calendar .fc .fc-scroller,
