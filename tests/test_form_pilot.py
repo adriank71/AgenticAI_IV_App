@@ -16,9 +16,11 @@ from iv_agent.form_pilot import (
     build_form_payload,
     build_rechnung_payload,
     build_stundenblatt_payload,
+    build_transportkosten_payload,
     fill_assistenz_dual_form_auto,
     fill_assistenz_form_auto,
     fill_assistenz_form_auto_bytes,
+    fill_transportkosten_form_auto_bytes,
     get_assistant_daily_hours,
     get_month_data,
     load_profile,
@@ -379,8 +381,14 @@ class FormPilotTests(unittest.TestCase):
             "2026": {},
             "Pitaqi DritaRow1": {},
             "Beschreibung der erbrachten Leistung z B administrative Unterstützung Bitte auswählen": {},
-            "Anz Std Min in 1100h Bitte auswählen": {},
-            "CHF 3500 Bitte auswählen": {},
+            "Anz Std Min in 1100h Bitte auswählen1": {},
+            "Anz Std Min in 1100h Bitte auswählen2": {},
+            "Anz Std Min in 1100h Bitte auswählen3": {},
+            "Anz Std Min in 1100h Bitte auswählen4": {},
+            "CHF 3500 Bitte auswählen1": {},
+            "CHF 3500 Bitte auswählen2": {},
+            "CHF 3500 Bitte auswählen3": {},
+            "CHF 3500 Bitte auswählen4": {},
             "Beilagen Bestätigung der bezahlten Rechnung inkl Unterschrift des Leistungs erbringers Bitte auswählen": {},
             "Bemerkungen": {},
             "Text2": {},
@@ -399,6 +407,12 @@ class FormPilotTests(unittest.TestCase):
                 total_hours=4.5,
                 template_fields=template_fields,
                 invoice_date=date(2026, 4, 12),
+                assistant_breakdown={
+                    "koerperpflege": 1.0,
+                    "mahlzeiten_eingeben": 1.0,
+                    "mahlzeiten_zubereiten": 1.5,
+                    "begleitung_therapie": 1.0,
+                },
             )
 
         self.assertEqual(payload["Text1"], "Rechnungsdatum: 12.04.2026")
@@ -408,11 +422,78 @@ class FormPilotTests(unittest.TestCase):
             payload["Beschreibung der erbrachten Leistung z B administrative Unterstützung Bitte auswählen"],
             "Assistenzleistung Wohnen",
         )
-        self.assertEqual(payload["Anz Std Min in 1100h Bitte auswählen"], "4.50")
-        self.assertEqual(payload["CHF 3500 Bitte auswählen"], "CHF 157.50")
+        self.assertNotIn("Anz Std Min in 1100h Bitte auswählen1", payload)
+        self.assertEqual(payload["CHF 3500 Bitte auswählen1"], "CHF 35.00")
+        self.assertEqual(payload["Anz Std Min in 1100h Bitte auswählen2"], "1.00")
+        self.assertEqual(payload["CHF 3500 Bitte auswählen2"], "CHF 35.00")
+        self.assertEqual(payload["Anz Std Min in 1100h Bitte auswählen3"], "2.50")
+        self.assertEqual(payload["CHF 3500 Bitte auswählen3"], "CHF 87.50")
+        self.assertEqual(payload["Anz Std Min in 1100h Bitte auswählen4"], "1.00")
+        self.assertEqual(payload["CHF 3500 Bitte auswählen4"], "CHF 35.00")
         self.assertEqual(payload["Text2"], "157.50")
         self.assertIn("Noah Meier", payload["Bemerkungen"])
         self.assertIn("24.09.1997", payload["Bemerkungen"])
+
+    def test_transportkosten_payload_and_pdf_fill_maps_transport_rows(self):
+        profile_payload = {
+            "insured_name": "Max Muster",
+            "ahv_number": "756.1234.5678.97",
+            "street": "Musterstrasse 1",
+            "plz_ort": "8000 Zuerich",
+            "iban": "CH93 0076 2011 6238 5295 7",
+            "mitteilungsnummer": "MT-000001",
+        }
+        events = [
+            {
+                "date": "2026-04-03",
+                "category": "transport",
+                "title": "Praxis",
+                "transport_mode": "bus_bahn",
+                "transport_kilometers": 10,
+                "transport_address": "Praxis A, Hauptstrasse 1, Zuerich",
+            },
+            {
+                "date": "2026-04-04",
+                "category": "transport",
+                "title": "Klinik",
+                "transport_mode": "taxi",
+                "transport_kilometers": 12.5,
+                "transport_address": "Klinik B, Seestrasse 2, Luzern",
+            },
+        ]
+
+        payload = build_transportkosten_payload(events, profile_payload)
+
+        self.assertEqual(payload["Name"], "Muster")
+        self.assertEqual(payload["Vorname"], "Max")
+        self.assertEqual(payload["VersichertenNr 756"], "756.1234.5678.97")
+        self.assertEqual(payload["Datumvon"], "03.04.2026")
+        self.assertEqual(payload["Datum"], "03.04.2026")
+        self.assertEqual(payload["Datum_2von"], "04.04.2026")
+        self.assertEqual(payload["Datum_2"], "04.04.2026")
+        self.assertEqual(payload["Name und Adresse med BehandlungsortRow1"], "Praxis A, Hauptstrasse 1, Zuerich")
+        self.assertEqual(payload["Name und Adresse med BehandlungsortRow2"], "Klinik B, Seestrasse 2, Luzern")
+        self.assertEqual(payload["Kilometer retourRow1"], "10.00")
+        self.assertEqual(payload["Kilometer retourRow2"], "12.50")
+        self.assertEqual(payload["Betrag in CHFRow1"], "7.00")
+        self.assertEqual(payload["Betrag in CHFRow2"], "8.75")
+        self.assertEqual(payload["Betrag Total"], "15.75")
+        self.assertEqual(payload["Transportmittel1"], "/Bus")
+        self.assertEqual(payload["Transportmittel2"], "/Taxi")
+
+        with patch("iv_agent.form_pilot.fill_form_to_bytes", return_value=b"%PDF-1.4\n") as fill_mock:
+            output = fill_transportkosten_form_auto_bytes(
+                template_pdf_path="transport.pdf",
+                transport_events=events,
+                profile_data=profile_payload,
+            )
+
+        self.assertEqual(output, b"%PDF-1.4\n")
+        fill_mock.assert_called_once()
+        filled_payload = fill_mock.call_args.args[1]
+        self.assertEqual(filled_payload["Betrag Total"], "15.75")
+        self.assertEqual(filled_payload["Transportmittel1"], "/Bus")
+        self.assertEqual(filled_payload["Transportmittel2"], "/Taxi")
 
     def test_fill_assistenz_dual_form_auto_merges_intermediate_pdfs(self):
         with workspace_tempdir() as temp_dir:

@@ -489,6 +489,10 @@ class CalendarApiTests(unittest.TestCase):
             app_module, "materialize_binary_reference", side_effect=passthrough_materialized_path
         ), patch.object(
             app_module, "fill_assistenz_form_auto_bytes", return_value=b"%PDF-1.4\n"
+        ), patch.object(
+            app_module, "resolve_transportkosten_template_path", return_value="transport.pdf"
+        ), patch.object(
+            app_module, "fill_transportkosten_form_auto_bytes", return_value=b"%PDF-1.4\n"
         ), patch.object(app_module, "get_events", return_value=[]), patch.object(
             app_module, "get_assistant_hours_for_events", return_value=4.5
         ), patch.object(
@@ -511,11 +515,74 @@ class CalendarApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(len(payload["generated_reports"]), 1)
+        self.assertEqual(len(payload["generated_reports"]), 2)
         self.assertEqual(payload["generated_reports"][0]["type"], "assistenzbeitrag")
         self.assertEqual(payload["generated_reports"][0]["report_id"], "rpt-1")
-        self.assertEqual(len(payload["unavailable_reports"]), 1)
-        self.assertEqual(payload["unavailable_reports"][0]["type"], "transportkostenabrechnung")
+        self.assertEqual(payload["generated_reports"][1]["type"], "transportkostenabrechnung")
+        self.assertEqual(payload["generated_reports"][1]["report_id"], "rpt-2")
+        self.assertEqual(payload["unavailable_reports"], [])
+
+    def test_generate_transportkosten_report_uses_transport_template_and_first_seven_events(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+        transport_events = [
+            {
+                "date": f"2026-04-{day:02d}",
+                "time": "09:00",
+                "category": "transport",
+                "title": f"Transport {day}",
+                "transport_mode": "privatauto",
+                "transport_kilometers": float(day),
+                "transport_address": f"Clinic {day}",
+            }
+            for day in range(8, 0, -1)
+        ]
+        events = [
+            {
+                "date": "2026-04-01",
+                "time": "08:00",
+                "category": "assistant",
+                "title": "Support",
+                "transport_kilometers": 99.0,
+            },
+            *transport_events,
+        ]
+
+        with patch.object(
+            app_module,
+            "load_profile_payload",
+            return_value={"insured_name": "Max Muster", "ahv_number": "1", "street": "Street", "plz_ort": "City", "iban": "IBAN", "mitteilungsnummer": "REF"},
+        ), patch.object(
+            app_module, "get_template_store", return_value=FakeTemplateStore({"transportkosten"})
+        ), patch.object(
+            app_module, "get_report_store", return_value=fake_report_store
+        ), patch.object(
+            app_module, "get_events", return_value=events
+        ), patch.object(
+            app_module, "fill_transportkosten_form_auto_bytes", return_value=b"%PDF-1.4\n"
+        ) as transport_fill_mock:
+            response = client.post(
+                "/api/reports/generate",
+                json={
+                    "month": "2026-04",
+                    "report_types": ["transportkostenabrechnung"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(len(payload["generated_reports"]), 1)
+        report = payload["generated_reports"][0]
+        self.assertEqual(report["type"], "transportkostenabrechnung")
+        self.assertEqual(report["file_name"], "Transportkostenabrechnung_2026-04.pdf")
+        self.assertEqual(report["transport_entries"], 7)
+        self.assertEqual(report["transport_entries_available"], 8)
+        self.assertEqual(report["transport_kilometers"], "28.00")
+        self.assertEqual(report["gross_amount_chf"], "19.60")
+        self.assertEqual(payload["unavailable_reports"], [])
+        selected_events = transport_fill_mock.call_args.kwargs["transport_events"]
+        self.assertEqual([event["date"] for event in selected_events], [f"2026-04-{day:02d}" for day in range(1, 8)])
+        self.assertEqual(fake_report_store.saved_reports[0]["metadata"]["transport_entries_truncated"], 1)
 
     def test_generate_report_prefers_dual_template_workflow(self):
         client = app_module.app.test_client()

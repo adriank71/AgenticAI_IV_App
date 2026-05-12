@@ -723,7 +723,8 @@ class StorageTests(unittest.TestCase):
 
     def test_supabase_template_store_uses_template_bucket_and_keys(self):
         client = FakeSupabaseClient()
-        store = SupabaseStorageTemplateStore(client=client, bucket="iv-agent-templates")
+        with patch.dict(os.environ, {}, clear=True):
+            store = SupabaseStorageTemplateStore(client=client)
 
         saved = store.upsert_template(
             template_key="transportkosten",
@@ -734,12 +735,12 @@ class StorageTests(unittest.TestCase):
         content, content_type = store.read_template_bytes("transportkosten")
 
         self.assertEqual(saved["storage_backend"], "supabase")
-        self.assertEqual(saved["storage_key"], "transportkosten/AK_Formular_EL_Transportkosten.pdf")
-        self.assertEqual(template["storage_key"], "transportkosten/AK_Formular_EL_Transportkosten.pdf")
+        self.assertEqual(saved["storage_key"], "AK_Formular_EL_Transportkosten.pdf")
+        self.assertEqual(template["storage_key"], "AK_Formular_EL_Transportkosten.pdf")
         self.assertEqual(content, b"%PDF-transport\n")
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(
-            client.objects[("iv-agent-templates", "transportkosten/AK_Formular_EL_Transportkosten.pdf")]["options"]["upsert"],
+            client.objects[("report-template", "AK_Formular_EL_Transportkosten.pdf")]["options"]["upsert"],
             "true",
         )
 

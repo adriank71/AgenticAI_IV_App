@@ -22,10 +22,17 @@ logger = logging.getLogger(__name__)
 
 STANDARD_RATE = 35.30
 DUAL_REPORT_HOURLY_RATE = 35.00
+TRANSPORT_KILOMETER_RATE = 0.70
+TRANSPORTKOSTEN_MAX_ROWS = 7
 AHV_RATE = 0.053
 ALV_RATE = 0.011
 ASSISTENZ_SERVICE_PROVIDER = "Pitaqi Drita"
 ASSISTENZ_SERVICE_DESCRIPTION = "Assistenzleistung Wohnen"
+RECHNUNG_DETAIL_ROWS = (
+    ("koerperpflege", ("koerperpflege",)),
+    ("mahlzeiten", ("mahlzeiten_eingeben", "mahlzeiten_zubereiten")),
+    ("begleitung_therapie", ("begleitung_therapie",)),
+)
 
 PROFILE_REQUIRED_FIELDS = (
     "insured_name",
@@ -35,6 +42,12 @@ PROFILE_REQUIRED_FIELDS = (
     "iban",
     "mitteilungsnummer",
 )
+TRANSPORT_MODE_PDF_VALUES = {
+    "bus_bahn": "/Bus",
+    "privatauto": "/Auto",
+    "taxi": "/Taxi",
+    "fahrdienst": "/Fahrdienst",
+}
 
 
 def _parse_month(month: str) -> datetime:
@@ -65,6 +78,18 @@ def _format_date(value: date) -> str:
     return value.strftime("%d.%m.%Y")
 
 
+def _format_event_date(raw_value: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    for pattern in ("%Y-%m-%d", "%d.%m.%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, pattern).strftime("%d.%m.%Y")
+        except ValueError:
+            continue
+    return value
+
+
 def format_swiss_year(month: str) -> str:
     return str(_parse_month(month).year)
 
@@ -79,6 +104,15 @@ def _compose_plz_ort(zip_code: str, city: str) -> str:
     zip_clean = str(zip_code or "").strip()
     city_clean = str(city or "").strip()
     return " ".join(part for part in (zip_clean, city_clean) if part).strip()
+
+
+def _split_insured_name(full_name: str) -> tuple[str, str]:
+    parts = [part for part in str(full_name or "").strip().split() if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[-1], " ".join(parts[:-1])
 
 
 def _normalize_personal_data(source: dict) -> dict:
@@ -526,6 +560,8 @@ def _resolve_rechnung_layout(template_fields: Optional[dict]) -> dict:
         "description_field": sorted(description_fields)[0][1] if description_fields else None,
         "hours_field": sorted(hours_fields)[0][1] if hours_fields else None,
         "amount_field": sorted(amount_fields)[0][1] if amount_fields else None,
+        "hours_fields": [field_name for _, field_name in sorted(hours_fields)],
+        "amount_fields": [field_name for _, field_name in sorted(amount_fields)],
         "attachment_field": sorted(attachment_fields)[0][1] if attachment_fields else None,
         "month_field": month_field,
         "remarks_field": remarks_field,
@@ -534,24 +570,47 @@ def _resolve_rechnung_layout(template_fields: Optional[dict]) -> dict:
     }
 
 
+def _assistant_breakdown_detail_rows(assistant_breakdown: Optional[dict], total_hours: float) -> list[dict]:
+    breakdown = assistant_breakdown if isinstance(assistant_breakdown, dict) else {}
+    if not breakdown:
+        breakdown = {"koerperpflege": float(total_hours or 0.0)}
+
+    rows = []
+    for row_key, fields in RECHNUNG_DETAIL_ROWS:
+        hours = round(sum(float(breakdown.get(field, 0.0) or 0.0) for field in fields), 2)
+        amount = round(hours * DUAL_REPORT_HOURLY_RATE, 2)
+        rows.append({"key": row_key, "hours": hours, "amount": amount})
+    return rows
+
+
+def _rechnung_detail_fields(fields: list[str]) -> list[str]:
+    if len(fields) >= len(RECHNUNG_DETAIL_ROWS) + 1:
+        return fields[1 : len(RECHNUNG_DETAIL_ROWS) + 1]
+    return fields[: len(RECHNUNG_DETAIL_ROWS)]
+
+
 def build_rechnung_payload(
     month: str,
     personal_data: dict,
     total_hours: float,
     template_fields: Optional[dict] = None,
     invoice_date: Optional[date] = None,
+    assistant_breakdown: Optional[dict] = None,
 ) -> dict:
     if invoice_date is None:
         invoice_date = date.today()
 
     layout = _resolve_rechnung_layout(template_fields)
-    total_amount = round(float(total_hours) * DUAL_REPORT_HOURLY_RATE, 2)
+    detail_rows = _assistant_breakdown_detail_rows(assistant_breakdown, total_hours)
+    total_amount = round(sum(row["amount"] for row in detail_rows), 2)
+    total_detail_hours = round(sum(row["hours"] for row in detail_rows), 2)
     month_data = get_month_data(month, hours_override=total_hours)
 
     if layout["kind"] == "legacy":
         payload = build_form_payload(month_data, personal_data, invoice_date=invoice_date)
         payload["_meta"]["total_amount_chf"] = total_amount
         payload["_meta"]["hourly_rate_chf"] = DUAL_REPORT_HOURLY_RATE
+        payload["_meta"]["assistant_breakdown"] = assistant_breakdown or {}
         return payload
 
     period_value = f"{month_data['month_number']:02d}/{month_data['year']}"
@@ -570,9 +629,11 @@ def build_rechnung_payload(
         "_meta": {
             "invoice_date": _format_date(invoice_date),
             "period": period_value,
-            "total_hours": round(float(total_hours), 2),
+            "total_hours": total_detail_hours,
             "total_amount_chf": total_amount,
             "hourly_rate_chf": DUAL_REPORT_HOURLY_RATE,
+            "assistant_breakdown": assistant_breakdown or {},
+            "detail_rows": detail_rows,
         }
     }
 
@@ -584,15 +645,90 @@ def build_rechnung_payload(
         payload[layout["provider_field"]] = ASSISTENZ_SERVICE_PROVIDER
     if layout.get("description_field"):
         payload[layout["description_field"]] = ASSISTENZ_SERVICE_DESCRIPTION
-    if layout.get("hours_field"):
-        payload[layout["hours_field"]] = _format_hours_fixed(total_hours)
-    if layout.get("amount_field"):
-        payload[layout["amount_field"]] = f"CHF {format_chf(total_amount)}"
+    raw_hours_fields = layout.get("hours_fields") or ([layout["hours_field"]] if layout.get("hours_field") else [])
+    raw_amount_fields = layout.get("amount_fields") or ([layout["amount_field"]] if layout.get("amount_field") else [])
+    has_detail_fields = (
+        len(raw_hours_fields) >= len(RECHNUNG_DETAIL_ROWS)
+        or len(raw_amount_fields) >= len(RECHNUNG_DETAIL_ROWS)
+    )
+
+    if has_detail_fields:
+        if len(raw_amount_fields) >= len(RECHNUNG_DETAIL_ROWS) + 1:
+            payload[raw_amount_fields[0]] = f"CHF {format_chf(DUAL_REPORT_HOURLY_RATE)}"
+
+        hours_fields = _rechnung_detail_fields(raw_hours_fields)
+        amount_fields = _rechnung_detail_fields(raw_amount_fields)
+        for index, row in enumerate(detail_rows):
+            if index < len(hours_fields):
+                payload[hours_fields[index]] = _format_hours_fixed(row["hours"], zero_as_blank=True)
+            if index < len(amount_fields):
+                payload[amount_fields[index]] = f"CHF {format_chf(row['amount'])}" if row["hours"] else ""
+    else:
+        if layout.get("hours_field"):
+            payload[layout["hours_field"]] = _format_hours_fixed(total_detail_hours)
+        if layout.get("amount_field"):
+            payload[layout["amount_field"]] = f"CHF {format_chf(total_amount)}"
     if layout.get("remarks_field"):
         payload[layout["remarks_field"]] = "\n".join(line for line in remark_lines if line)
     if layout.get("total_field"):
         payload[layout["total_field"]] = f"{format_chf(total_amount)}"
 
+    return payload
+
+
+def _transport_date_from_field(row_index: int) -> str:
+    return "Datumvon" if row_index == 1 else f"Datum_{row_index}von"
+
+
+def _transport_date_to_field(row_index: int) -> str:
+    return "Datum" if row_index == 1 else f"Datum_{row_index}"
+
+
+def build_transportkosten_payload(transport_events: list[dict], personal_data: dict) -> dict:
+    normalized_profile = _normalize_personal_data(personal_data)
+    insured_name, insured_first_name = _split_insured_name(normalized_profile.get("insured_name", ""))
+    rows = []
+    payload = {
+        "Name": insured_name,
+        "Vorname": insured_first_name,
+        "VersichertenNr 756": normalized_profile.get("ahv_number", ""),
+    }
+
+    total_amount = 0.0
+    for row_index, event in enumerate((transport_events or [])[:TRANSPORTKOSTEN_MAX_ROWS], start=1):
+        event_date = _format_event_date(event.get("date", ""))
+        kilometers = round(float(event.get("transport_kilometers", 0.0) or 0.0), 2)
+        row_amount = round(kilometers * TRANSPORT_KILOMETER_RATE, 2)
+        total_amount = round(total_amount + row_amount, 2)
+        transport_mode = str(event.get("transport_mode") or "").strip().lower()
+
+        payload[_transport_date_from_field(row_index)] = event_date
+        payload[_transport_date_to_field(row_index)] = event_date
+        payload[f"Name und Adresse med BehandlungsortRow{row_index}"] = str(
+            event.get("transport_address") or event.get("title") or ""
+        ).strip()
+        payload[f"Kilometer retourRow{row_index}"] = format_chf(kilometers)
+        payload[f"Betrag in CHFRow{row_index}"] = format_chf(row_amount)
+        if transport_mode in TRANSPORT_MODE_PDF_VALUES:
+            payload[f"Transportmittel{row_index}"] = TRANSPORT_MODE_PDF_VALUES[transport_mode]
+        rows.append(
+            {
+                "date": event_date,
+                "address": payload[f"Name und Adresse med BehandlungsortRow{row_index}"],
+                "kilometers": kilometers,
+                "amount_chf": row_amount,
+                "transport_mode": transport_mode,
+            }
+        )
+
+    payload["Betrag Total"] = format_chf(total_amount)
+    payload["_meta"] = {
+        "rows_filled": len(rows),
+        "rows_available": len(transport_events or []),
+        "rows": rows,
+        "total_amount_chf": total_amount,
+        "kilometer_rate_chf": TRANSPORT_KILOMETER_RATE,
+    }
     return payload
 
 
@@ -764,11 +900,13 @@ def fill_assistenz_dual_form_auto_bytes(
 
     stundenblatt_payload = build_stundenblatt_payload(month, template_fields=stundenblatt_fields)
     total_hours = float(stundenblatt_payload["_meta"]["total_hours"])
+    assistant_breakdown = stundenblatt_payload["_meta"].get("breakdown", {})
     rechnung_payload = build_rechnung_payload(
         month=month,
         personal_data=profile,
         total_hours=total_hours,
         template_fields=rechnung_fields,
+        assistant_breakdown=assistant_breakdown,
     )
 
     if preview:
@@ -803,6 +941,28 @@ def fill_assistenz_dual_form_auto(
     with open(resolved_output_path, "wb") as file:
         file.write(output_bytes)
     return resolved_output_path
+
+
+def fill_transportkosten_form_auto_bytes(
+    template_pdf_path: str,
+    transport_events: list[dict],
+    profile_data: dict,
+    preview: bool = False,
+) -> bytes:
+    payload = build_transportkosten_payload(transport_events=transport_events, personal_data=profile_data)
+
+    if preview:
+        meta = payload.get("_meta", {})
+        print(
+            "========================================\n"
+            "  FORM PREVIEW - Transportkostenabrechnung\n"
+            "========================================\n"
+            f"  Transporte            : {meta.get('rows_filled', 0)}\n"
+            f"  Total                 : CHF {format_chf(float(meta.get('total_amount_chf', 0.0)))}\n"
+            "========================================"
+        )
+
+    return fill_form_to_bytes(template_pdf_path, payload)
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:

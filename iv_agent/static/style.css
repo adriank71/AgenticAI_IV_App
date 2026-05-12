@@ -1513,6 +1513,10 @@ textarea:focus-visible,
 }
 
 .report-panel {
+  width: min(100%, 640px);
+}
+
+#report-modal.report-modal-results .report-panel {
   width: min(96vw, 1280px);
 }
 
@@ -4309,7 +4313,7 @@ body {
 }
 
 #view-reports .storage-options {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   align-items: stretch;
 }

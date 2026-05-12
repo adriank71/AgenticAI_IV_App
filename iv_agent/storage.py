@@ -273,7 +273,7 @@ def _create_supabase_client():
 
 
 def _supabase_templates_bucket() -> str:
-    return os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "iv-agent-templates").strip() or "iv-agent-templates"
+    return os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "report-template").strip() or "report-template"
 
 
 def _supabase_reports_bucket() -> str:
@@ -286,7 +286,7 @@ def _supabase_invoices_bucket() -> str:
 
 SUPABASE_TEMPLATE_FILES = {
     "stundenblatt": "Stundenblatt.pdf",
-    "rechnung": "Rechnungsvorlage_aL_elektronisch.pdf",
+    "rechnung": "Rechnungsvorlage_aL_elektronisch (1).pdf",
     "transportkosten": "AK_Formular_EL_Transportkosten.pdf",
 }
 _STORE_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -760,7 +760,7 @@ class SupabaseStorageTemplateStore:
         normalized_key = str(template_key or "").strip()
         if not normalized_key:
             raise ValueError("template_key is required")
-        return f"{normalized_key}/{self._file_name_for_key(normalized_key, file_name)}"
+        return self._file_name_for_key(normalized_key, file_name)
 
     def upsert_template(
         self,

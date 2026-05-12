@@ -50,8 +50,11 @@ try:
     from .form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
         STANDARD_RATE,
+        TRANSPORTKOSTEN_MAX_ROWS,
+        TRANSPORT_KILOMETER_RATE,
         fill_assistenz_dual_form_auto_bytes,
         fill_assistenz_form_auto_bytes,
+        fill_transportkosten_form_auto_bytes,
     )
     from .storage import (
         _create_supabase_client,
@@ -111,8 +114,11 @@ except ImportError:
     from form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
         STANDARD_RATE,
+        TRANSPORTKOSTEN_MAX_ROWS,
+        TRANSPORT_KILOMETER_RATE,
         fill_assistenz_dual_form_auto_bytes,
         fill_assistenz_form_auto_bytes,
+        fill_transportkosten_form_auto_bytes,
     )
     from storage import (
         _create_supabase_client,
@@ -561,7 +567,10 @@ def generate_assistenz_report(
                 profile_data=profile_payload,
                 preview=False,
             )
-            gross_amount = round(total_hours * DUAL_REPORT_HOURLY_RATE, 2)
+            gross_amount = round(
+                sum(float(value or 0.0) for value in assistant_breakdown.values()) * DUAL_REPORT_HOURLY_RATE,
+                2,
+            )
         else:
             template_path = exit_stack.enter_context(
                 materialize_template_reference(resolve_template_path(), suffix=".pdf")
@@ -605,6 +614,89 @@ def generate_assistenz_report(
     }
 
 
+def _transport_event_sort_key(event: dict) -> tuple[str, int, str, str]:
+    return (
+        str(event.get("date") or ""),
+        0 if event.get("all_day") else 1,
+        str(event.get("time") or ""),
+        str(event.get("title") or ""),
+    )
+
+
+def generate_transportkosten_report(
+    month: str,
+    profile_payload: dict,
+    *,
+    profile_id: str | None = None,
+    triggered_by_reminder: str | None = None,
+) -> dict:
+    template_reference = resolve_transportkosten_template_path()
+    if not template_reference:
+        raise FileNotFoundError(
+            "Transportkosten template not found. Upload AK_Formular_EL_Transportkosten.pdf to the report-template bucket."
+        )
+
+    user_id = normalize_user_id(profile_id or "default")
+    month_events = get_events(month, user_id=user_id)
+    transport_events = sorted(
+        [event for event in month_events if event.get("category") == "transport"],
+        key=_transport_event_sort_key,
+    )
+    selected_events = transport_events[:TRANSPORTKOSTEN_MAX_ROWS]
+
+    with materialize_template_reference(template_reference, suffix=".pdf") as template_path:
+        report_bytes = fill_transportkosten_form_auto_bytes(
+            template_pdf_path=template_path,
+            transport_events=selected_events,
+            profile_data=profile_payload,
+            preview=False,
+        )
+
+    total_kilometers = round(
+        sum(float(event.get("transport_kilometers", 0.0) or 0.0) for event in selected_events),
+        2,
+    )
+    total_amount = round(
+        sum(
+            round(float(event.get("transport_kilometers", 0.0) or 0.0) * TRANSPORT_KILOMETER_RATE, 2)
+            for event in selected_events
+        ),
+        2,
+    )
+    metadata = {
+        "transport_entries": len(selected_events),
+        "transport_entries_available": len(transport_events),
+        "transport_entries_truncated": max(len(transport_events) - len(selected_events), 0),
+        "transport_kilometers": f"{total_kilometers:.2f}",
+        "gross_amount_chf": f"{total_amount:.2f}",
+    }
+    if triggered_by_reminder:
+        metadata["triggered_by_reminder"] = triggered_by_reminder
+
+    stored_report = get_report_store().save_report(
+        month=month,
+        report_type="transportkostenabrechnung",
+        file_name=f"Transportkostenabrechnung_{month}.pdf",
+        content=report_bytes,
+        profile_id=profile_id,
+        metadata=metadata,
+    )
+
+    return {
+        "report_id": stored_report["report_id"],
+        "type": "transportkostenabrechnung",
+        "label": "Transportkostenabrechnung report",
+        "file_name": stored_report["file_name"],
+        "download_url": build_report_download_path(stored_report),
+        "preview_url": build_report_preview_path(stored_report),
+        "year": int(month.split("-")[0]),
+        "transport_entries": len(selected_events),
+        "transport_entries_available": len(transport_events),
+        "transport_kilometers": f"{total_kilometers:.2f}",
+        "gross_amount_chf": f"{total_amount:.2f}",
+    }
+
+
 def build_report_webhook_payload(month: str, report_record: dict) -> dict:
     base_url = request.host_url.rstrip("/")
     return {
@@ -637,7 +729,6 @@ def generate_reports_payload(
     profile_payload: dict,
     *,
     profile_id: str | None = None,
-    transport_unavailable_message: str,
 ) -> dict:
     generated_reports = []
     unavailable_reports = []
@@ -646,13 +737,7 @@ def generate_reports_payload(
         generated_reports.append(generate_assistenz_report(month, profile_payload, profile_id=profile_id))
 
     if "transportkostenabrechnung" in report_types:
-        unavailable_reports.append(
-            {
-                "type": "transportkostenabrechnung",
-                "label": "Transportkostenabrechnung report",
-                "message": transport_unavailable_message,
-            }
-        )
+        generated_reports.append(generate_transportkosten_report(month, profile_payload, profile_id=profile_id))
 
     return {
         "month": month,
@@ -1067,7 +1152,6 @@ def execute_pending_agent_action(action: dict) -> dict:
             report_types,
             profile_payload,
             profile_id=profile_id,
-            transport_unavailable_message="Transport report generation is not available yet.",
         )
 
     if action_type == "send_report":
@@ -1247,9 +1331,6 @@ def api_generate_report():
             report_types,
             profile_payload,
             profile_id=profile_id,
-            transport_unavailable_message=(
-                "Transport report generation will be wired once the updated PDF form and field mapping are available."
-            ),
         )
 
         if len(response_payload["generated_reports"]) == 1 and not response_payload["unavailable_reports"]:
