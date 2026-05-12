@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
+from typing import Any
 
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, url_for
 from flask_cors import CORS
@@ -31,12 +32,18 @@ try:
         update_calendar_event as update_service_calendar_event,
     )
     from .services.storage_service import (
+        build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
+        document_bucket_names,
         document_bucket_name,
+        get_document as get_service_document,
+        get_storage_service,
+        list_documents_for_session,
         move_document_to_folder,
         move_documents_to_folder,
         process_chat_attachments,
+        reassign_document_bucket,
         update_document_metadata,
     )
     from .form_pilot import (
@@ -85,12 +92,18 @@ except ImportError:
         update_calendar_event as update_service_calendar_event,
     )
     from services.storage_service import (
+        build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
+        document_bucket_names,
         document_bucket_name,
+        get_document as get_service_document,
+        get_storage_service,
+        list_documents_for_session,
         move_document_to_folder,
         move_documents_to_folder,
         process_chat_attachments,
+        reassign_document_bucket,
         update_document_metadata,
     )
     from form_pilot import (
@@ -702,6 +715,9 @@ def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: di
                 "content_size": document.get("content_size"),
                 "summary": document.get("summary"),
                 "extraction_status": document.get("extraction_status"),
+                "storage_bucket": document.get("storage_bucket"),
+                "bucket_confirmed": document.get("bucket_confirmed"),
+                "bucket_reason": document.get("bucket_reason"),
             }
         )
 
@@ -716,20 +732,29 @@ def enrich_agent_response_with_uploads(response_payload: dict, agent_payload: di
         institution = str(document.get("institution") or "").strip()
         document_date = str(document.get("document_date") or "").strip()
         summary = str(document.get("summary") or "").strip()
+        bucket_name = str(document.get("storage_bucket") or document_bucket_name()).strip()
+        bucket_reason = str(document.get("bucket_reason") or "").strip()
+        bucket_confirmed = bool(document.get("bucket_confirmed"))
         details = [document_type]
         if institution:
             details.append(f"von {institution}")
         if document_date:
             details.append(f"vom {document_date}")
-        upload_lines.append(f"- {name}: als {' '.join(details)} erkannt.")
+        upload_lines.append(f"- {name}: als {' '.join(details)} erkannt und im Bucket {bucket_name} gespeichert.")
         if summary:
             first_summary_line = summary.splitlines()[0].strip()
             if first_summary_line:
                 upload_lines.append(f"  {first_summary_line}")
+        if bucket_reason:
+            upload_lines.append(f"  Bucket-Hinweis: {bucket_reason}")
         if document.get("extraction_status") in {"no_text", "empty", "failed"}:
             upload_lines.append("  Text konnte nicht extrahiert werden.")
+        if bucket_confirmed:
+            upload_lines.append(f"  Bucket {bucket_name} ist bestaetigt.")
+        else:
+            upload_lines.append(f"  Bitte bestaetige Bucket {bucket_name} oder korrigiere ihn.")
     if upload_lines:
-        upload_note = "Datei gespeichert. Dokument wird analysiert. Zusammenfassung fertig.\n" + "\n".join(upload_lines[:10])
+        upload_note = "Datei gespeichert. Dokument wird analysiert.\n" + "\n".join(upload_lines[:16])
         existing_answer = str(response_payload.get("answer") or "").rstrip()
         response_payload["answer"] = f"{existing_answer}\n\n{upload_note}".strip()
     return response_payload
@@ -1014,6 +1039,23 @@ def execute_pending_agent_action(action: dict) -> dict:
         document = update_document_metadata(user_id=user_id, document_id=document_id, updates=updates)
         return {"document": document, "updated": True}
 
+    if action_type == "storage.reassign_bucket":
+        document_id = str(payload.get("document_id") or "").strip()
+        bucket_name = str(payload.get("bucket") or payload.get("storage_bucket") or "").strip()
+        if not document_id:
+            raise ValueError("document_id is required")
+        if not bucket_name:
+            raise ValueError("bucket is required")
+        document = reassign_document_bucket(
+            user_id=user_id,
+            document_id=document_id,
+            bucket_name=bucket_name,
+            confirmed=True,
+            bucket_reason=str(payload.get("reason") or "").strip(),
+            review_source="agent_confirmation",
+        )
+        return {"document": document, "updated": True, "bucket_reassigned": True}
+
     if action_type == "create_reminder":
         reminder = reminders_module.create_reminder(payload)
         return {"reminder": reminder}
@@ -1113,6 +1155,7 @@ def api_confirm_agent_action(action_id: str):
                     "storage.move_document",
                     "storage.delete_document",
                     "storage.update_metadata",
+                    "storage.reassign_bucket",
                 },
                 **make_json_safe(confirmation),
             }
@@ -1395,9 +1438,67 @@ def normalize_invoice_fields(fields: dict) -> dict:
     return normalized
 
 
+def _sanitize_camera_session_id(value: str) -> str:
+    normalized = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in str(value or "").strip())
+    return normalized or "default"
+
+
+def _camera_capture_user_id() -> str:
+    return normalize_user_id("default")
+
+
+def _camera_capture_metadata(sid: str, *, fields: dict | None, extraction_error: str | None) -> dict[str, Any]:
+    safe_sid = _sanitize_camera_session_id(sid)
+    bucket_hint_parts = []
+    if isinstance(fields, dict):
+        bucket_hint_parts.extend(
+            [
+                str(fields.get("merchant") or "").strip(),
+                str(fields.get("invoice_number") or "").strip(),
+                str(fields.get("date") or "").strip(),
+            ]
+        )
+    return {
+        "source": "camera_capture",
+        "camera_session_id": safe_sid,
+        "session_id": safe_sid,
+        "folder_path": f"Invoices/{safe_sid}",
+        "invoice_fields": fields or None,
+        "invoice_extraction_error": extraction_error,
+        "bucket_hint_text": " ".join(part for part in bucket_hint_parts if part),
+        "institution": str((fields or {}).get("merchant") or "").strip(),
+    }
+
+
+def _document_to_invoice_capture(document: dict[str, Any], sid: str) -> dict[str, Any]:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    safe_sid = _sanitize_camera_session_id(metadata.get("camera_session_id") or metadata.get("session_id") or sid)
+    fields = metadata.get("invoice_fields") if isinstance(metadata.get("invoice_fields"), dict) else None
+    summary = _format_invoice(fields) if fields else (document.get("summary") or None)
+    return {
+        "invoice_id": document.get("document_id"),
+        "sid": safe_sid,
+        "file_name": document.get("file_name"),
+        "folder_path": metadata.get("folder_path") or f"Invoices/{safe_sid}",
+        "created_at": document.get("created_at"),
+        "content_type": document.get("content_type"),
+        "content_size": document.get("content_size"),
+        "fields": fields,
+        "summary": summary,
+        "extraction_error": metadata.get("invoice_extraction_error") or document.get("extraction_error"),
+        "storage_backend": "supabase",
+        "storage_bucket": document.get("storage_bucket"),
+        "storage_key": document.get("storage_key"),
+        "storage_url": document.get("storage_url"),
+        "bucket_confirmed": document.get("bucket_confirmed"),
+        "bucket_reason": document.get("bucket_reason"),
+        "bucket_confidence": document.get("bucket_confidence"),
+    }
+
+
 def serialize_invoice_capture(capture_record: dict) -> dict:
     fields = capture_record.get("fields") or None
-    summary = _format_invoice(fields) if fields else None
+    summary = _format_invoice(fields) if fields else capture_record.get("summary") or None
     content_type = capture_record.get("content_type")
     return {
         "invoice_id": capture_record["invoice_id"],
@@ -1412,6 +1513,9 @@ def serialize_invoice_capture(capture_record: dict) -> dict:
         "extraction_error": capture_record.get("extraction_error"),
         "storage_backend": capture_record.get("storage_backend"),
         "storage_bucket": capture_record.get("storage_bucket"),
+        "bucket_confirmed": capture_record.get("bucket_confirmed"),
+        "bucket_reason": capture_record.get("bucket_reason"),
+        "bucket_confidence": capture_record.get("bucket_confidence"),
         "image_url": build_invoice_image_path(capture_record),
         "file_url": build_invoice_image_path(capture_record),
         "previewable": str(content_type or "").startswith("image/"),
@@ -1528,7 +1632,7 @@ def api_storage_browser():
             if not bucket_name:
                 continue
             objects = _list_supabase_bucket_objects(client, bucket_name)
-            if bucket_name == document_bucket_name():
+            if bucket_name in set(document_bucket_names()):
                 objects = [
                     item
                     for item in objects
@@ -1554,10 +1658,64 @@ def api_storage_browser():
         return json_error(f"Failed to list Supabase Storage buckets: {exc}", 502)
 
 
+def _document_browser_user_id() -> str:
+    return normalize_user_id(request.args.get("profile_id") or "default")
+
+
+@app.get("/api/documents/browser")
+def api_documents_browser():
+    try:
+        payload = build_document_browser(user_id=_document_browser_user_id())
+        return jsonify(make_json_safe(payload))
+    except RuntimeError as exc:
+        logger.error("Document browser configuration error: %s", exc)
+        return json_error(str(exc), 503)
+    except Exception as exc:
+        logger.exception("Document browser failed")
+        return json_error(f"Failed to load document browser: {exc}", 502)
+
+
+@app.patch("/api/documents/<document_id>/bucket")
+def api_documents_reassign_bucket(document_id: str):
+    try:
+        payload = get_json_payload(required=True)
+        bucket_name = str(payload.get("bucket") or payload.get("storage_bucket") or "").strip()
+        if not bucket_name:
+            raise ValueError("bucket is required")
+        user_id = normalize_user_id(payload.get("profile_id") or payload.get("user_id") or "default")
+        document = reassign_document_bucket(
+            user_id=user_id,
+            document_id=document_id,
+            bucket_name=bucket_name,
+            confirmed=True,
+            bucket_reason=str(payload.get("reason") or "").strip(),
+            review_source="document_browser",
+        )
+        return jsonify(
+            make_json_safe(
+                {
+                    "updated": True,
+                    "document": document,
+                    "storage_bucket": document.get("storage_bucket"),
+                }
+            )
+        )
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except FileNotFoundError as exc:
+        return json_error(str(exc), 404)
+    except RuntimeError as exc:
+        logger.error("Document bucket reassignment failed: %s", exc)
+        return json_error(str(exc), 502)
+    except Exception as exc:
+        logger.exception("Unexpected document bucket reassignment error")
+        return json_error(f"Failed to reassign document bucket: {exc}", 500)
+
+
 def capture_invoice(sid: str, payload: dict):
     image_bytes, mime, file_name = parse_invoice_capture_payload(payload)
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    invoice_store = get_invoice_store()
+    storage_service = get_storage_service()
 
     normalized_fields = None
     extraction_error = None
@@ -1581,16 +1739,20 @@ def capture_invoice(sid: str, payload: dict):
         except Exception as exc:
             logger.exception("Unexpected invoice extraction error")
             extraction_error = f"extraction failed: {exc}"
-    capture_record = invoice_store.save_capture(
-        sid=sid,
+    document = storage_service.upload_document(
+        user_id=_camera_capture_user_id(),
         file_name=file_name,
         content=image_bytes,
         content_type=mime,
-        fields=normalized_fields,
-        extraction_error=extraction_error,
+        metadata=_camera_capture_metadata(
+            sid,
+            fields=normalized_fields,
+            extraction_error=extraction_error,
+        ),
     )
+    capture_record = _document_to_invoice_capture(document, sid)
     serialized_capture = serialize_invoice_capture(capture_record)
-    capture_count = len(invoice_store.list_captures(sid))
+    capture_count = len(list_documents_for_session(user_id=_camera_capture_user_id(), session_id=sid))
     response = jsonify(
         {
             "ok": True,
@@ -1629,7 +1791,13 @@ def scan_page(sid: str):
 @app.get("/api/invoices/<sid>")
 def api_invoices_get(sid: str):
     try:
-        items = get_invoice_store().list_captures(sid)
+        items = [
+            _document_to_invoice_capture(document, sid)
+            for document in list_documents_for_session(
+                user_id=_camera_capture_user_id(),
+                session_id=sid,
+            )
+        ]
     except ValueError as exc:
         return json_error(str(exc), 400)
     serialized_captures = [serialize_invoice_capture(item) for item in items]
@@ -1642,16 +1810,20 @@ def api_invoices_get(sid: str):
 
 @app.get("/api/invoices/<sid>/files/<invoice_id>/<path:filename>")
 def api_invoice_file(sid: str, invoice_id: str, filename: str):
-    try:
-        capture_record = get_invoice_store().get_capture(sid=sid, invoice_id=invoice_id)
-    except ValueError as exc:
-        return json_error(str(exc), 400)
-    if not capture_record:
+    document = get_service_document(user_id=_camera_capture_user_id(), document_id=invoice_id)
+    if not document:
+        return json_error("Invoice file not found", 404)
+    capture_record = _document_to_invoice_capture(document, sid)
+    if capture_record["sid"] != _sanitize_camera_session_id(sid):
         return json_error("Invoice file not found", 404)
     if os.path.basename(filename) != capture_record["file_name"]:
         return json_error("Invoice file not found", 404)
     try:
-        image_bytes, content_type = get_invoice_store().read_capture_bytes(capture_record)
+        image_bytes, stored_document = get_storage_service().read_document_bytes(
+            user_id=_camera_capture_user_id(),
+            document_id=invoice_id,
+        )
+        content_type = stored_document.get("content_type")
     except FileNotFoundError:
         return json_error("Invoice file not found", 404)
 

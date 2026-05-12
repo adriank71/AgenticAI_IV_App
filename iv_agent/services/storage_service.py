@@ -32,13 +32,17 @@ except ImportError:
     )
 
 
-DEFAULT_DOCUMENT_BUCKET = "Invoice_upload"
+DEFAULT_DOCUMENT_BUCKET = "IV"
+DEFAULT_DOCUMENT_BUCKETS = ("Stiftung", "TixiTaxi", "IV", "Versicherung")
+LEGACY_DOCUMENT_BUCKETS = {"invoice_upload", "Invoice_upload"}
 DOCUMENT_PREFIX = "Documents"
 SUPPORTED_DOCUMENT_MIME_TYPES = {
     "application/pdf": ".pdf",
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
     "text/plain": ".txt",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
 }
@@ -50,8 +54,31 @@ DOCUMENT_AGENT_MODEL = (
 _SERVICE_CACHE: dict[tuple[Any, ...], "StorageService"] = {}
 
 
+def default_document_bucket_name() -> str:
+    configured_default = os.environ.get("IV_AGENT_DEFAULT_DOCUMENT_BUCKET", "").strip()
+    if configured_default:
+        return configured_default
+    fallback_bucket = os.environ.get("SUPABASE_STORAGE_DOCUMENTS_BUCKET", "").strip()
+    if fallback_bucket and fallback_bucket not in LEGACY_DOCUMENT_BUCKETS:
+        return fallback_bucket
+    return DEFAULT_DOCUMENT_BUCKET
+
+
+def document_bucket_names() -> list[str]:
+    raw_value = os.environ.get("IV_AGENT_DOCUMENT_BUCKETS", "").strip()
+    configured = [item.strip() for item in raw_value.split(",") if item.strip()] if raw_value else list(DEFAULT_DOCUMENT_BUCKETS)
+    fallback_bucket = os.environ.get("SUPABASE_STORAGE_DOCUMENTS_BUCKET", "").strip()
+    buckets: list[str] = []
+    for bucket_name in [*configured, default_document_bucket_name(), fallback_bucket]:
+        candidate = str(bucket_name or "").strip()
+        if not candidate or candidate in LEGACY_DOCUMENT_BUCKETS or candidate in buckets:
+            continue
+        buckets.append(candidate)
+    return buckets or [DEFAULT_DOCUMENT_BUCKET]
+
+
 def document_bucket_name() -> str:
-    return os.environ.get("SUPABASE_STORAGE_DOCUMENTS_BUCKET", DEFAULT_DOCUMENT_BUCKET).strip() or DEFAULT_DOCUMENT_BUCKET
+    return default_document_bucket_name()
 
 
 def document_max_bytes() -> int:
@@ -115,6 +142,18 @@ def _parse_filter_date(value: Any) -> date | None:
     if not raw:
         return None
     return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+
+
+def _normalize_keyword_text(value: Any) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
 
 
 def sanitize_document_filename(file_name: str, *, content_type: str = "application/octet-stream") -> str:
@@ -424,6 +463,25 @@ def classify_text_locally(text: str, file_name: str = "") -> dict[str, Any]:
     }
 
 
+def _coerce_bucket_name(value: Any, *, allowed: list[str], fallback: str) -> str:
+    candidate = str(value or "").strip()
+    if candidate in allowed:
+        return candidate
+    return fallback
+
+
+def _bucket_review_fields(document: dict[str, Any]) -> dict[str, Any]:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    return {
+        "suggested_bucket": str(metadata.get("suggested_bucket") or document.get("storage_bucket") or "").strip(),
+        "bucket_reason": str(metadata.get("bucket_reason") or "").strip(),
+        "bucket_confidence": str(metadata.get("bucket_confidence") or "").strip(),
+        "bucket_confirmed": bool(metadata.get("bucket_confirmed")),
+        "bucket_confirmed_at": str(metadata.get("bucket_confirmed_at") or "").strip() or None,
+        "bucket_review_source": str(metadata.get("bucket_review_source") or "").strip(),
+    }
+
+
 def _coerce_json_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
@@ -485,14 +543,23 @@ class StorageService:
     ):
         self._database_url = database_url or _database_url()
         self._client = client or _create_supabase_client()
-        self._bucket = bucket or document_bucket_name()
+        self._document_buckets = document_bucket_names()
+        self._default_bucket = _coerce_bucket_name(bucket or default_document_bucket_name(), allowed=self._document_buckets, fallback=default_document_bucket_name())
+        if self._default_bucket not in self._document_buckets:
+            self._document_buckets.append(self._default_bucket)
+        self._bucket = self._default_bucket
         self._connection_factory = connection_factory or (lambda: _connect_postgres(self._database_url))
         self._embedding_service = embedding_service or NoopDocumentEmbeddingService()
+        self._legacy_rehome_attempted = False
         self._ensure_schema()
 
     @property
     def bucket(self) -> str:
         return self._bucket
+
+    @property
+    def document_buckets(self) -> list[str]:
+        return list(self._document_buckets)
 
     def _ensure_schema(self) -> None:
         with self._connection_factory() as connection:
@@ -576,6 +643,7 @@ class StorageService:
 
     def _row_to_document(self, row: dict[str, Any]) -> dict[str, Any]:
         metadata = _coerce_json_dict(row.get("metadata"))
+        bucket_review = _bucket_review_fields({"metadata": metadata, "storage_bucket": row.get("storage_bucket") or self._bucket})
         return {
             "document_id": str(row.get("document_id") or ""),
             "user_id": normalize_user_id(row.get("user_id")),
@@ -601,6 +669,9 @@ class StorageService:
             "extraction_status": row.get("extraction_status") or "",
             "extraction_error": row.get("extraction_error") or "",
             "metadata": metadata,
+            **bucket_review,
+            "source": str(metadata.get("source") or "").strip(),
+            "session_id": str(metadata.get("camera_session_id") or metadata.get("session_id") or "").strip() or None,
             "created_at": _iso(row.get("created_at")),
             "updated_at": _iso(row.get("updated_at")),
         }
@@ -624,6 +695,150 @@ class StorageService:
         )
         return _storage_response_to_url(response)
 
+    def _build_storage_key(
+        self,
+        *,
+        user_id: str,
+        document_id: str,
+        safe_file_name: str,
+        record_date: date,
+    ) -> str:
+        return (
+            f"{DOCUMENT_PREFIX}/{normalize_user_id(user_id)}/{record_date.year}/{record_date.month:02d}/"
+            f"{document_id}-{safe_file_name}"
+        )
+
+    def _bucket_suggestion(
+        self,
+        *,
+        file_name: str,
+        extracted_text: str,
+        classification: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, str]:
+        scores = {bucket_name: 0 for bucket_name in self._document_buckets}
+        reasons = {bucket_name: [] for bucket_name in self._document_buckets}
+        default_bucket = self._default_bucket
+
+        def add(bucket_name: str, score: int, reason: str) -> None:
+            if bucket_name not in scores:
+                return
+            scores[bucket_name] += score
+            if reason not in reasons[bucket_name]:
+                reasons[bucket_name].append(reason)
+
+        hint_parts = [
+            file_name,
+            extracted_text,
+            " ".join(classification.get("tags") or []),
+            classification.get("institution") or "",
+            metadata.get("institution") or "",
+            metadata.get("bucket_hint_text") or "",
+            json.dumps(metadata.get("invoice_fields") or {}, ensure_ascii=True),
+        ]
+        haystack = _normalize_keyword_text("\n".join(part for part in hint_parts if part))
+        document_type = normalize_document_type(classification.get("document_type") or metadata.get("document_type") or "")
+        tags = _coerce_tags((classification.get("tags") or []) + (metadata.get("tags") or []))
+        institution_text = _normalize_keyword_text(classification.get("institution") or metadata.get("institution") or "")
+
+        keyword_map = {
+            "Stiftung": (
+                "stiftung",
+                "pro infirmis",
+                "proinfirmis",
+                "foundation",
+            ),
+            "TixiTaxi": (
+                "tixitaxi",
+                "tixi",
+                "taxi",
+                "fahrdienst",
+                "transport",
+                "transportkosten",
+                "fahrkosten",
+                "fahrt",
+            ),
+            "IV": (
+                "iv-stelle",
+                "invalidenversicherung",
+                "assistenzbeitrag",
+                "hilflosenentschaedigung",
+                "hilflosenentschaedigung",
+                "sva",
+            ),
+            "Versicherung": (
+                "versicherung",
+                "krankenkasse",
+                "helsana",
+                "css",
+                "swica",
+                "sanitas",
+                "visana",
+                "concordia",
+                "atupri",
+                "suva",
+            ),
+        }
+        for bucket_name, keywords in keyword_map.items():
+            for keyword in keywords:
+                if keyword in haystack:
+                    add(bucket_name, 4 if keyword in institution_text else 3, f"Schluesselwort '{keyword}' erkannt.")
+                    break
+
+        if "transport" in tags or document_type in {"receipt", "invoice"} and any(token in haystack for token in ("taxi", "tixi", "fahrdienst", "transport")):
+            add("TixiTaxi", 2, "Transport- oder Taxi-Hinweise erkannt.")
+        if "iv" in tags or document_type == "iv_document":
+            add("IV", 2, "IV-Hinweise erkannt.")
+        if document_type in {"decision", "letter"} and any(token in haystack for token in ("iv-stelle", "invalidenversicherung")):
+            add("IV", 2, "IV-Schreiben erkannt.")
+        if any(token in haystack for token in ("stiftung", "pro infirmis")):
+            add("Stiftung", 2, "Stiftungsbezug erkannt.")
+        if any(token in haystack for token in ("versicherung", "krankenkasse", "helsana", "css", "swica", "suva")):
+            add("Versicherung", 2, "Versicherungsbezug erkannt.")
+
+        chosen_bucket = default_bucket
+        chosen_score = 0
+        for bucket_name in self._document_buckets:
+            score = scores.get(bucket_name, 0)
+            if score > chosen_score:
+                chosen_bucket = bucket_name
+                chosen_score = score
+        if chosen_score >= 7:
+            confidence = "high"
+        elif chosen_score >= 4:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        if chosen_score <= 0:
+            return {
+                "bucket": default_bucket,
+                "reason": f"Keine starke Zuordnung gefunden; Standard-Bucket {default_bucket} verwendet.",
+                "confidence": "low",
+            }
+        reason = " ".join(reasons.get(chosen_bucket) or []) or f"Bucket {chosen_bucket} wurde anhand der Dokumenthinweise gewaehlt."
+        return {"bucket": chosen_bucket, "reason": reason, "confidence": confidence}
+
+    def _update_bucket_metadata(
+        self,
+        metadata: dict[str, Any],
+        *,
+        bucket_name: str,
+        bucket_reason: str,
+        bucket_confidence: str,
+        confirmed: bool,
+        confirmed_at: str | None = None,
+        review_source: str = "",
+    ) -> dict[str, Any]:
+        updated_metadata = dict(metadata or {})
+        updated_metadata["suggested_bucket"] = bucket_name
+        updated_metadata["bucket_reason"] = bucket_reason
+        updated_metadata["bucket_confidence"] = bucket_confidence
+        updated_metadata["bucket_confirmed"] = bool(confirmed)
+        updated_metadata["bucket_confirmed_at"] = confirmed_at
+        if review_source:
+            updated_metadata["bucket_review_source"] = review_source
+        return updated_metadata
+
     def upload_document(
         self,
         *,
@@ -642,6 +857,7 @@ class StorageService:
         if len(content) > document_max_bytes():
             raise ValueError("Attachment exceeds configured max size")
 
+        input_metadata = dict(metadata or {})
         now = _utcnow()
         document_id = str(uuid.uuid4())
         safe_file_name = sanitize_document_filename(file_name, content_type=normalized_content_type)
@@ -658,14 +874,36 @@ class StorageService:
         summary = summarize_text_locally(extracted_text) if extracted_text else "Text konnte nicht extrahiert werden."
         document_date = _parse_filter_date(classification.get("document_date"))
         record_date = document_date or now.date()
-        storage_key = (
-            f"{DOCUMENT_PREFIX}/{normalized_user_id}/{record_date.year}/{record_date.month:02d}/"
-            f"{document_id}-{safe_file_name}"
+        bucket_suggestion = self._bucket_suggestion(
+            file_name=file_name,
+            extracted_text=extracted_text,
+            classification=classification,
+            metadata=input_metadata,
+        )
+        storage_bucket = _coerce_bucket_name(
+            bucket_suggestion.get("bucket"),
+            allowed=self._document_buckets,
+            fallback=self._default_bucket,
+        )
+        storage_key = self._build_storage_key(
+            user_id=normalized_user_id,
+            document_id=document_id,
+            safe_file_name=safe_file_name,
+            record_date=record_date,
+        )
+        merged_metadata = self._update_bucket_metadata(
+            {**input_metadata, "classification": classification},
+            bucket_name=storage_bucket,
+            bucket_reason=bucket_suggestion.get("reason") or f"Bucket {storage_bucket} wurde vorgeschlagen.",
+            bucket_confidence=bucket_suggestion.get("confidence") or "low",
+            confirmed=False,
+            confirmed_at=None,
+            review_source=str(input_metadata.get("source") or "upload").strip() or "upload",
         )
 
         _supabase_upload(
             self._client,
-            bucket=self._bucket,
+            bucket=storage_bucket,
             path=storage_key,
             content=content,
             content_type=normalized_content_type,
@@ -678,9 +916,9 @@ class StorageService:
             "folder_id": None,
             "file_name": file_name,
             "safe_file_name": safe_file_name,
-            "storage_bucket": self._bucket,
+            "storage_bucket": storage_bucket,
             "storage_key": storage_key,
-            "storage_url": _supabase_storage_url(self._bucket, storage_key),
+            "storage_url": _supabase_storage_url(storage_bucket, storage_key),
             "content_type": normalized_content_type,
             "content_size": len(content),
             "checksum_sha256": checksum,
@@ -694,7 +932,7 @@ class StorageService:
             "extracted_text": extracted_text,
             "extraction_status": extraction_status,
             "extraction_error": extraction_error,
-            "metadata": {**(metadata or {}), "classification": classification},
+            "metadata": merged_metadata,
             "created_at": now,
             "updated_at": now,
         }
@@ -721,7 +959,7 @@ class StorageService:
                         normalized_user_id,
                         file_name,
                         safe_file_name,
-                        self._bucket,
+                        storage_bucket,
                         storage_key,
                         row_fallback["storage_url"],
                         normalized_content_type,
@@ -1123,6 +1361,236 @@ class StorageService:
             raise FileNotFoundError("Document not found")
         return self._row_to_document(row)
 
+    def list_documents_for_session(self, *, user_id: str, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return []
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM documents
+                    WHERE user_id = %s
+                      AND (
+                        metadata->>'camera_session_id' = %s
+                        OR metadata->>'session_id' = %s
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (
+                        normalize_user_id(user_id),
+                        normalized_session_id,
+                        normalized_session_id,
+                        max(1, min(int(limit or 100), 500)),
+                    ),
+                )
+                rows = cursor.fetchall()
+        return [self._row_to_document(row) for row in rows]
+
+    def reassign_document_bucket(
+        self,
+        *,
+        user_id: str,
+        document_id: str,
+        bucket_name: str,
+        confirmed: bool = True,
+        bucket_reason: str = "",
+        review_source: str = "user",
+    ) -> dict[str, Any]:
+        existing = self.get_document(user_id=user_id, document_id=document_id)
+        if not existing:
+            raise FileNotFoundError("Document not found")
+
+        target_bucket = _coerce_bucket_name(bucket_name, allowed=self._document_buckets, fallback="")
+        if not target_bucket:
+            raise ValueError("Unsupported bucket")
+
+        current_bucket = str(existing.get("storage_bucket") or "").strip()
+        current_key = str(existing.get("storage_key") or "").strip()
+        next_reason = bucket_reason.strip() or (
+            f"Bucket {target_bucket} vom Benutzer bestaetigt."
+            if current_bucket == target_bucket
+            else f"Dokument von {current_bucket} nach {target_bucket} verschoben."
+        )
+        confirmed_at = _utcnow().isoformat() if confirmed else None
+        next_metadata = self._update_bucket_metadata(
+            existing.get("metadata") or {},
+            bucket_name=target_bucket,
+            bucket_reason=next_reason,
+            bucket_confidence="high" if confirmed else str(existing.get("bucket_confidence") or "low"),
+            confirmed=confirmed,
+            confirmed_at=confirmed_at,
+            review_source=review_source,
+        )
+
+        if current_bucket != target_bucket:
+            content, _ = self.read_document_bytes(user_id=user_id, document_id=document_id)
+            _supabase_upload(
+                self._client,
+                bucket=target_bucket,
+                path=current_key,
+                content=content,
+                content_type=existing.get("content_type") or "application/octet-stream",
+                upsert=False,
+            )
+            try:
+                self._client.storage.from_(current_bucket).remove([current_key])
+            except Exception as exc:
+                try:
+                    self._client.storage.from_(target_bucket).remove([current_key])
+                except Exception:
+                    pass
+                raise RuntimeError("Could not delete original document object from Supabase Storage") from exc
+            next_storage_bucket = target_bucket
+            next_storage_key = current_key
+            next_storage_url = _supabase_storage_url(target_bucket, current_key)
+        else:
+            next_storage_bucket = current_bucket
+            next_storage_key = current_key
+            next_storage_url = str(existing.get("storage_url") or _supabase_storage_url(current_bucket, current_key))
+
+        try:
+            with self._connection_factory() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE documents
+                        SET
+                            storage_bucket = %s,
+                            storage_key = %s,
+                            storage_url = %s,
+                            metadata = %s::jsonb,
+                            updated_at = NOW()
+                        WHERE user_id = %s AND document_id = %s::uuid
+                        RETURNING *
+                        """,
+                        (
+                            next_storage_bucket,
+                            next_storage_key,
+                            next_storage_url,
+                            json.dumps(next_metadata),
+                            normalize_user_id(user_id),
+                            str(document_id or "").strip(),
+                        ),
+                    )
+                    row = cursor.fetchone()
+        except Exception:
+            if current_bucket != target_bucket:
+                try:
+                    _supabase_upload(
+                        self._client,
+                        bucket=current_bucket,
+                        path=current_key,
+                        content=content,
+                        content_type=existing.get("content_type") or "application/octet-stream",
+                        upsert=True,
+                    )
+                    self._client.storage.from_(target_bucket).remove([current_key])
+                except Exception:
+                    pass
+            raise
+
+        if not row:
+            raise FileNotFoundError("Document not found")
+        updated = self._row_to_document(row)
+        try:
+            updated["signed_url"] = self._create_signed_url(updated)
+        except Exception:
+            updated["signed_url"] = ""
+        return updated
+
+    def ensure_legacy_bucket_rehome(self) -> dict[str, Any]:
+        if self._legacy_rehome_attempted:
+            return {"attempted": True, "migrated_count": 0}
+        self._legacy_rehome_attempted = True
+        migrated_count = 0
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM documents
+                    WHERE storage_bucket = ANY(%s::text[])
+                    ORDER BY created_at ASC
+                    LIMIT 100
+                    """,
+                    (list(LEGACY_DOCUMENT_BUCKETS),),
+                )
+                rows = cursor.fetchall()
+        for row in rows:
+            document = self._row_to_document(row)
+            suggestion = self._bucket_suggestion(
+                file_name=document.get("file_name") or "",
+                extracted_text=document.get("extracted_text") or "",
+                classification={
+                    "document_type": document.get("document_type") or "",
+                    "institution": document.get("institution") or "",
+                    "tags": document.get("tags") or [],
+                },
+                metadata=document.get("metadata") or {},
+            )
+            target_bucket = _coerce_bucket_name(
+                suggestion.get("bucket"),
+                allowed=self._document_buckets,
+                fallback=self._default_bucket,
+            )
+            try:
+                self.reassign_document_bucket(
+                    user_id=document["user_id"],
+                    document_id=document["document_id"],
+                    bucket_name=target_bucket,
+                    confirmed=False,
+                    bucket_reason=(
+                        f"Legacy-Bucket migriert. {suggestion.get('reason') or f'Neuer Bucket: {target_bucket}.'}"
+                    ),
+                    review_source="legacy_rehome",
+                )
+                migrated_count += 1
+            except Exception:
+                continue
+        return {"attempted": True, "migrated_count": migrated_count}
+
+    def build_document_browser(self, *, user_id: str, limit: int = 200) -> dict[str, Any]:
+        self.ensure_legacy_bucket_rehome()
+        documents = self.list_documents(user_id=user_id, limit=limit)
+        grouped: dict[str, list[dict[str, Any]]] = {bucket_name: [] for bucket_name in self._document_buckets}
+        for document in documents:
+            bucket_name = _coerce_bucket_name(
+                document.get("storage_bucket"),
+                allowed=self._document_buckets,
+                fallback=self._default_bucket,
+            )
+            document_copy = dict(document)
+            try:
+                document_copy["signed_url"] = self._create_signed_url(document_copy)
+            except Exception:
+                document_copy["signed_url"] = ""
+            document_copy["previewable"] = str(document_copy.get("content_type") or "").startswith("image/")
+            grouped.setdefault(bucket_name, []).append(document_copy)
+
+        buckets = []
+        for bucket_name in self._document_buckets:
+            bucket_documents = grouped.get(bucket_name, [])
+            buckets.append(
+                {
+                    "id": bucket_name,
+                    "name": bucket_name,
+                    "count": len(bucket_documents),
+                    "confirmed_count": len([item for item in bucket_documents if item.get("bucket_confirmed")]),
+                    "unconfirmed_count": len([item for item in bucket_documents if not item.get("bucket_confirmed")]),
+                    "documents": bucket_documents,
+                }
+            )
+        return {
+            "configured": True,
+            "default_bucket": self._default_bucket,
+            "document_buckets": list(self._document_buckets),
+            "total_count": len(documents),
+            "buckets": buckets,
+        }
+
     def delete_document(self, *, user_id: str, document_id: str) -> dict[str, Any]:
         document = self.get_document(user_id=user_id, document_id=document_id)
         if not document:
@@ -1256,7 +1724,8 @@ def get_storage_service() -> StorageService:
         os.environ.get("SUPABASE_URL", "").strip(),
         os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "").strip(),
         os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
-        document_bucket_name(),
+        tuple(document_bucket_names()),
+        default_document_bucket_name(),
         id(StorageService),
     )
     if cache_key not in _SERVICE_CACHE:
@@ -1316,6 +1785,18 @@ def update_document_metadata(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().update_document_metadata(*args, **kwargs)
 
 
+def list_documents_for_session(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    return get_storage_service().list_documents_for_session(*args, **kwargs)
+
+
+def reassign_document_bucket(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return get_storage_service().reassign_document_bucket(*args, **kwargs)
+
+
+def build_document_browser(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return get_storage_service().build_document_browser(*args, **kwargs)
+
+
 def delete_document(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().delete_document(*args, **kwargs)
 
@@ -1345,6 +1826,10 @@ def prepare_document_for_agent(document: dict[str, Any]) -> dict[str, Any]:
         "storage_backend": "supabase",
         "storage_bucket": document.get("storage_bucket"),
         "storage_key": document.get("storage_key"),
+        "suggested_bucket": document.get("suggested_bucket"),
+        "bucket_reason": document.get("bucket_reason"),
+        "bucket_confidence": document.get("bucket_confidence"),
+        "bucket_confirmed": document.get("bucket_confirmed"),
     }
 
 

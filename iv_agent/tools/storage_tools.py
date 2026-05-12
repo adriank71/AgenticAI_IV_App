@@ -332,4 +332,22 @@ def build_storage_tools(
 
     tools.append(update_document_metadata)
 
+    @function_tool
+    def reassign_document_bucket(document_id: str, bucket: str, reason: str = "") -> str:
+        """Draft moving a document into another canonical storage bucket for user confirmation."""
+        return _storage_tool_result(
+            "reassign_document_bucket",
+            lambda: _register_storage_pending_action(
+                "storage.reassign_bucket",
+                f"Dokument in Bucket verschieben: {bucket}",
+                {
+                    "document_id": document_id,
+                    "bucket": bucket,
+                    "reason": reason,
+                },
+            ),
+        )
+
+    tools.append(reassign_document_bucket)
+
     return tools

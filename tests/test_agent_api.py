@@ -132,6 +132,9 @@ class AgentApiTests(unittest.TestCase):
             "content_size": 5,
             "summary": "Hallo",
             "extraction_status": "completed",
+            "storage_bucket": "IV",
+            "bucket_confirmed": False,
+            "bucket_reason": "Keine starke Zuordnung gefunden; Standard-Bucket IV verwendet.",
         }
 
         def fake_process_attachments(attachments, *, user_id):
@@ -191,7 +194,8 @@ class AgentApiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["uploaded_documents"][0]["document_id"], "doc-1")
         self.assertIn("Datei gespeichert", payload["answer"])
-        self.assertIn("Zusammenfassung fertig", payload["answer"])
+        self.assertIn("Bucket IV", payload["answer"])
+        self.assertIn("Bitte bestaetige", payload["answer"])
 
     def test_confirm_pending_action_executes_reminder_after_user_confirmation(self):
         client = app_module.app.test_client()
@@ -270,6 +274,48 @@ class AgentApiTests(unittest.TestCase):
             folder_id="folder-1",
         )
         self.assertEqual(payload["result"]["assigned_count"], 2)
+
+    def test_confirm_pending_storage_bucket_reassignment_executes_after_confirmation(self):
+        client = app_module.app.test_client()
+        with isolated_pending_action_storage():
+            pending_actions = agent_orchestrator.register_pending_actions(
+                [
+                    {
+                        "type": "storage.reassign_bucket",
+                        "title": "Dokument in Bucket verschieben: TixiTaxi",
+                        "payload": {
+                            "document_id": "doc-1",
+                            "bucket": "TixiTaxi",
+                            "user_id": "default",
+                        },
+                    }
+                ],
+                thread_id="thread-test",
+                user_id="default",
+            )
+            with patch.object(
+                app_module,
+                "reassign_document_bucket",
+                return_value={"document_id": "doc-1", "storage_bucket": "TixiTaxi", "bucket_confirmed": True},
+            ) as reassign_mock:
+                response = client.post(
+                    f"/api/agent/actions/{pending_actions[0]['action_id']}/confirm",
+                    json={"thread_id": "thread-test", "profile_id": "default"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["confirmed"])
+        self.assertTrue(payload["storage_updated"])
+        self.assertTrue(payload["result"]["bucket_reassigned"])
+        reassign_mock.assert_called_once_with(
+            user_id="default",
+            document_id="doc-1",
+            bucket_name="TixiTaxi",
+            confirmed=True,
+            bucket_reason="",
+            review_source="agent_confirmation",
+        )
 
     def test_basic_chat_route_uses_orchestrator_without_legacy_webhook(self):
         client = app_module.app.test_client()

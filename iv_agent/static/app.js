@@ -27,6 +27,7 @@ const reportTypeLabelMap = {
   assistenzbeitrag: "Assistenzbeitraege report",
   transportkostenabrechnung: "Transportkostenabrechnung report",
 };
+const documentBucketOrder = ["Stiftung", "TixiTaxi", "IV", "Versicherung"];
 
 const appViewTitleMap = {
   dashboard: "Dashboard",
@@ -150,7 +151,9 @@ const state = {
   calendarDataRequests: {},
   chatStarted: false,
   storageBrowser: null,
+  documentsBrowser: null,
   activeStorageBucket: "",
+  lastAutoOpenedPanel: "",
 };
 
 const elements = {
@@ -300,6 +303,10 @@ const elements = {
   storageActiveBucket: document.getElementById("storage-active-bucket"),
   storageFileCount: document.getElementById("storage-file-count"),
   storageFileList: document.getElementById("storage-file-list"),
+  documentsTotalCount: document.getElementById("documents-total-count"),
+  documentsTotalLabel: document.getElementById("documents-total-label"),
+  documentBrowserStatus: document.getElementById("document-browser-status"),
+  documentBucketBoard: document.getElementById("document-bucket-board"),
 };
 
 function formatMonth(date) {
@@ -1113,6 +1120,135 @@ function toggleWorkspacePanel(viewName) {
   switchAppView(viewName).catch(() => {});
 }
 
+const workspacePanelIntentOrder = ["calendar", "automations", "reports"];
+
+const workspacePanelPhraseIntents = [
+  { panel: "calendar", phrases: ["calendar entry", "calendar event", "calendar appointment", "kalender eintrag", "kalendereintrag", "kalendertermin"] },
+  { panel: "automations", phrases: ["active automations", "aktive automatisierungen", "monatlicher report", "month end report", "assistenzbeitrag report"] },
+  { panel: "reports", phrases: ["rechnung hochladen", "dokument hochladen", "datei hochladen", "rechnung speichern", "dokument speichern", "in storage", "in der datenbank"] },
+];
+
+const workspacePanelWordIntents = [
+  { panel: "calendar", patterns: [/\bcalendar\b/, /\bkalender\w*/, /\btermin\w*/, /\bappointment\w*/, /\bevent\w*/, /\beintrag\w*/] },
+  { panel: "automations", patterns: [/\berinner\w*/, /\breminder\w*/, /\breport\w*/, /\bbericht\w*/, /\bautomation\w*/, /\bautomatisier\w*/, /\bwiederkehr\w*/] },
+  { panel: "reports", patterns: [/\bhochlad\w*/, /\bupload\w*/, /\bspeicher\w*/, /\bdatenbank\w*/, /\bdatabase\w*/, /\bdokument\w*/, /\brechnung\w*/, /\bpdf\b/, /\bablage\w*/, /\bstorage\b/, /\bdatei\w*/] },
+];
+
+const calendarActionTypes = new Set(["create_event", "update_event", "delete_event"]);
+const automationActionTypes = new Set(["create_reminder", "generate_report", "send_report"]);
+const storageActionTypes = new Set([
+  "storage.create_folder",
+  "storage.move_document",
+  "storage.delete_document",
+  "storage.update_metadata",
+]);
+
+function normalizeWorkspaceIntentText(text) {
+  return String(text || "")
+    .toLocaleLowerCase("de-DE")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9_ß]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectPanelIntentFromText(text) {
+  const normalized = normalizeWorkspaceIntentText(text);
+  if (!normalized) {
+    return "";
+  }
+
+  const matches = new Map();
+  workspacePanelPhraseIntents.forEach((entry) => {
+    if (entry.phrases.some((phrase) => normalized.includes(normalizeWorkspaceIntentText(phrase)))) {
+      matches.set(entry.panel, Math.max(matches.get(entry.panel) || 0, 2));
+    }
+  });
+  workspacePanelWordIntents.forEach((entry) => {
+    if (entry.patterns.some((pattern) => pattern.test(normalized))) {
+      matches.set(entry.panel, Math.max(matches.get(entry.panel) || 0, 1));
+    }
+  });
+
+  if (!matches.size) {
+    return "";
+  }
+
+  return workspacePanelIntentOrder
+    .map((panel) => ({ panel, score: matches.get(panel) || 0 }))
+    .filter((match) => match.score > 0)
+    .sort((left, right) => right.score - left.score || workspacePanelIntentOrder.indexOf(left.panel) - workspacePanelIntentOrder.indexOf(right.panel))[0].panel;
+}
+
+function getActionType(action) {
+  return String((action && (action.type || action.action_type)) || "").trim();
+}
+
+function detectPanelIntentFromActions(actions) {
+  const items = Array.isArray(actions) ? actions : [];
+  const matchedPanels = new Set();
+  items.forEach((action) => {
+    const actionType = getActionType(action);
+    if (calendarActionTypes.has(actionType)) {
+      matchedPanels.add("calendar");
+    } else if (automationActionTypes.has(actionType)) {
+      matchedPanels.add("automations");
+    } else if (storageActionTypes.has(actionType)) {
+      matchedPanels.add("reports");
+    }
+
+    const payload = action && action.payload && typeof action.payload === "object" ? action.payload : {};
+    const textIntent = detectPanelIntentFromText([
+      action && action.title,
+      actionType,
+      payload.title,
+      payload.name,
+      payload.note,
+      payload.file_name,
+    ].filter(Boolean).join(" "));
+    if (textIntent) {
+      matchedPanels.add(textIntent);
+    }
+  });
+
+  return workspacePanelIntentOrder.find((panel) => matchedPanels.has(panel)) || "";
+}
+
+function detectPanelIntentFromToolEvents(toolEvents) {
+  const items = Array.isArray(toolEvents) ? toolEvents : [];
+  return detectPanelIntentFromText(
+    items.map((event) => [event && event.name, event && event.type, event && event.message].filter(Boolean).join(" ")).join(" ")
+  );
+}
+
+function detectPanelIntentFromConfirmedAction(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  if (payload.calendar_updated === true) {
+    return "calendar";
+  }
+  if (payload.storage_updated === true) {
+    return "reports";
+  }
+  return detectPanelIntentFromActions(payload.action ? [payload.action] : []);
+}
+
+function openWorkspacePanelForIntent(intent, options = {}) {
+  const panel = intent === "storage" ? "reports" : String(intent || "").trim();
+  if (!workspacePanelIntentOrder.includes(panel)) {
+    return;
+  }
+  const isOpen = state.activeAppView === panel && !state.inspectorCollapsed;
+  if (isOpen && !options.force) {
+    state.lastAutoOpenedPanel = panel;
+    return;
+  }
+  state.lastAutoOpenedPanel = panel;
+  switchAppView(panel).catch(() => {});
+}
+
 function navigatePeriod(offset) {
   if (!state.calendar) {
     return;
@@ -1137,7 +1273,7 @@ function changeCalendarView(viewName) {
 }
 
 async function switchAppView(viewName) {
-  const panelViews = new Set(["calendar", "reports", "automations", "settings"]);
+  const panelViews = new Set(["calendar", "reports", "automations"]);
   const isPanelView = panelViews.has(viewName);
   state.activeAppView = viewName;
   if (isPanelView) {
@@ -3496,6 +3632,7 @@ async function confirmPendingAgentAction(actionId, button) {
       }),
     });
     button.textContent = "Bestaetigt";
+    const confirmedPanelIntent = detectPanelIntentFromConfirmedAction(payload);
     if (payload && payload.result) {
       appendChatMessage("bot", "Bestaetigt. Ich habe die Aktion ausgefuehrt.");
     }
@@ -3505,6 +3642,7 @@ async function confirmPendingAgentAction(actionId, button) {
       state.calendar.refetchEvents();
       await refreshCalendarData();
     }
+    openWorkspacePanelForIntent(confirmedPanelIntent, { source: "confirmed-action" });
   } catch (error) {
     button.disabled = false;
     button.textContent = originalText;
@@ -3519,6 +3657,8 @@ async function submitAdviserPrompt(rawPrompt) {
 
   markChatStarted();
   const attachmentPayload = getChatAttachmentPayload();
+  const promptPanelIntent = detectPanelIntentFromText(prompt) || (attachmentPayload.length ? "reports" : "");
+  openWorkspacePanelForIntent(promptPanelIntent, { source: "user-message" });
   appendChatMessage("user", prompt, null, { attachments: attachmentPayload });
   pushChatHistory("user", prompt);
   const chatAbortController = new AbortController();
@@ -3576,14 +3716,20 @@ async function submitAdviserPrompt(rawPrompt) {
       setChatAttachmentStatus("Dokument wird analysiert...");
       clearChatAttachments("Zusammenfassung fertig.");
     }
+    const pendingActions = Array.isArray(data.pending_actions)
+      ? data.pending_actions
+      : (Array.isArray(data.structured_actions) ? data.structured_actions : []);
+    const toolEvents = Array.isArray(data.tool_events) ? data.tool_events : [];
+    const responsePanelIntent = detectPanelIntentFromActions(pendingActions)
+      || detectPanelIntentFromToolEvents(toolEvents)
+      || detectPanelIntentFromText(replyText);
     removeChatPendingIndicator();
     appendChatMessage("bot", replyText, replyPolicy, {
       citations: Array.isArray(data.citations) ? data.citations : [],
-      pendingActions: Array.isArray(data.pending_actions)
-        ? data.pending_actions
-        : (Array.isArray(data.structured_actions) ? data.structured_actions : []),
-      toolEvents: Array.isArray(data.tool_events) ? data.tool_events : [],
+      pendingActions,
+      toolEvents,
     });
+    openWorkspacePanelForIntent(responsePanelIntent, { source: "assistant-message" });
     pushChatHistory("assistant", replyText);
   } catch (error) {
     if (error.name === "AbortError") {
@@ -4428,15 +4574,12 @@ async function initialize() {
 
 function initInvoices() {
   const qrImg = document.getElementById("invoices-qr");
-  const list = document.getElementById("invoices-list");
-  const count = document.getElementById("invoices-count");
-  const countLabel = document.getElementById("invoices-count-label");
   const cameraLink = document.getElementById("invoices-camera-link");
   const dropZone = document.getElementById("invoice-drop-zone");
   const fileInput = document.getElementById("invoice-file-input");
   const fileButton = document.getElementById("invoice-file-button");
   const uploadStatus = document.getElementById("invoice-upload-status");
-  if (!qrImg || !list || !count) return;
+  if (!qrImg || !elements.documentBucketBoard || !elements.documentsTotalCount) return;
 
   const sid = getInvoicesSessionId();
 
@@ -4503,8 +4646,8 @@ function initInvoices() {
         }
       }
 
-      setUploadStatus("Upload saved to storage.", "success");
-      await poll();
+      setUploadStatus("Upload saved to document database.", "success");
+      await refreshDocumentBucketBoard({ force: true });
     } catch (error) {
       setUploadStatus(error.message || "Upload failed.", "error");
     } finally {
@@ -4545,63 +4688,277 @@ function initInvoices() {
     });
   }
 
-  async function poll() {
-    try {
-      const r = await fetch(`/api/invoices/${sid}`);
-      const data = await r.json();
-      const items = data.captures || [];
-      count.textContent = String(items.length);
-      if (countLabel) {
-        countLabel.textContent = items.length === 1 ? "document" : "documents";
-      }
-      if (!items.length) {
-        list.innerHTML = `<div class="documents-empty">No documents yet. Upload files on the left or scan the QR code on the right.</div>`;
-        return;
-      }
-      list.innerHTML = items
-        .map((capture, index) => renderInvoiceCapture(capture, index))
-        .join("");
-    } catch (err) {
-      /* ignore */
-    }
-  }
-  poll();
-  setInterval(poll, 2500);
+  refreshDocumentBucketBoard({ force: true }).catch(() => {});
+  setInterval(() => {
+    refreshDocumentBucketBoard().catch(() => {});
+  }, 5000);
 }
 
-function renderInvoiceCapture(capture, index) {
-  const isImage = String(capture.content_type || "").startsWith("image/");
-  const fileUrl = capture.file_url || capture.image_url || "#";
-  const summary = capture.summary || (isImage ? "Receipt image saved to storage." : "Document saved to storage.");
-  const storageLabels = {
-    supabase: "Supabase Storage",
-    postgres: "Supabase DB",
-    local: "Local",
-  };
-  const storageLabel = capture.storage_bucket || storageLabels[capture.storage_backend] || capture.storage_backend || "Local";
-  const extractionNote = capture.extraction_error
-    ? `<div class="invoice-note">${escapeHtml(capture.extraction_error)}</div>`
-    : "";
-  const preview = isImage
-    ? `<img class="document-thumb" src="${escapeHtml(fileUrl)}" alt="${escapeHtml(capture.file_name || `Document ${index + 1}`)}" loading="lazy" />`
-    : `<span class="document-file-icon material-symbols-outlined">picture_as_pdf</span>`;
+async function refreshDocumentBucketBoard(options = {}) {
+  if (!elements.documentBucketBoard || !elements.documentBrowserStatus) {
+    return;
+  }
+  if (options.useCache && state.documentsBrowser) {
+    renderDocumentBucketBoard();
+    return;
+  }
+    elements.documentBrowserStatus.textContent = "Document buckets werden geladen...";
+  elements.documentBrowserStatus.dataset.variant = "";
+  try {
+    state.documentsBrowser = await apiFetch(`/api/documents/browser?profile_id=${encodeURIComponent(getActiveProfileId())}`, {
+      showLoading: false,
+      suppressErrorBanner: true,
+    });
+    renderDocumentBucketBoard();
+  } catch (error) {
+    elements.documentBrowserStatus.textContent = error.message || "Document buckets konnten nicht geladen werden.";
+    elements.documentBrowserStatus.dataset.variant = "error";
+  }
+}
 
+function getDocumentBucketColumns() {
+  return documentBucketOrder.slice();
+}
+
+function snapshotDocumentsBrowser() {
+  return state.documentsBrowser ? JSON.parse(JSON.stringify(state.documentsBrowser)) : null;
+}
+
+function recomputeDocumentBrowserCounts() {
+  const buckets = Array.isArray(state.documentsBrowser?.buckets) ? state.documentsBrowser.buckets : [];
+  state.documentsBrowser.total_count = buckets.reduce((total, bucket) => total + Number(bucket.count || 0), 0);
+  buckets.forEach((bucket) => {
+    const docs = Array.isArray(bucket.documents) ? bucket.documents : [];
+    bucket.count = docs.length;
+    bucket.confirmed_count = docs.filter((item) => item.bucket_confirmed).length;
+    bucket.unconfirmed_count = docs.filter((item) => !item.bucket_confirmed).length;
+  });
+}
+
+function upsertDocumentInBrowserState(document) {
+  if (!state.documentsBrowser || !document || !document.document_id) {
+    return;
+  }
+  const targetBucket = document.storage_bucket || "IV";
+  const buckets = Array.isArray(state.documentsBrowser.buckets) ? state.documentsBrowser.buckets : [];
+  buckets.forEach((bucket) => {
+    bucket.documents = (Array.isArray(bucket.documents) ? bucket.documents : []).filter((item) => item.document_id !== document.document_id);
+  });
+  const bucket = buckets.find((item) => item.id === targetBucket) || buckets[0];
+  if (!bucket) {
+    return;
+  }
+  bucket.documents = [document, ...(Array.isArray(bucket.documents) ? bucket.documents : [])].sort((left, right) =>
+    String(right.created_at || "").localeCompare(String(left.created_at || ""))
+  );
+  recomputeDocumentBrowserCounts();
+}
+
+function applyDocumentBucketOptimistic(documentId, targetBucket) {
+  if (!state.documentsBrowser) {
+    return;
+  }
+  const buckets = Array.isArray(state.documentsBrowser.buckets) ? state.documentsBrowser.buckets : [];
+  let movedDocument = null;
+  buckets.forEach((bucket) => {
+    const docs = Array.isArray(bucket.documents) ? bucket.documents : [];
+    const index = docs.findIndex((item) => item.document_id === documentId);
+    if (index >= 0) {
+      movedDocument = { ...docs[index] };
+      docs.splice(index, 1);
+      bucket.documents = docs;
+    }
+  });
+  if (!movedDocument) {
+    return;
+  }
+  movedDocument.storage_bucket = targetBucket;
+  movedDocument.suggested_bucket = targetBucket;
+  movedDocument.bucket_confirmed = true;
+  movedDocument.bucket_confirmed_at = new Date().toISOString();
+  movedDocument.bucket_reason = movedDocument.bucket_reason || `Bucket ${targetBucket} wurde manuell bestaetigt.`;
+  const target = buckets.find((bucket) => bucket.id === targetBucket);
+  if (target) {
+    target.documents = [movedDocument, ...(Array.isArray(target.documents) ? target.documents : [])];
+  }
+  recomputeDocumentBrowserCounts();
+}
+
+async function saveDocumentBucketChange(documentId, targetBucket, reason = "") {
+  const previous = snapshotDocumentsBrowser();
+  applyDocumentBucketOptimistic(documentId, targetBucket);
+  renderDocumentBucketBoard();
+  try {
+    const payload = await apiFetch(`/api/documents/${encodeURIComponent(documentId)}/bucket`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        profile_id: getActiveProfileId(),
+        bucket: targetBucket,
+        reason,
+      }),
+    });
+    if (payload && payload.document) {
+      upsertDocumentInBrowserState(payload.document);
+      renderDocumentBucketBoard();
+    }
+  } catch (error) {
+    state.documentsBrowser = previous;
+    renderDocumentBucketBoard();
+    throw error;
+  }
+}
+
+function renderDocumentBucketBoard() {
+  const data = state.documentsBrowser || {};
+  const buckets = Array.isArray(data.buckets) ? data.buckets : [];
+  const bucketMap = new Map(buckets.map((bucket) => [bucket.id, bucket]));
+  const totalCount = Number(data.total_count || 0);
+  const totalUnconfirmed = buckets.reduce((total, bucket) => total + Number(bucket.unconfirmed_count || 0), 0);
+
+  if (elements.documentsTotalCount) {
+    elements.documentsTotalCount.textContent = String(totalCount);
+  }
+  if (elements.documentsTotalLabel) {
+    elements.documentsTotalLabel.textContent = totalCount === 1 ? "document" : "documents";
+  }
+  if (elements.documentBrowserStatus) {
+    elements.documentBrowserStatus.textContent = `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} offen zur Pruefung.`;
+    elements.documentBrowserStatus.dataset.variant = "";
+  }
+
+  elements.documentBucketBoard.innerHTML = getDocumentBucketColumns()
+    .map((bucketName) => renderDocumentBucketColumn(bucketMap.get(bucketName) || { id: bucketName, name: bucketName, documents: [], count: 0, confirmed_count: 0, unconfirmed_count: 0 }))
+    .join("");
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-column]").forEach((column) => {
+    const targetBucket = column.dataset.documentBucketColumn || "";
+    column.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      column.classList.add("is-drop-target");
+    });
+    column.addEventListener("dragleave", () => column.classList.remove("is-drop-target"));
+    column.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      column.classList.remove("is-drop-target");
+      const documentId = event.dataTransfer.getData("text/document-id");
+      const sourceBucket = event.dataTransfer.getData("text/document-bucket");
+      if (!documentId || !targetBucket || sourceBucket === targetBucket) {
+        return;
+      }
+      try {
+        await saveDocumentBucketChange(documentId, targetBucket, `Per Drag-and-drop nach ${targetBucket} verschoben.`);
+      } catch (error) {
+        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+      }
+    });
+  });
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-card]").forEach((card) => {
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer.setData("text/document-id", card.dataset.documentId || "");
+      event.dataTransfer.setData("text/document-bucket", card.dataset.documentBucket || "");
+      event.dataTransfer.effectAllowed = "move";
+    });
+  });
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-select]").forEach((select) => {
+    const applyButton = select.closest("[data-document-card]")?.querySelector("[data-document-bucket-apply]");
+    const syncButtonLabel = () => {
+      if (!applyButton) {
+        return;
+      }
+      const currentBucket = select.dataset.currentBucket || "";
+      applyButton.textContent = select.value === currentBucket ? "Bestaetigen" : "Verschieben";
+    };
+    select.addEventListener("change", syncButtonLabel);
+    syncButtonLabel();
+  });
+
+  elements.documentBucketBoard.querySelectorAll("[data-document-bucket-apply]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const card = button.closest("[data-document-card]");
+      const select = card?.querySelector("[data-document-bucket-select]");
+      const documentId = card?.dataset.documentId || "";
+      if (!select || !documentId || !select.value) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        await saveDocumentBucketChange(
+          documentId,
+          select.value,
+          select.value === (select.dataset.currentBucket || "")
+            ? `Bucket ${select.value} wurde bestaetigt.`
+            : `Bucket manuell auf ${select.value} gesetzt.`
+        );
+      } catch (error) {
+        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+function renderDocumentBucketColumn(bucket) {
+  const documents = Array.isArray(bucket.documents) ? bucket.documents : [];
+  const cards = documents.length
+    ? documents.map((document) => renderDocumentBucketCard(document)).join("")
+    : `<div class="document-bucket-empty">Noch keine Dokumente in diesem Bucket.</div>`;
   return `
-    <article class="document-row" role="row">
-      <div class="document-name-cell" role="cell">
+    <section class="document-bucket-column" data-document-bucket-column="${escapeHtml(bucket.id || bucket.name || "")}">
+      <div class="document-bucket-head">
+        <div>
+          <h3>${escapeHtml(bucket.name || bucket.id || "Bucket")}</h3>
+          <p>${Number(bucket.confirmed_count || 0)} bestaetigt · ${Number(bucket.unconfirmed_count || 0)} offen</p>
+        </div>
+        <span class="document-count">${Number(bucket.count || 0)}</span>
+      </div>
+      <div class="document-bucket-cards">${cards}</div>
+    </section>
+  `;
+}
+
+function renderDocumentBucketCard(document) {
+  const fileUrl = document.signed_url || "#";
+  const summary = document.summary || "No summary available.";
+  const preview = document.previewable && fileUrl !== "#"
+    ? `<img class="document-thumb" src="${escapeHtml(fileUrl)}" alt="${escapeHtml(document.file_name || "Document")}" loading="lazy" />`
+    : `<span class="document-file-icon material-symbols-outlined">${String(document.content_type || "").startsWith("application/pdf") ? "picture_as_pdf" : "draft"}</span>`;
+  const statusClass = document.bucket_confirmed ? "is-confirmed" : "is-pending";
+  const statusLabel = document.bucket_confirmed ? "Bestaetigt" : "Pruefen";
+  const bucketOptions = getDocumentBucketColumns()
+    .map((bucketName) => `<option value="${escapeHtml(bucketName)}"${bucketName === document.storage_bucket ? " selected" : ""}>${escapeHtml(bucketName)}</option>`)
+    .join("");
+  return `
+    <article class="document-bucket-card" draggable="true" data-document-card data-document-id="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}">
+      <div class="document-bucket-card-top">
+        <span class="document-review-pill ${statusClass}">${statusLabel}</span>
+        <span class="document-card-meta">${escapeHtml(formatInvoiceCaptureTime(document.created_at))}</span>
+      </div>
+      <div class="document-name-cell">
         <a class="document-thumb-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">
           ${preview}
         </a>
         <div class="document-copy">
-          <span class="invoice-title">${escapeHtml(capture.file_name || `Document ${index + 1}`)}</span>
+          <span class="invoice-title">${escapeHtml(document.file_name || "Document")}</span>
           <div class="invoice-summary">${escapeHtml(summary)}</div>
-          ${extractionNote}
+          <div class="invoice-note">${escapeHtml(document.bucket_reason || "Bucket-Vorschlag wartet auf Bestaetigung.")}</div>
         </div>
       </div>
-      <span role="cell">${escapeHtml(formatInvoiceCaptureTime(capture.created_at))}</span>
-      <span role="cell">${escapeHtml(formatFileSize(capture.content_size) || "-")}</span>
-      <span role="cell"><span class="storage-badge">${escapeHtml(storageLabel)}</span></span>
-      <span role="cell"><a class="document-open-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">Open</a></span>
+      <div class="document-card-stats">
+        <span>${escapeHtml(formatFileSize(document.content_size) || "-")}</span>
+        <span class="storage-badge">${escapeHtml(document.storage_bucket || "-")}</span>
+      </div>
+      <div class="document-card-actions">
+        <a class="document-open-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">Oeffnen</a>
+        <div class="document-bucket-form">
+          <select class="document-bucket-select" data-document-bucket-select data-current-bucket="${escapeHtml(document.storage_bucket || "")}">
+            ${bucketOptions}
+          </select>
+          <button type="button" class="secondary-button document-bucket-apply" data-document-bucket-apply>Verschieben</button>
+        </div>
+      </div>
     </article>
   `;
 }

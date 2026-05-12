@@ -19,9 +19,6 @@
   <div class="layout-shell">
     <aside class="app-nav">
       <div class="app-nav-brand">
-        <button id="open-settings-view" class="profile-nav-button" type="button" aria-label="Open profile" title="Profile">
-          <span class="material-symbols-outlined">account_circle</span>
-        </button>
         <div class="brand-copy">
           <h1 class="brand">IV Desk</h1>
           <p class="brand-kicker">Agent Workspace</p>
@@ -49,6 +46,12 @@
           <span>Community</span>
         </button>
       </nav>
+
+      <div class="app-nav-footer">
+        <button id="open-settings-view" class="profile-nav-button" type="button" aria-label="Open profile" title="Profile">
+          <span class="material-symbols-outlined">account_circle</span>
+        </button>
+      </div>
     </aside>
 
     <div class="layout-main">
@@ -324,10 +327,10 @@
                   <div class="storage-option-label">Option 2</div>
                   <div>
                     <p class="section-title">Phone QR Scan</p>
-                    <p class="muted-copy">Scan this QR code with your phone, then capture receipts with the camera route.</p>
+                    <p class="muted-copy">Scan this QR code with your phone, then capture documents with the camera route.</p>
                     <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
                   </div>
-                  <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add invoice" />
+                  <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add documents" />
                 </section>
               </div>
 
@@ -335,20 +338,12 @@
                 <div class="document-database-header">
                   <div>
                     <p class="section-title">Document Database</p>
-                    <p class="muted-copy">All stored documents, sorted by newest date first.</p>
+                    <p class="muted-copy">Four review buckets with live document cards from the database.</p>
                   </div>
-                  <span class="document-count"><span id="invoices-count">0</span><span id="invoices-count-label">documents</span></span>
+                  <span class="document-count"><span id="documents-total-count">0</span><span id="documents-total-label">documents</span></span>
                 </div>
-                <div class="document-table" role="table" aria-label="Stored invoice documents">
-                  <div class="document-row document-head" role="row">
-                    <span role="columnheader">Document</span>
-                    <span role="columnheader">Date</span>
-                    <span role="columnheader">Size</span>
-                    <span role="columnheader">Storage</span>
-                    <span role="columnheader">Open</span>
-                  </div>
-                  <div id="invoices-list" class="document-list"></div>
-                </div>
+                <p id="document-browser-status" class="upload-status" role="status">Loading document buckets...</p>
+                <div id="document-bucket-board" class="document-bucket-board" aria-label="Document bucket board"></div>
               </div>
             </article>
           </div>
@@ -482,7 +477,7 @@
         <button class="modal-close" type="button" data-close-modal="chat-qr-modal" aria-label="Close">&times;</button>
       </div>
       <div class="chat-qr-content">
-        <img id="chat-invoices-qr" class="invoices-qr chat-invoices-qr" alt="Scan QR to add invoice" />
+        <img id="chat-invoices-qr" class="invoices-qr chat-invoices-qr" alt="Scan QR to add documents" />
         <a id="chat-invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
         <p id="chat-qr-status" class="upload-status" role="status">QR-Code wird geladen...</p>
       </div>

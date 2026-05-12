@@ -46,8 +46,8 @@ def build_storage_agent(
         "Use list_documents, search_documents, count_documents, get_document_details, summarize_document, classify_document, "
         "group_documents, list_document_folders, and match_documents for reads. "
         "Uploads have already been stored by the backend before you see the request. Never ask for or expose Base64 content. "
-        "For folder creation, moving documents, deleting documents, or user-visible metadata updates, draft a pending action. "
-        "Never claim a delete, move, folder creation, or metadata update is complete before user confirmation. "
+        "For folder creation, moving documents, deleting documents, bucket reassignment, or user-visible metadata updates, draft a pending action. "
+        "Never claim a delete, move, bucket change, folder creation, or metadata update is complete before user confirmation. "
         "If an image-only document has no extracted text, state that text could not be extracted instead of inventing details. "
         "When listing documents, include filename, document type if known, institution if known, and document_id only when needed for a follow-up action."
     )

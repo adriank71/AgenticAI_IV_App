@@ -128,42 +128,40 @@ class FakeReportStore:
         return b"%PDF-1.4\n", "application/pdf"
 
 
-class FakeInvoiceStore:
-    def __init__(self, backend_name="supabase"):
-        self.captures = []
-        self.backend_name = backend_name
+class FakeDocumentService:
+    def __init__(self, storage_bucket="IV"):
+        self.documents = []
+        self.storage_bucket = storage_bucket
 
-    def save_capture(self, **kwargs):
-        record = {
-            "invoice_id": f"inv-{len(self.captures) + 1}",
-            "sid": kwargs["sid"],
+    def upload_document(self, **kwargs):
+        metadata = kwargs.get("metadata") or {}
+        document = {
+            "document_id": f"doc-{len(self.documents) + 1}",
+            "user_id": kwargs["user_id"],
             "file_name": kwargs["file_name"],
-            "storage_backend": self.backend_name,
-            "storage_bucket": "invoice_upload" if self.backend_name == "supabase" else None,
-            "storage_key": f"Invoices/{kwargs['sid']}/inv-{len(self.captures) + 1}_{kwargs['file_name']}",
-            "storage_url": "supabase://invoice_upload/private/invoice.jpg",
+            "safe_file_name": kwargs["file_name"],
+            "storage_bucket": self.storage_bucket,
+            "storage_key": f"Documents/default/2026/05/doc-{len(self.documents) + 1}_{kwargs['file_name']}",
+            "storage_url": f"supabase://{self.storage_bucket}/Documents/default/2026/05/doc-{len(self.documents) + 1}_{kwargs['file_name']}",
             "content_type": kwargs["content_type"],
             "content_size": len(kwargs["content"]),
-            "fields": kwargs.get("fields"),
-            "extraction_error": kwargs.get("extraction_error"),
-            "folder_path": f"Invoices/{kwargs['sid']}",
+            "document_type": "image" if kwargs["content_type"].startswith("image/") else "document",
+            "institution": "",
+            "document_date": None,
+            "tags": [],
+            "summary": "Dokument gespeichert.",
+            "extracted_text": "",
+            "extraction_status": "no_text" if kwargs["content_type"].startswith("image/") else "completed",
+            "extraction_error": metadata.get("invoice_extraction_error"),
+            "metadata": metadata,
             "created_at": "2026-04-22T12:00:00+00:00",
             "updated_at": "2026-04-22T12:00:00+00:00",
+            "bucket_confirmed": False,
+            "bucket_reason": "Keine starke Zuordnung gefunden; Standard-Bucket IV verwendet.",
+            "bucket_confidence": "low",
         }
-        self.captures.append(record)
-        return record
-
-    def list_captures(self, sid):
-        return [capture for capture in self.captures if capture["sid"] == sid]
-
-    def get_capture(self, *, sid, invoice_id):
-        for capture in self.captures:
-            if capture["sid"] == sid and capture["invoice_id"] == invoice_id:
-                return capture
-        return None
-
-    def read_capture_bytes(self, capture):
-        return b"\xff\xd8\xff", capture.get("content_type") or "image/jpeg"
+        self.documents.append(document)
+        return document
 
 
 class FakeTemplateStore:
@@ -633,9 +631,13 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_invoice_capture_stores_image_even_when_extraction_fails(self):
         client = app_module.app.test_client()
-        fake_invoice_store = FakeInvoiceStore()
+        fake_document_service = FakeDocumentService()
 
-        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+        with patch.object(app_module, "get_storage_service", return_value=fake_document_service), patch.object(
+            app_module,
+            "list_documents_for_session",
+            side_effect=lambda **kwargs: list(fake_document_service.documents),
+        ), patch.object(
             app_module, "_call_openai_vision", side_effect=RuntimeError("openai unavailable")
         ):
             response = client.post(
@@ -653,13 +655,17 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["capture"]["folder_path"], "Invoices/session123")
         self.assertEqual(payload["capture"]["file_name"], "phone.jpg")
         self.assertEqual(payload["extraction_error"], "openai unavailable")
-        self.assertEqual(len(fake_invoice_store.captures), 1)
+        self.assertEqual(len(fake_document_service.documents), 1)
 
     def test_invoice_capture_accepts_pdf_without_vision_extraction(self):
         client = app_module.app.test_client()
-        fake_invoice_store = FakeInvoiceStore()
+        fake_document_service = FakeDocumentService()
 
-        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+        with patch.object(app_module, "get_storage_service", return_value=fake_document_service), patch.object(
+            app_module,
+            "list_documents_for_session",
+            side_effect=lambda **kwargs: list(fake_document_service.documents),
+        ), patch.object(
             app_module, "_call_openai_vision"
         ) as vision_mock:
             response = client.post(
@@ -683,9 +689,13 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_invoice_capture_returns_supabase_backend(self):
         client = app_module.app.test_client()
-        fake_invoice_store = FakeInvoiceStore(backend_name="supabase")
+        fake_document_service = FakeDocumentService(storage_bucket="IV")
 
-        with patch.object(app_module, "get_invoice_store", return_value=fake_invoice_store), patch.object(
+        with patch.object(app_module, "get_storage_service", return_value=fake_document_service), patch.object(
+            app_module,
+            "list_documents_for_session",
+            side_effect=lambda **kwargs: list(fake_document_service.documents),
+        ), patch.object(
             app_module, "_call_openai_vision", return_value={"merchant": "Cafe Example", "date": "2026-04-30", "total": 12.5, "currency": "CHF"}
         ):
             response = client.post(
@@ -700,20 +710,20 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         payload = response.get_json()
         self.assertEqual(payload["capture"]["storage_backend"], "supabase")
-        self.assertEqual(payload["capture"]["storage_bucket"], "invoice_upload")
-        self.assertIn("/api/invoices/session123/files/inv-1/phone.jpg", payload["capture"]["file_url"])
+        self.assertEqual(payload["capture"]["storage_bucket"], "IV")
+        self.assertIn("/api/invoices/session123/files/doc-1/phone.jpg", payload["capture"]["file_url"])
 
     def test_invoice_capture_returns_clear_storage_configuration_error(self):
         client = app_module.app.test_client()
 
-        class FailingInvoiceStore:
-            def save_capture(self, **kwargs):
+        class FailingDocumentService:
+            def upload_document(self, **kwargs):
                 raise RuntimeError(
-                    "Supabase Storage upload failed for bucket 'invoice_upload'. "
+                    "Supabase Storage upload failed for bucket 'IV'. "
                     "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files."
                 )
 
-        with patch.object(app_module, "get_invoice_store", return_value=FailingInvoiceStore()), patch.object(
+        with patch.object(app_module, "get_storage_service", return_value=FailingDocumentService()), patch.object(
             app_module, "_call_openai_vision"
         ):
             response = client.post(

@@ -120,6 +120,13 @@ class FakeSupabaseBucket:
     def download(self, path):
         return self.objects[(self.bucket, path)]["content"]
 
+    def remove(self, paths):
+        for path in paths or []:
+            self.objects.pop((self.bucket, path), None)
+
+    def create_signed_url(self, path, expires_in):
+        return {"signedURL": f"https://signed.invalid/{self.bucket}/{path}?expires={expires_in}"}
+
 
 class FakeSupabaseStorage:
     def __init__(self, objects):
@@ -165,13 +172,13 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(docx_error)
         self.assertIn("Therapie Bericht", docx_text)
 
-    def test_storage_service_uploads_document_to_invoice_upload_documents_prefix(self):
+    def test_storage_service_uploads_document_to_iv_bucket_with_review_metadata(self):
         cursor = RecordingCursor()
         client = FakeSupabaseClient()
         service = StorageService(
             "postgres://example",
             client=client,
-            bucket="Invoice_upload",
+            bucket="IV",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 
@@ -182,20 +189,44 @@ class StorageTests(unittest.TestCase):
             content_type="text/plain",
         )
 
-        self.assertEqual(document["storage_bucket"], "Invoice_upload")
+        self.assertEqual(document["storage_bucket"], "IV")
         self.assertTrue(document["storage_key"].startswith("Documents/default/2026/05/"))
         self.assertTrue(document["storage_key"].endswith("-Rechnung_Mai_2026.txt"))
-        self.assertIn(("Invoice_upload", document["storage_key"]), client.objects)
+        self.assertIn(("IV", document["storage_key"]), client.objects)
         self.assertEqual(document["document_type"], "invoice")
         self.assertEqual(document["institution"], "IV-Stelle")
+        self.assertEqual(document["suggested_bucket"], "IV")
+        self.assertFalse(document["bucket_confirmed"])
         self.assertTrue(any("INSERT INTO documents" in query for query, _ in cursor.statements))
+
+    def test_storage_service_routes_transport_receipt_to_tixitaxi_bucket(self):
+        cursor = RecordingCursor()
+        client = FakeSupabaseClient()
+        service = StorageService(
+            "postgres://example",
+            client=client,
+            bucket="IV",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        document = service.upload_document(
+            user_id="default",
+            file_name="taxi_quittung.txt",
+            content="Taxi Tixi Fahrt zur Therapie CHF 45".encode("utf-8"),
+            content_type="text/plain",
+            metadata={"tags": ["transport"]},
+        )
+
+        self.assertEqual(document["storage_bucket"], "TixiTaxi")
+        self.assertIn(("TixiTaxi", document["storage_key"]), client.objects)
+        self.assertIn("Transport", document["bucket_reason"])
 
     def test_storage_service_list_documents_scopes_and_filters_queries(self):
         cursor = RecordingCursor(fetchall_results=[[]])
         service = StorageService(
             "postgres://example",
             client=FakeSupabaseClient(),
-            bucket="Invoice_upload",
+            bucket="IV",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 
@@ -229,7 +260,7 @@ class StorageTests(unittest.TestCase):
             "document_id": "doc-1",
             "file_name": "brief.txt",
             "safe_file_name": "brief.txt",
-            "storage_bucket": "Invoice_upload",
+            "storage_bucket": "IV",
             "storage_key": "Documents/default/2026/05/doc-1-brief.txt",
             "content_type": "text/plain",
             "content_size": 5,
@@ -241,6 +272,10 @@ class StorageTests(unittest.TestCase):
             "extracted_text": "Hallo",
             "extraction_status": "completed",
             "extraction_error": "",
+            "suggested_bucket": "IV",
+            "bucket_reason": "Keine starke Zuordnung gefunden; Standard-Bucket IV verwendet.",
+            "bucket_confidence": "low",
+            "bucket_confirmed": False,
         }
 
         class FakeDocumentService:
@@ -265,6 +300,75 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(fake_service.kwargs["content"], b"Hallo")
         self.assertNotIn("content_base64", sanitized[0])
         self.assertEqual(sanitized[0]["document_id"], "doc-1")
+        self.assertEqual(sanitized[0]["storage_bucket"], "IV")
+
+    def test_storage_service_reassigns_document_across_buckets(self):
+        existing_row = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "folder_id": None,
+            "file_name": "receipt.txt",
+            "safe_file_name": "receipt.txt",
+            "storage_bucket": "IV",
+            "storage_key": "Documents/default/2026/05/doc-1-receipt.txt",
+            "storage_url": "supabase://IV/Documents/default/2026/05/doc-1-receipt.txt",
+            "content_type": "text/plain",
+            "content_size": 16,
+            "checksum_sha256": "abc",
+            "document_type": "receipt",
+            "institution": "",
+            "document_date": "2026-05-01",
+            "year": 2026,
+            "month": 5,
+            "tags": ["transport"],
+            "summary": "Taxi receipt",
+            "extracted_text": "Taxi Tixi Fahrt",
+            "extraction_status": "completed",
+            "extraction_error": None,
+            "metadata": {
+                "source": "chat_attachment",
+                "suggested_bucket": "IV",
+                "bucket_reason": "Initial suggestion",
+                "bucket_confidence": "low",
+                "bucket_confirmed": False,
+            },
+            "created_at": "2026-05-01T10:00:00+00:00",
+            "updated_at": "2026-05-01T10:00:00+00:00",
+        }
+        updated_row = {
+            **existing_row,
+            "storage_bucket": "TixiTaxi",
+            "storage_url": "supabase://TixiTaxi/Documents/default/2026/05/doc-1-receipt.txt",
+            "metadata": {
+                "source": "chat_attachment",
+                "suggested_bucket": "TixiTaxi",
+                "bucket_reason": "Dokument von IV nach TixiTaxi verschoben.",
+                "bucket_confidence": "high",
+                "bucket_confirmed": True,
+                "bucket_confirmed_at": "2026-05-01T10:05:00+00:00",
+                "bucket_review_source": "user",
+            },
+        }
+        cursor = RecordingCursor(fetchone_results=[existing_row, existing_row, updated_row])
+        client = FakeSupabaseClient()
+        client.objects[("IV", existing_row["storage_key"])] = {"content": b"Taxi Tixi Fahrt", "options": {}}
+        service = StorageService(
+            "postgres://example",
+            client=client,
+            bucket="IV",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        document = service.reassign_document_bucket(
+            user_id="default",
+            document_id="doc-1",
+            bucket_name="TixiTaxi",
+        )
+
+        self.assertEqual(document["storage_bucket"], "TixiTaxi")
+        self.assertTrue(document["bucket_confirmed"])
+        self.assertIn(("TixiTaxi", existing_row["storage_key"]), client.objects)
+        self.assertNotIn(("IV", existing_row["storage_key"]), client.objects)
 
     def test_local_invoice_capture_store_persists_image_and_metadata(self):
         with workspace_tempdir() as temp_dir:
@@ -585,8 +689,8 @@ class StorageTests(unittest.TestCase):
                         "file_name": "receipt.jpg",
                         "storage_key": "Invoices/session123/inv-1_receipt.jpg",
                         "storage_backend": "supabase",
-                        "storage_bucket": "invoice_upload",
-                        "storage_url": "supabase://invoice_upload/Invoices/session123/inv-1_receipt.jpg",
+                        "storage_bucket": "IV",
+                        "storage_url": "supabase://IV/Invoices/session123/inv-1_receipt.jpg",
                         "content_type": "image/jpeg",
                         "content_size": 3,
                         "fields": {"merchant": "Cafe Example"},
@@ -602,7 +706,7 @@ class StorageTests(unittest.TestCase):
         store = SupabaseStorageInvoiceCaptureStore(
             "postgres://example",
             client=client,
-            bucket="invoice_upload",
+            bucket="IV",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 
@@ -617,10 +721,10 @@ class StorageTests(unittest.TestCase):
         content, content_type = store.read_capture_bytes(saved)
 
         self.assertEqual(saved["storage_backend"], "supabase")
-        self.assertEqual(saved["storage_bucket"], "invoice_upload")
+        self.assertEqual(saved["storage_bucket"], "IV")
         self.assertTrue(saved["storage_key"].startswith("Invoices/session123/"))
         self.assertEqual(listed[0]["storage_backend"], "supabase")
-        self.assertEqual(listed[0]["storage_bucket"], "invoice_upload")
+        self.assertEqual(listed[0]["storage_bucket"], "IV")
         self.assertEqual(content, b"\xff\xd8\xff")
         self.assertEqual(content_type, "image/jpeg")
         self.assertTrue(any("INSERT INTO invoice_captures" in query for query, _ in cursor.statements))
@@ -632,7 +736,7 @@ class StorageTests(unittest.TestCase):
         store = SupabaseStorageInvoiceCaptureStore(
             "postgres://example",
             client=FakeSupabaseClient(),
-            bucket="invoice_upload",
+            bucket="IV",
             connection_factory=lambda: RecordingConnection(cursor),
         )
 

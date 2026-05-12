@@ -281,7 +281,7 @@ def _supabase_reports_bucket() -> str:
 
 
 def _supabase_invoices_bucket() -> str:
-    return os.environ.get("SUPABASE_STORAGE_INVOICES_BUCKET", "invoice_upload").strip() or "invoice_upload"
+    return os.environ.get("SUPABASE_STORAGE_INVOICES_BUCKET", "IV").strip() or "IV"
 
 
 SUPABASE_TEMPLATE_FILES = {

@@ -24,7 +24,7 @@ create table if not exists public.documents (
   folder_id uuid references public.document_folders(folder_id) on delete set null,
   file_name text not null,
   safe_file_name text not null,
-  storage_bucket text not null default 'Invoice_upload',
+  storage_bucket text not null default 'IV',
   storage_key text not null unique,
   storage_url text not null,
   content_type text not null,

@@ -70,6 +70,7 @@ SUPPORTED_ACTION_TYPES = {
     "storage.move_document",
     "storage.delete_document",
     "storage.update_metadata",
+    "storage.reassign_bucket",
 }
 
 
