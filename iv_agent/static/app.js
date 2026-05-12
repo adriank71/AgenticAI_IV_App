@@ -261,6 +261,7 @@ const elements = {
   automationPanelCount: document.getElementById("automation-panel-count"),
   automationPanelSummary: document.getElementById("automation-panel-summary"),
   panelNewAutomationButton: document.getElementById("panel-new-automation"),
+  panelGenerateReportButton: document.getElementById("panel-generate-report"),
   adviserForm: document.getElementById("adviser-form"),
   adviserShell: document.getElementById("adviser-shell"),
   chatWelcome: document.getElementById("chat-welcome"),
@@ -1633,7 +1634,7 @@ function getVoiceContext(target) {
       button: elements.automationVoiceButton,
       statusEl: elements.automationVoiceStatus,
       transcriptEl: elements.automationVoiceTranscript,
-      idleStatus: 'Try: "Remind me on the last day of every month and prepare the Assistenzbeitrag"',
+      idleStatus: "",
       recordingStatus: "Listening… tap mic again to stop",
       processingStatus: "Sending to OpenAI...",
     };
@@ -2432,14 +2433,269 @@ function initCalendar() {
   state.calendar.render();
 }
 
-function exportCalendarPdf() {
-  const heading = document.getElementById("calendar-heading");
-  const originalTitle = document.title;
-  if (heading) {
-    document.title = `Calendar – ${heading.textContent}`;
+// ── PDF Export ─────────────────────────────────────────────────────────────
+
+let pdfExportLayout = "weekly";
+
+function openPdfExportModal() {
+  const fromInput = document.getElementById("pdf-export-from");
+  const toInput = document.getElementById("pdf-export-to");
+  if (fromInput && !fromInput.value) fromInput.value = state.currentMonth;
+  if (toInput && !toInput.value) toInput.value = state.currentMonth;
+  openModal("pdf-export-modal", document.getElementById("export-calendar-pdf"));
+}
+
+function initPdfExportModal() {
+  const form = document.getElementById("pdf-export-form");
+  if (!form) return;
+
+  form.querySelectorAll("[data-pdf-layout]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      form.querySelectorAll("[data-pdf-layout]").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      pdfExportLayout = btn.dataset.pdfLayout;
+    });
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fromMonth = document.getElementById("pdf-export-from").value;
+    const toMonth = document.getElementById("pdf-export-to").value;
+    if (!fromMonth || !toMonth || fromMonth > toMonth) return;
+
+    const submitBtn = document.getElementById("generate-pdf-btn");
+    submitBtn.textContent = "Generiere…";
+    submitBtn.disabled = true;
+
+    try {
+      await generateAndPrintCalendarPdf(fromMonth, toMonth, pdfExportLayout);
+    } finally {
+      submitBtn.textContent = "PDF generieren";
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+function getPdfMonthRange(fromMonth, toMonth) {
+  const months = [];
+  const [fy, fm] = fromMonth.split("-").map(Number);
+  const [ty, tm] = toMonth.split("-").map(Number);
+  let y = fy, m = fm;
+  while (y < ty || (y === ty && m <= tm)) {
+    months.push(`${y}-${String(m).padStart(2, "0")}`);
+    m++;
+    if (m > 12) { m = 1; y++; }
   }
-  window.print();
-  document.title = originalTitle;
+  return months;
+}
+
+function getMondayOfDate(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const dow = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - dow);
+  return formatIsoDate(date);
+}
+
+function getIsoWeekNumber(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const jan4 = new Date(date.getFullYear(), 0, 4);
+  const daysSinceJan4 = (date - jan4) / 86400000;
+  return Math.ceil((daysSinceJan4 + ((jan4.getDay() + 6) % 7) + 1) / 7);
+}
+
+function getPdfEventDetail(event) {
+  if (event.category === "assistant") {
+    const h = event.assistant_hours || {};
+    const parts = Object.entries(assistantHourFieldLabels)
+      .filter(([k]) => Number(h[k]) > 0)
+      .map(([k, label]) => `${label}: ${Number(h[k]).toFixed(1)}h`);
+    const total = Number(event.hours || 0);
+    if (total > 0) parts.unshift(`Total: ${total.toFixed(2)}h`);
+    if (event.notes) parts.push(event.notes);
+    return parts.join(" · ");
+  }
+  if (event.category === "transport") {
+    const parts = [];
+    if (event.transport_mode) parts.push(event.transport_mode.replace("_", " "));
+    if (Number(event.transport_kilometers) > 0) parts.push(`${event.transport_kilometers} km`);
+    if (event.transport_address) parts.push(event.transport_address);
+    if (event.notes) parts.push(event.notes);
+    return parts.join(" · ");
+  }
+  return event.notes || "";
+}
+
+function renderPdfEventEntry(event) {
+  const timeStr = event.all_day ? "Ganztag"
+    : event.end_time ? `${event.time} – ${event.end_time}` : (event.time || "");
+  const detail = getPdfEventDetail(event);
+  const cat = event.category || "other";
+  return `<div class="ev ev-${cat}">
+    ${timeStr ? `<div class="ev-time">${timeStr}</div>` : ""}
+    <div class="ev-title">${escapeHtml(event.title || "")}</div>
+    ${detail ? `<div class="ev-detail">${escapeHtml(detail)}</div>` : ""}
+  </div>`;
+}
+
+function buildWeeklyPdfBody(eventsByDate, fromMonth, toMonth) {
+  const [fy, fm] = fromMonth.split("-").map(Number);
+  const [ty, tm] = toMonth.split("-").map(Number);
+  const rangeStart = new Date(fy, fm - 1, 1);
+  const rangeEnd = new Date(ty, tm, 0);
+
+  let cursor = new Date(rangeStart);
+  const dow0 = (cursor.getDay() + 6) % 7;
+  cursor.setDate(cursor.getDate() - dow0);
+
+  const DE_DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"];
+  const blocks = [];
+
+  while (cursor <= rangeEnd) {
+    const weekDates = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(cursor);
+      d.setDate(cursor.getDate() + i);
+      weekDates.push(formatIsoDate(d));
+    }
+    const kw = getIsoWeekNumber(weekDates[0]);
+    const [fd, fmo] = [weekDates[0].split("-")[2], weekDates[0].split("-")[1]];
+    const [ld, lmo, lyr] = [weekDates[4].split("-")[2], weekDates[4].split("-")[1], weekDates[4].split("-")[0]];
+
+    const headerCells = weekDates.map((date, i) => {
+      const [, mo, dy] = date.split("-");
+      return `<th class="dc"><span class="dname">${DE_DAYS[i]}</span><span class="ddate">${dy}.${mo}</span></th>`;
+    }).join("");
+
+    const dataCells = weekDates.map((date) => {
+      const evs = eventsByDate[date] || [];
+      if (!evs.length) return `<td class="dc empty"></td>`;
+      return `<td class="dc">${evs.map(renderPdfEventEntry).join("")}</td>`;
+    }).join("");
+
+    blocks.push(`<div class="wb">
+      <div class="wh">KW ${kw} &nbsp;·&nbsp; ${fd}.${fmo} – ${ld}.${lmo}.${lyr}</div>
+      <table><thead><tr>${headerCells}</tr></thead>
+      <tbody><tr>${dataCells}</tr></tbody></table>
+    </div>`);
+
+    cursor.setDate(cursor.getDate() + 7);
+  }
+  return blocks.join("\n");
+}
+
+function buildMonthlyPdfBody(eventsByDate, fromMonth, toMonth) {
+  const months = getPdfMonthRange(fromMonth, toMonth);
+  const DE_SHORT = { 1:"Mo",2:"Di",3:"Mi",4:"Do",5:"Fr",6:"Sa",0:"So" };
+
+  return months.map((month) => {
+    const [y, m] = month.split("-").map(Number);
+    const heading = new Date(y, m - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+
+    const days = Object.keys(eventsByDate).filter((d) => d.startsWith(month)).sort();
+    if (!days.length) {
+      return `<div class="mb"><div class="mh">${heading}</div><p class="none">Keine Termine.</p></div>`;
+    }
+
+    const rows = days.flatMap((date) => {
+      const [yr, mo, dy] = date.split("-").map(Number);
+      const dow = new Date(yr, mo - 1, dy).getDay();
+      const dayLabel = `${String(dy).padStart(2,"0")}.${String(mo).padStart(2,"0")}.${yr}`;
+      return (eventsByDate[date] || []).map((ev) => {
+        const timeStr = ev.all_day ? "Ganztag" : ev.end_time ? `${ev.time} – ${ev.end_time}` : (ev.time || "");
+        const detail = getPdfEventDetail(ev);
+        const cat = ev.category || "other";
+        const catLabel = categoryLabelMap[cat] || cat;
+        return `<tr class="er er-${cat}">
+          <td>${dayLabel}</td>
+          <td>${DE_SHORT[dow]}</td>
+          <td><span class="cb cb-${cat}">${catLabel}</span></td>
+          <td>${timeStr}</td>
+          <td><strong>${escapeHtml(ev.title || "")}</strong></td>
+          <td>${escapeHtml(detail)}</td>
+        </tr>`;
+      });
+    }).join("");
+
+    return `<div class="mb">
+      <div class="mh">${heading}</div>
+      <table>
+        <thead><tr><th>Datum</th><th>Tag</th><th>Kategorie</th><th>Zeit</th><th>Titel</th><th>Details</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }).join("\n");
+}
+
+function buildPdfDocument(body, title, layout) {
+  const pageSize = layout === "weekly" ? "A4 landscape" : "A4 portrait";
+  return `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<style>
+@page { size: ${pageSize}; margin: 12mm 14mm; }
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;}
+body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:9pt;color:#1a1e2a;background:#fff;}
+.wb,.mb{page-break-after:always;margin-bottom:4mm;}
+.wb:last-child,.mb:last-child{page-break-after:auto;}
+.wh,.mh{font-size:12pt;font-weight:700;color:#8b0d0a;padding-bottom:3mm;border-bottom:2px solid #8b0d0a;margin-bottom:3mm;}
+table{width:100%;border-collapse:collapse;}
+thead tr{background:#8b0d0a;}
+th{color:#fff;padding:5px 7px;font-size:7.5pt;font-weight:600;text-align:left;vertical-align:bottom;}
+.dname{display:block;font-size:7pt;opacity:.85;}
+.ddate{display:block;font-size:10pt;font-weight:700;margin-top:1px;}
+td{border:1px solid #d8dbe4;padding:5px 7px;vertical-align:top;}
+td.empty{background:#fafafa;}
+.dc{width:20%;}
+.ev{margin-bottom:5px;padding:3px 5px;border-radius:3px;border-left:3px solid transparent;}
+.ev:last-child{margin-bottom:0;}
+.ev-assistant{background:#d8f5e8;border-left-color:#2a7d52;}
+.ev-transport{background:#dce8fc;border-left-color:#2a58b8;}
+.ev-other{background:#ede0fd;border-left-color:#7020bb;}
+.ev-time{font-size:6.5pt;font-weight:600;color:#555;margin-bottom:1px;}
+.ev-title{font-size:8pt;font-weight:700;}
+.ev-detail{font-size:6.5pt;color:#555;margin-top:1px;}
+.er-assistant td{background:#ecfbf3;}
+.er-transport td{background:#edf2fd;}
+.er-other td{background:#f4effe;}
+.cb{display:inline-block;padding:1px 5px;border-radius:3px;font-size:7pt;font-weight:700;white-space:nowrap;}
+.cb-assistant{background:#2a7d52;color:#fff;}
+.cb-transport{background:#2a58b8;color:#fff;}
+.cb-other{background:#7020bb;color:#fff;}
+.none{color:#888;font-style:italic;padding:6px 0;font-size:8pt;}
+</style></head>
+<body>${body}
+<script>window.onload=function(){window.print();};<\/script>
+</body></html>`;
+}
+
+async function generateAndPrintCalendarPdf(fromMonth, toMonth, layout) {
+  const months = getPdfMonthRange(fromMonth, toMonth);
+  const allData = await Promise.all(months.map((m) => getCalendarMonthData(m)));
+  const allEvents = allData.flatMap((d) => d.events || []);
+  allEvents.sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")));
+
+  const eventsByDate = {};
+  allEvents.forEach((ev) => {
+    if (!eventsByDate[ev.date]) eventsByDate[ev.date] = [];
+    eventsByDate[ev.date].push(ev);
+  });
+
+  const [fy, fm] = fromMonth.split("-").map(Number);
+  const [ty, tm] = toMonth.split("-").map(Number);
+  const fromLabel = new Date(fy, fm - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+  const toLabel = fromMonth === toMonth ? "" : ` – ${new Date(ty, tm - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" })}`;
+  const title = `Kalender ${fromLabel}${toLabel}`;
+
+  const body = layout === "weekly"
+    ? buildWeeklyPdfBody(eventsByDate, fromMonth, toMonth)
+    : buildMonthlyPdfBody(eventsByDate, fromMonth, toMonth);
+
+  const html = buildPdfDocument(body, title, layout);
+  const win = window.open("", "_blank");
+  if (!win) { alert("Bitte erlaube Pop-ups für diese Seite."); return; }
+  win.document.write(html);
+  win.document.close();
 }
 
 function formatTimeFromDate(date) {
@@ -4216,7 +4472,7 @@ function renderAutomationList(items) {
   renderAutomationListInto(
     elements.automationList,
     items,
-    "No automations yet. Use voice or pick a preset above."
+    "No automations yet. Pick a preset above or save a custom reminder."
   );
   renderAutomationListInto(
     elements.automationPanelList,
@@ -4581,6 +4837,9 @@ function bindEvents() {
   if (elements.panelNewAutomationButton) {
     elements.panelNewAutomationButton.addEventListener("click", () => openAutomationsModal(elements.panelNewAutomationButton));
   }
+  if (elements.panelGenerateReportButton) {
+    elements.panelGenerateReportButton.addEventListener("click", () => openReportModal(elements.panelGenerateReportButton));
+  }
   if (elements.automationForm) {
     elements.automationForm.addEventListener("submit", submitAutomationForm);
   }
@@ -4596,8 +4855,9 @@ function bindEvents() {
   document.getElementById("copy-export").addEventListener("click", copyExportSummary);
   const exportPdfButton = document.getElementById("export-calendar-pdf");
   if (exportPdfButton) {
-    exportPdfButton.addEventListener("click", exportCalendarPdf);
+    exportPdfButton.addEventListener("click", openPdfExportModal);
   }
+  initPdfExportModal();
 
   elements.viewButtons.forEach((button) => {
     button.addEventListener("click", () => changeCalendarView(button.dataset.view));

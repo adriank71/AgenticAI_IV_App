@@ -387,6 +387,10 @@
                 <span class="material-symbols-outlined">add</span>
                 <span>New automation</span>
               </button>
+              <button id="panel-generate-report" class="primary-button" type="button">
+                <span class="material-symbols-outlined">add</span>
+                <span>Generate Report</span>
+              </button>
             </div>
             <div id="automation-panel-summary" class="automation-summary">
               <p class="muted-copy">No automations yet.</p>
@@ -648,6 +652,39 @@
     </div>
   </div>
 
+  <div id="pdf-export-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pdf-export-modal-title">
+    <div class="modal-backdrop" data-close-modal="pdf-export-modal"></div>
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 id="pdf-export-modal-title">Calendar PDF Export</h2>
+        <button class="modal-close" type="button" data-close-modal="pdf-export-modal" aria-label="Close">&times;</button>
+      </div>
+      <form id="pdf-export-form" class="modal-form">
+        <div class="form-row form-row--split">
+          <label>
+            <span>From</span>
+            <input id="pdf-export-from" type="month" name="from" required />
+          </label>
+          <label>
+            <span>To</span>
+            <input id="pdf-export-to" type="month" name="to" required />
+          </label>
+        </div>
+        <label>
+          <span>Layout pro Seite</span>
+          <div class="pdf-layout-switch view-switch" role="group" aria-label="PDF layout">
+            <button class="view-button is-active" type="button" data-pdf-layout="weekly">Wochenansicht</button>
+            <button class="view-button" type="button" data-pdf-layout="monthly">Monatsübersicht</button>
+          </div>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="pdf-export-modal">Abbrechen</button>
+          <button id="generate-pdf-btn" class="primary-button" type="submit">PDF generieren</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="export-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
     <div class="modal-backdrop" data-close-modal="export-modal"></div>
     <div class="modal-panel export-panel">
@@ -709,25 +746,10 @@
       <div class="modal-header">
         <div>
           <h2 id="automations-modal-title">Automations & Reminders</h2>
-          <p class="modal-subtitle">Schedule reminders or auto-fill reports. Voice-controlled.</p>
+          <p class="modal-subtitle">Schedule reminders or auto-fill reports.</p>
         </div>
         <button class="modal-close" type="button" data-close-modal="automations-modal" aria-label="Close">&times;</button>
       </div>
-
-      <section class="automation-voice-card" aria-label="Describe an automation">
-        <button id="automation-voice-button" class="voice-composer-button" type="button" aria-label="Hold to dictate automation" title="Hold to dictate automation">
-          <span class="voice-pulse" aria-hidden="true"></span>
-          <span class="voice-pulse voice-pulse--delay" aria-hidden="true"></span>
-          <span class="voice-composer-icon material-symbols-outlined">graphic_eq</span>
-        </button>
-        <div class="voice-composer-body">
-          <p id="automation-voice-status" class="voice-composer-status">Try: "Remind me on the last day of every month and prepare the Assistenzbeitrag"</p>
-          <div id="automation-voice-bars" class="voice-composer-bars" aria-hidden="true">
-            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-          </div>
-          <p id="automation-voice-transcript" class="voice-composer-transcript" aria-live="polite"></p>
-        </div>
-      </section>
 
       <div class="automation-presets" role="group" aria-label="Quick presets">
         <button class="automation-preset" type="button" data-preset="month_end_report">
@@ -803,7 +825,7 @@
           <span id="automation-count" class="status-pill">0</span>
         </div>
         <div id="automation-list" class="automation-list">
-          <p class="muted-copy">No automations yet. Use voice or pick a preset above.</p>
+          <p class="muted-copy">No automations yet. Pick a preset above or save a custom reminder.</p>
         </div>
       </section>
     </div>
