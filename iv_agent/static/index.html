@@ -308,43 +308,62 @@
         <section id="view-reports" class="app-view" data-view="reports">
           <div class="reports-shell">
             <article class="reports-card glass-panel invoices-card">
-              <div class="storage-options" aria-label="Document upload options">
-                <section id="invoice-drop-zone" class="storage-option drop-option" tabindex="0" role="button" aria-label="Upload documents by drag and drop">
-                  <div class="storage-option-label">Option 1</div>
-                  <div class="storage-option-icon">
-                    <span class="material-symbols-outlined">upload_file</span>
+              <details class="reports-section" open>
+                <summary class="reports-section-summary">
+                  <div class="reports-section-copy">
+                    <p class="section-title">Datei hochladen</p>
+                    <p class="muted-copy">Option 1 fuer Drag-and-Drop, Option 2 fuer Upload per Handy-Scan.</p>
                   </div>
-                  <div>
-                    <p class="section-title">Drag and Drop</p>
-                    <p class="muted-copy">Drop PDFs or receipt images here, or choose files from this device.</p>
+                  <div class="reports-section-meta">
+                    <span class="reports-section-pill">2 Optionen</span>
+                    <span class="material-symbols-outlined reports-section-chevron" aria-hidden="true">expand_more</span>
                   </div>
-                  <input id="invoice-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf" multiple />
-                  <button id="invoice-file-button" class="secondary-button" type="button">Choose documents</button>
-                  <p id="invoice-upload-status" class="upload-status" role="status">Ready for upload</p>
-                </section>
+                </summary>
+                <div class="reports-section-body">
+                  <div class="storage-options" aria-label="Document upload options">
+                    <section id="invoice-drop-zone" class="storage-option drop-option" tabindex="0" role="button" aria-label="Upload documents by drag and drop">
+                      <div class="storage-option-label">Option 1</div>
+                      <div class="storage-option-icon">
+                        <span class="material-symbols-outlined">upload_file</span>
+                      </div>
+                      <div>
+                        <p class="section-title">Drag and Drop</p>
+                        <p class="muted-copy">Drop PDFs or receipt images here, or choose files from this device.</p>
+                      </div>
+                      <input id="invoice-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf" multiple />
+                      <button id="invoice-file-button" class="secondary-button" type="button">Choose documents</button>
+                      <p id="invoice-upload-status" class="upload-status" role="status">Ready for upload</p>
+                    </section>
 
-                <section class="storage-option qr-option" aria-label="Scan with phone QR code">
-                  <div class="storage-option-label">Option 2</div>
-                  <div>
-                    <p class="section-title">Phone QR Scan</p>
-                    <p class="muted-copy">Scan this QR code with your phone, then capture documents with the camera route.</p>
-                    <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+                    <section class="storage-option qr-option" aria-label="Scan with phone QR code">
+                      <div class="storage-option-label">Option 2</div>
+                      <div>
+                        <p class="section-title">Phone QR Scan</p>
+                        <p class="muted-copy">Scan this QR code with your phone, then capture documents with the camera route.</p>
+                        <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+                      </div>
+                      <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add documents" />
+                    </section>
                   </div>
-                  <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add documents" />
-                </section>
-              </div>
-
-              <div class="document-database">
-                <div class="document-database-header">
-                  <div>
-                    <p class="section-title">Document Database</p>
-                    <p class="muted-copy">Four review buckets with live document cards from the database.</p>
-                  </div>
-                  <span class="document-count"><span id="documents-total-count">0</span><span id="documents-total-label">documents</span></span>
                 </div>
-                <p id="document-browser-status" class="upload-status" role="status">Loading document buckets...</p>
-                <div id="document-bucket-board" class="document-bucket-board" aria-label="Document bucket board"></div>
-              </div>
+              </details>
+
+              <details class="reports-section document-database" open>
+                <summary class="reports-section-summary">
+                  <div class="reports-section-copy">
+                    <p class="section-title">Document Database</p>
+                    <p class="muted-copy">Uploads bekommen zuerst einen Bucket-Vorschlag. Danach kannst du im Chat bestaetigen oder hier manuell verschieben.</p>
+                  </div>
+                  <div class="reports-section-meta">
+                    <span class="document-count"><span id="documents-total-count">0</span><span id="documents-total-label">documents</span></span>
+                    <span class="material-symbols-outlined reports-section-chevron" aria-hidden="true">expand_more</span>
+                  </div>
+                </summary>
+                <div class="reports-section-body">
+                  <p id="document-browser-status" class="upload-status" role="status">Loading document buckets...</p>
+                  <div id="document-bucket-board" class="document-bucket-board" aria-label="Document bucket board"></div>
+                </div>
+              </details>
             </article>
           </div>
         </section>

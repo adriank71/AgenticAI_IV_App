@@ -3637,7 +3637,13 @@ async function confirmPendingAgentAction(actionId, button) {
       appendChatMessage("bot", "Bestaetigt. Ich habe die Aktion ausgefuehrt.");
     }
     clearCalendarDataCache();
-    await Promise.all([refreshAutomations(), refreshDashboardData().catch(() => {})]);
+    await Promise.all([
+      refreshAutomations(),
+      refreshDashboardData().catch(() => {}),
+      payload && payload.storage_updated === true
+        ? refreshDocumentBucketBoard({ force: true }).catch(() => {})
+        : Promise.resolve(),
+    ]);
     if (state.calendar && (!payload || payload.calendar_updated !== false)) {
       state.calendar.refetchEvents();
       await refreshCalendarData();
@@ -3715,6 +3721,9 @@ async function submitAdviserPrompt(rawPrompt) {
     if (attachmentPayload.length) {
       setChatAttachmentStatus("Dokument wird analysiert...");
       clearChatAttachments("Zusammenfassung fertig.");
+    }
+    if (Array.isArray(data.uploaded_documents) && data.uploaded_documents.length) {
+      await refreshDocumentBucketBoard({ force: true }).catch(() => {});
     }
     const pendingActions = Array.isArray(data.pending_actions)
       ? data.pending_actions
@@ -4702,7 +4711,7 @@ async function refreshDocumentBucketBoard(options = {}) {
     renderDocumentBucketBoard();
     return;
   }
-    elements.documentBrowserStatus.textContent = "Document buckets werden geladen...";
+  elements.documentBrowserStatus.textContent = "Document buckets werden geladen...";
   elements.documentBrowserStatus.dataset.variant = "";
   try {
     state.documentsBrowser = await apiFetch(`/api/documents/browser?profile_id=${encodeURIComponent(getActiveProfileId())}`, {
