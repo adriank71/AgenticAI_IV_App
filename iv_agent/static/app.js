@@ -4899,7 +4899,15 @@ function bindEvents() {
 
   elements.chatChips.forEach((button) => {
     button.addEventListener("click", () => {
-      submitAdviserPrompt(button.dataset.chatPrompt || "").catch(() => {});
+      if (!elements.adviserInput) {
+        return;
+      }
+      elements.adviserInput.value = button.dataset.chatPrompt || "";
+      elements.adviserInput.focus();
+      elements.adviserInput.setSelectionRange(
+        elements.adviserInput.value.length,
+        elements.adviserInput.value.length
+      );
     });
   });
 
