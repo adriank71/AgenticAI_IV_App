@@ -32,7 +32,7 @@ const documentBucketOrder = ["Stiftung", "TixiTaxi", "IV", "Versicherung"];
 const appViewTitleMap = {
   dashboard: "Dashboard",
   calendar: "Calendar",
-  adviser: "IV Desk",
+  adviser: "Stützli",
   community: "Community",
   reports: "Storage",
   automations: "Automations",
@@ -1308,7 +1308,7 @@ async function switchAppView(viewName) {
   syncWorkspaceLayout();
 
   if (elements.activeViewTitle) {
-    elements.activeViewTitle.textContent = appViewTitleMap[viewName] || "IV Desk";
+    elements.activeViewTitle.textContent = appViewTitleMap[viewName] || "Stützli";
   }
   if (elements.calendarToolbar) {
     elements.calendarToolbar.classList.toggle("hidden", viewName !== "calendar" || state.inspectorCollapsed);
@@ -3048,7 +3048,7 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
 
   const meta = document.createElement("span");
   meta.className = "chat-meta";
-  meta.textContent = role === "user" ? "You" : "IV Desk";
+  meta.textContent = role === "user" ? "You" : "Stützli";
   bubble.appendChild(meta);
 
   row.appendChild(avatar);
@@ -3536,7 +3536,7 @@ async function openChatQrModal(triggerElement) {
 
 function normalizeChatSession(rawChat, index = 0) {
   const now = new Date().toISOString();
-  const fallbackTitle = index === 0 ? "IV Desk planning" : `Chat ${index + 1}`;
+  const fallbackTitle = index === 0 ? "Stützli planning" : `Chat ${index + 1}`;
   const messages = Array.isArray(rawChat && rawChat.messages)
     ? rawChat.messages
       .map((message) => ({
@@ -3564,7 +3564,7 @@ function normalizeChatSession(rawChat, index = 0) {
 function seedChatSessions() {
   const now = new Date().toISOString();
   return [
-    "IV Desk planning",
+    "Stützli planning",
     "Assistenzbeitrag report",
     "Transport receipts",
     "Calendar cleanup",
