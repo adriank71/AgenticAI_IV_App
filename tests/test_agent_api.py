@@ -18,6 +18,7 @@ from iv_agent.agents import orchestrator as agent_orchestrator
 from iv_agent.tools.calendar_tools import build_calendar_tools
 from iv_agent.tools.storage_tools import build_storage_tools
 from iv_agent.tools.knowledge_tools import build_knowledge_tools
+from iv_agent.tools.automations_tools import build_automations_tools
 
 
 @contextmanager
@@ -181,7 +182,10 @@ class AgentApiTests(unittest.TestCase):
 
         self.assertEqual(payload["answer"], "SDK ok")
         self.assertEqual(created_agents[-1].name, "IV-Helper Orchestrator")
-        self.assertEqual([agent.name for agent in created_agents[-1].handoffs], ["CalendarAgent", "StorageAgent", "KnowledgeAgent"])
+        self.assertEqual(
+            [agent.name for agent in created_agents[-1].handoffs],
+            ["CalendarAgent", "StorageAgent", "KnowledgeAgent", "AutomationsAgent"],
+        )
         self.assertTrue(any(event["name"] == "orchestrator" and event["status"] == "completed" for event in payload["tool_events"]))
 
     def test_calendar_agent_tool_drafts_pending_create_action(self):
@@ -279,6 +283,81 @@ class AgentApiTests(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertIn("WatsonX", payload["reason"])
         self.assertTrue(any(event["name"] == "ask_watsonx_iv_assistant" and event["status"] == "completed" for event in tool_events))
+
+    def test_automations_agent_tool_drafts_pending_generate_report_action(self):
+        tool_events = []
+        drafted_actions = []
+        structured_actions = []
+
+        with isolated_pending_action_storage():
+            tools = {
+                tool.__name__: tool
+                for tool in build_automations_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    context_timezone="Europe/Berlin",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    drafted_actions=drafted_actions,
+                    structured_actions=structured_actions,
+                    register_pending_actions=agent_orchestrator.register_pending_actions,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(
+                tools["draft_generate_report"](
+                    month="2026-05",
+                    report_types_json='["assistenzbeitrag", "transportkostenabrechnung"]',
+                    title="Reports Mai 2026 erstellen",
+                )
+            )
+
+        self.assertEqual(len(payload["pending_actions"]), 1)
+        action = payload["pending_actions"][0]
+        self.assertEqual(action["type"], "generate_report")
+        self.assertEqual(action["payload"]["month"], "2026-05")
+        self.assertEqual(action["payload"]["report_types"], ["assistenzbeitrag", "transportkostenabrechnung"])
+        self.assertEqual(action["payload"]["profile_id"], "default")
+        self.assertTrue(any(event["name"] == "draft_generate_report" and event["status"] == "completed" for event in tool_events))
+
+    def test_automations_agent_tool_drafts_pending_month_end_reminder_action(self):
+        tool_events = []
+        drafted_actions = []
+        structured_actions = []
+
+        with isolated_pending_action_storage():
+            tools = {
+                tool.__name__: tool
+                for tool in build_automations_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    context_timezone="Europe/Berlin",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    drafted_actions=drafted_actions,
+                    structured_actions=structured_actions,
+                    register_pending_actions=agent_orchestrator.register_pending_actions,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(
+                tools["draft_create_month_end_reminder"](
+                    title="Bericht ausfuellen",
+                    note="Bitte Assistenzbeitrag ausfuellen.",
+                    run_time="18:00",
+                )
+            )
+
+        self.assertEqual(len(payload["pending_actions"]), 1)
+        action = payload["pending_actions"][0]
+        self.assertEqual(action["type"], "create_reminder")
+        self.assertEqual(action["payload"]["action"], "notify")
+        self.assertEqual(action["payload"]["schedule"], "month_end")
+        self.assertEqual(action["payload"]["run_time"], "18:00")
+        self.assertEqual(action["payload"]["timezone"], "Europe/Berlin")
+        self.assertTrue(any(event["name"] == "draft_create_month_end_reminder" and event["status"] == "completed" for event in tool_events))
 
     def test_agent_chat_uploads_attachments_before_model_input(self):
         client = app_module.app.test_client()
@@ -615,6 +694,64 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(payload["result"]["reminder"]["id"], "rem-1")
         create_reminder_mock.assert_called_once()
         self.assertEqual(create_reminder_mock.call_args.args[0]["title"], "Call IV office")
+
+    def test_confirm_pending_generate_report_returns_report_artifact(self):
+        client = app_module.app.test_client()
+        generated_payload = {
+            "month": "2026-05",
+            "generated_reports": [
+                {
+                    "report_id": "rpt-1",
+                    "type": "assistenzbeitrag",
+                    "label": "Assistenzbeitraege report",
+                    "file_name": "Assistenzbeitrag_2026-05.pdf",
+                    "download_url": "/api/reports/download/rpt-1/Assistenzbeitrag_2026-05.pdf",
+                    "preview_url": "/api/reports/view/rpt-1/Assistenzbeitrag_2026-05.pdf",
+                }
+            ],
+            "unavailable_reports": [],
+        }
+
+        with isolated_pending_action_storage():
+            pending_actions = agent_orchestrator.register_pending_actions(
+                [
+                    {
+                        "type": "generate_report",
+                        "title": "Assistenzbeitrag Report Mai 2026 erstellen",
+                        "payload": {
+                            "month": "2026-05",
+                            "report_types": ["assistenzbeitrag"],
+                            "profile_id": "default",
+                        },
+                    }
+                ],
+                thread_id="thread-test",
+                user_id="default",
+            )
+
+            with patch.object(app_module, "load_profile_payload", return_value={}), patch.object(
+                app_module,
+                "generate_reports_payload",
+                return_value=generated_payload,
+            ) as generate_mock:
+                response = client.post(
+                    f"/api/agent/actions/{pending_actions[0]['action_id']}/confirm",
+                    json={"thread_id": "thread-test", "profile_id": "default"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["confirmed"])
+        self.assertTrue(payload["reports_generated"])
+        self.assertEqual(payload["artifacts"][0]["type"], "report")
+        self.assertEqual(payload["artifacts"][0]["report_id"], "rpt-1")
+        self.assertEqual(payload["artifacts"][0]["download_url"], "/api/reports/download/rpt-1/Assistenzbeitrag_2026-05.pdf")
+        generate_mock.assert_called_once_with(
+            "2026-05",
+            ["assistenzbeitrag"],
+            {},
+            profile_id="default",
+        )
 
     def test_confirm_pending_storage_folder_create_executes_after_confirmation(self):
         client = app_module.app.test_client()

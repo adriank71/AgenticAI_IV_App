@@ -3090,29 +3090,34 @@ function formatArtifactFileSize(value) {
 }
 
 function buildChatArtifactList(artifacts) {
-  const documents = artifacts
-    .filter((artifact) => artifact && artifact.type === "document")
+  const files = artifacts
+    .filter((artifact) => artifact && (artifact.type === "document" || artifact.type === "report"))
     .filter((artifact, index, all) => {
-      const id = String(artifact.document_id || artifact.id || "");
-      return !id || all.findIndex((item) => String(item.document_id || item.id || "") === id) === index;
+      const id = String(artifact.document_id || artifact.report_id || artifact.id || "");
+      return !id || all.findIndex((item) => String(item.document_id || item.report_id || item.id || "") === id) === index;
     });
-  if (!documents.length) {
+  if (!files.length) {
     return null;
   }
   const card = document.createElement("div");
   card.className = "chat-document-card";
   const title = document.createElement("p");
   title.className = "chat-policy-title";
-  title.textContent = documents.length === 1 ? "Dokument" : "Dokumente";
+  const hasReports = files.some((artifact) => artifact.type === "report");
+  const hasDocuments = files.some((artifact) => artifact.type === "document");
+  title.textContent = hasReports && hasDocuments
+    ? "Dateien"
+    : (hasReports ? (files.length === 1 ? "Report" : "Reports") : (files.length === 1 ? "Dokument" : "Dokumente"));
   card.appendChild(title);
 
-  documents.slice(0, 8).forEach((artifact) => {
+  files.slice(0, 8).forEach((artifact) => {
     const row = document.createElement("div");
     row.className = "chat-document-row";
 
     const icon = document.createElement("span");
     icon.className = "material-symbols-outlined";
-    icon.textContent = artifact.icon || (String(artifact.content_type || "").startsWith("image/") ? "image" : "draft");
+    icon.textContent = artifact.icon
+      || (artifact.type === "report" ? "picture_as_pdf" : (String(artifact.content_type || "").startsWith("image/") ? "image" : "draft"));
     row.appendChild(icon);
 
     const body = document.createElement("div");
@@ -3122,6 +3127,8 @@ function buildChatArtifactList(artifacts) {
     body.appendChild(name);
 
     const metaParts = [
+      artifact.type === "report" ? artifact.month : "",
+      artifact.report_type,
       artifact.storage_bucket,
       artifact.document_type,
       artifact.institution,
@@ -3166,10 +3173,10 @@ function buildChatArtifactList(artifacts) {
     card.appendChild(row);
   });
 
-  if (documents.length > 8) {
+  if (files.length > 8) {
     const more = document.createElement("span");
     more.className = "chat-tool-meta";
-    more.textContent = `+${documents.length - 8} weitere Dokumente`;
+    more.textContent = `+${files.length - 8} weitere Dateien`;
     card.appendChild(more);
   }
 
@@ -4099,8 +4106,14 @@ async function confirmPendingAgentAction(actionId, button) {
     });
     button.textContent = "Bestaetigt";
     const confirmedPanelIntent = detectPanelIntentFromConfirmedAction(payload);
+    const artifacts = Array.isArray(payload && payload.artifacts) ? payload.artifacts : [];
     if (payload && payload.result) {
-      appendChatMessage("bot", "Bestaetigt. Ich habe die Aktion ausgefuehrt.");
+      const messageText = payload.reports_generated
+        ? "Bericht erstellt. Der Download ist unten angehaengt."
+        : "Bestaetigt. Ich habe die Aktion ausgefuehrt.";
+      const extras = artifacts.length ? { artifacts } : {};
+      appendChatMessage("bot", messageText, null, extras);
+      pushChatHistory("assistant", messageText, extras);
     }
     clearCalendarDataCache();
     await Promise.all([

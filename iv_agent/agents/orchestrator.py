@@ -44,6 +44,12 @@ KNOWLEDGE_AGENT_MODEL = (
     or "gpt-5.4-mini"
 ).strip() or "gpt-5.4-mini"
 
+AUTOMATIONS_AGENT_MODEL = (
+    os.environ.get("OPENAI_AUTOMATION_MODEL")
+    or os.environ.get("OPENAI_AGENT_MODEL")
+    or "gpt-5.4-mini"
+).strip() or "gpt-5.4-mini"
+
 ACTION_TYPE_ALIASES = {
     "calendar.create_event": "create_event",
     "calendar.update_event": "update_event",
@@ -410,6 +416,7 @@ def _run_agents_sdk(
     from agents import Agent, Runner, function_tool, set_tracing_disabled, trace  # type: ignore
 
     try:
+        from .automations_agent import build_automations_agent
         from .calendar_agent import build_calendar_agent
         from .knowledge_agent import build_knowledge_agent
         from .storage_agent import build_storage_agent
@@ -426,6 +433,7 @@ def _run_agents_sdk(
             sum_invoice_amounts as service_sum_invoice_amounts,
         )
     except ImportError:
+        from agents.automations_agent import build_automations_agent
         from agents.calendar_agent import build_calendar_agent
         from agents.knowledge_agent import build_knowledge_agent
         from agents.storage_agent import build_storage_agent
@@ -695,6 +703,24 @@ def _run_agents_sdk(
     )
     tool_events.append(_tool_event("KnowledgeAgent", "available", "KnowledgeAgent handoff registered", event_type="agent"))
 
+    automations_agent = build_automations_agent(
+        Agent,
+        function_tool,
+        model=AUTOMATIONS_AGENT_MODEL,
+        context_user_id=context_user_id,
+        context_timezone=context_timezone,
+        now_value=now_value,
+        current_month=current_month,
+        thread_id=request_payload["thread_id"],
+        tool_events=tool_events,
+        drafted_actions=drafted_actions,
+        structured_actions=structured_actions,
+        register_pending_actions=register_pending_actions,
+        make_json_safe=make_json_safe,
+        tool_event_factory=_tool_event,
+    )
+    tool_events.append(_tool_event("AutomationsAgent", "available", "AutomationsAgent handoff registered", event_type="agent"))
+
     instructions = (
         "You are the IV-Helper orchestrator. Every chat message reaches you first. "
         "Before answering, decide whether to answer directly, inspect local app state, draft a pending action, "
@@ -704,6 +730,7 @@ def _run_agents_sdk(
         "For document retrieval requests ('gib mir alle Dokumente', 'zeige Rechnungen', 'download Datei') always read storage first and ensure document artifacts are produced. "
         "For invoice total or sum requests, use sum_user_invoice_amounts or hand off to StorageAgent so the sum is based on filtered storage documents and checksum duplicate removal. "
         "When the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, use it as the storage_bucket filter for storage reads. "
+        "For report generation, Assistenzbeitrag report, Transportkosten report, automation, reminder, Monatsende, or recurring reminder requests, hand off to AutomationsAgent. "
         "For 'Was bedeutet...', IV questions, deadlines, Fristen, document understanding, comparisons, action items, broader knowledge, "
         "or 'frag den IV Assistant' requests, hand off to KnowledgeAgent. "
         "If the request combines calendar and documents, use local read tools from both domains before answering or hand off to the best specialized agent. "
@@ -711,7 +738,7 @@ def _run_agents_sdk(
         "Do not execute side effects directly. For create, update, delete, reminder creation, PDF generation, report sending, "
         "or automation saves, call draft_pending_action and explain that the user must confirm it. "
         "Supported generic action_type values are create_reminder, generate_report, and send_report. Calendar mutations belong to CalendarAgent. "
-        "Storage mutations belong to StorageAgent. Document explanation and synthesis belongs to KnowledgeAgent. "
+        "Report generation and automation saves belong to AutomationsAgent. Storage mutations belong to StorageAgent. Document explanation and synthesis belongs to KnowledgeAgent. "
         "Answer in German unless the user explicitly requests another language. Format final answers as clean concise Markdown. "
         "Keep answers concise, mention which capability you used when useful, and cite retrieved sources when available."
     )
@@ -720,7 +747,7 @@ def _run_agents_sdk(
         instructions=instructions,
         model=AGENT_MODEL,
         tools=orchestrator_tools,
-        handoffs=[calendar_agent, storage_agent, knowledge_agent],
+        handoffs=[calendar_agent, storage_agent, knowledge_agent, automations_agent],
     )
 
     input_text = json.dumps(

@@ -747,6 +747,36 @@ def generate_reports_payload(
     }
 
 
+def build_report_chat_artifacts(result: dict) -> list[dict]:
+    reports = result.get("generated_reports") if isinstance(result, dict) else []
+    if not isinstance(reports, list):
+        return []
+    artifacts = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        report_id = str(report.get("report_id") or "").strip()
+        file_name = str(report.get("file_name") or "").strip()
+        if not report_id or not file_name:
+            continue
+        report_type = str(report.get("type") or "").strip()
+        artifacts.append(
+            {
+                "id": report_id,
+                "type": "report",
+                "report_id": report_id,
+                "report_type": report_type,
+                "title": report.get("label") or file_name,
+                "file_name": file_name,
+                "content_type": "application/pdf",
+                "download_url": report.get("download_url") or build_report_download_path(report),
+                "preview_url": report.get("preview_url") or build_report_preview_path(report),
+                "month": report.get("month") or result.get("month") or "",
+            }
+        )
+    return artifacts
+
+
 def build_agent_chat_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("JSON body is required")
@@ -1232,6 +1262,8 @@ def api_confirm_agent_action(action_id: str):
             ),
         )
         action_type = confirmation.get("action", {}).get("type")
+        result_payload = confirmation.get("result") if isinstance(confirmation.get("result"), dict) else {}
+        report_artifacts = build_report_chat_artifacts(result_payload) if action_type == "generate_report" else []
         return jsonify(
             {
                 "confirmed": True,
@@ -1243,6 +1275,8 @@ def api_confirm_agent_action(action_id: str):
                     "storage.update_metadata",
                     "storage.reassign_bucket",
                 },
+                "reports_generated": bool(report_artifacts),
+                "artifacts": report_artifacts,
                 **make_json_safe(confirmation),
             }
         )
