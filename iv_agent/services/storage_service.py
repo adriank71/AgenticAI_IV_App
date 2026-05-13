@@ -36,6 +36,7 @@ except ImportError:
 DEFAULT_DOCUMENT_BUCKET = "IV"
 DEFAULT_DOCUMENT_BUCKETS = ("Stiftung", "TixiTaxi", "IV", "Versicherung")
 LEGACY_DOCUMENT_BUCKETS = {"invoice_upload", "Invoice_upload"}
+INSURANCE_BUCKET_ALIASES = {"versicherung", "versicherungen", "insurance"}
 DOCUMENT_PREFIX = "Documents"
 SUPPORTED_DOCUMENT_MIME_TYPES = {
     "application/pdf": ".pdf",
@@ -493,6 +494,10 @@ def _coerce_bucket_name(value: Any, *, allowed: list[str], fallback: str) -> str
     candidate = str(value or "").strip()
     if candidate in allowed:
         return candidate
+    if candidate.lower() in INSURANCE_BUCKET_ALIASES:
+        for bucket_name in allowed:
+            if bucket_name.lower() in INSURANCE_BUCKET_ALIASES:
+                return bucket_name
     return fallback
 
 
@@ -501,7 +506,7 @@ def infer_document_bucket_from_text(value: Any) -> str:
     for bucket_name, keywords in (
         ("TixiTaxi", ("tixitaxi", "tixi taxi", "tixi", "taxi", "fahrdienst")),
         ("Stiftung", ("stiftung", "pro infirmis", "proinfirmis")),
-        ("Versicherung", ("versicherung", "krankenkasse", "helsana", "css", "swica", "suva")),
+        ("Versicherung", ("versicherung", "versicherungen", "krankenkasse", "helsana", "css", "swica", "suva")),
         ("IV", ("iv-stelle", "invalidenversicherung", "assistenzbeitrag")),
     ):
         if any(keyword in haystack for keyword in keywords):
@@ -869,6 +874,21 @@ class StorageService:
             if reason not in reasons[bucket_name]:
                 reasons[bucket_name].append(reason)
 
+        explicit_bucket = _coerce_bucket_name(
+            metadata.get("storage_bucket")
+            or metadata.get("target_bucket")
+            or metadata.get("bucket")
+            or metadata.get("suggested_bucket"),
+            allowed=self._document_buckets,
+            fallback="",
+        )
+        if explicit_bucket:
+            return {
+                "bucket": explicit_bucket,
+                "reason": f"Upload-Regel hat den Bucket {explicit_bucket} vorgegeben.",
+                "confidence": "high",
+            }
+
         hint_parts = [
             file_name,
             extracted_text,
@@ -910,6 +930,7 @@ class StorageService:
             ),
             "Versicherung": (
                 "versicherung",
+                "versicherungen",
                 "krankenkasse",
                 "helsana",
                 "css",
@@ -935,7 +956,7 @@ class StorageService:
             add("IV", 2, "IV-Schreiben erkannt.")
         if any(token in haystack for token in ("stiftung", "pro infirmis")):
             add("Stiftung", 2, "Stiftungsbezug erkannt.")
-        if any(token in haystack for token in ("versicherung", "krankenkasse", "helsana", "css", "swica", "suva")):
+        if any(token in haystack for token in ("versicherung", "versicherungen", "krankenkasse", "helsana", "css", "swica", "suva")):
             add("Versicherung", 2, "Versicherungsbezug erkannt.")
 
         chosen_bucket = default_bucket

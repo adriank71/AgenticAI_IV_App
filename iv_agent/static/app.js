@@ -5209,8 +5209,15 @@ async function refreshDocumentBucketBoard(options = {}) {
   }
 }
 
-function getDocumentBucketColumns() {
-  return documentBucketOrder.slice();
+function getDocumentBucketColumns(data = state.documentsBrowser) {
+  const configuredBuckets = Array.isArray(data?.document_buckets)
+    ? data.document_buckets.map((bucket) => String(bucket || "").trim()).filter(Boolean)
+    : [];
+  const responseBuckets = Array.isArray(data?.buckets)
+    ? data.buckets.map((bucket) => String(bucket?.id || bucket?.name || "").trim()).filter(Boolean)
+    : [];
+  const source = configuredBuckets.length ? configuredBuckets : documentBucketOrder;
+  return [...source, ...responseBuckets].filter((bucket, index, buckets) => bucket && buckets.indexOf(bucket) === index);
 }
 
 function pruneRecentDocumentIds(maxAgeMs = 1000 * 60 * 30) {

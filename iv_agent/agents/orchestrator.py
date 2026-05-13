@@ -643,7 +643,7 @@ def _run_agents_sdk(
         "For upload, delete, move, metadata, folder, Datei speichern, Dokument loeschen, or document organization requests, hand off to StorageAgent. "
         "For document retrieval requests ('gib mir alle Dokumente', 'zeige Rechnungen', 'download Datei') always read storage first and ensure document artifacts are produced. "
         "For invoice total or sum requests, use sum_user_invoice_amounts or hand off to StorageAgent so the sum is based on filtered storage documents and checksum duplicate removal. "
-        "When the user mentions IV, TixiTaxi, Stiftung, or Versicherung, use it as the storage_bucket filter for storage reads. "
+        "When the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, use it as the storage_bucket filter for storage reads. "
         "For 'Was bedeutet...', IV questions, deadlines, Fristen, document understanding, comparisons, action items, broader knowledge, "
         "or 'frag den IV Assistant' requests, hand off to KnowledgeAgent. "
         "If the request combines calendar and documents, use local read tools from both domains before answering or hand off to the best specialized agent. "

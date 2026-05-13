@@ -1524,8 +1524,32 @@ def _camera_capture_user_id() -> str:
     return normalize_user_id("default")
 
 
+def _camera_capture_bucket_name() -> str:
+    configured = (
+        os.environ.get("IV_AGENT_CAMERA_CAPTURE_BUCKET", "").strip()
+        or os.environ.get("IV_AGENT_INSURANCE_DOCUMENT_BUCKET", "").strip()
+    )
+    buckets = document_bucket_names()
+    aliases = {
+        "versicherung": "Versicherung",
+        "versicherungen": "Versicherung",
+        "insurance": "Versicherung",
+    }
+    candidates = [
+        configured,
+        aliases.get(configured.lower(), "") if configured else "",
+        "Versicherungen",
+        "Versicherung",
+    ]
+    for candidate in candidates:
+        if candidate and candidate in buckets:
+            return candidate
+    return document_bucket_name()
+
+
 def _camera_capture_metadata(sid: str, *, fields: dict | None, extraction_error: str | None) -> dict[str, Any]:
     safe_sid = _sanitize_camera_session_id(sid)
+    storage_bucket = _camera_capture_bucket_name()
     bucket_hint_parts = []
     if isinstance(fields, dict):
         bucket_hint_parts.extend(
@@ -1542,6 +1566,8 @@ def _camera_capture_metadata(sid: str, *, fields: dict | None, extraction_error:
         "folder_path": f"Invoices/{safe_sid}",
         "invoice_fields": fields or None,
         "invoice_extraction_error": extraction_error,
+        "storage_bucket": storage_bucket,
+        "target_bucket": storage_bucket,
         "bucket_hint_text": " ".join(part for part in bucket_hint_parts if part),
         "institution": str((fields or {}).get("merchant") or "").strip(),
     }

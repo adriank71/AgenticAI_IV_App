@@ -222,6 +222,51 @@ class StorageTests(unittest.TestCase):
         self.assertIn(("TixiTaxi", document["storage_key"]), client.objects)
         self.assertIn("Transport", document["bucket_reason"])
 
+    def test_storage_service_honors_explicit_camera_insurance_bucket_alias(self):
+        cursor = RecordingCursor()
+        client = FakeSupabaseClient()
+        service = StorageService(
+            "postgres://example",
+            client=client,
+            bucket="IV",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        document = service.upload_document(
+            user_id="default",
+            file_name="phone.jpg",
+            content=b"\xff\xd8\xff",
+            content_type="image/jpeg",
+            metadata={"source": "camera_capture", "storage_bucket": "Versicherungen"},
+        )
+
+        self.assertEqual(document["storage_bucket"], "Versicherung")
+        self.assertEqual(document["suggested_bucket"], "Versicherung")
+        self.assertEqual(document["bucket_confidence"], "high")
+        self.assertIn(("Versicherung", document["storage_key"]), client.objects)
+
+    def test_storage_service_honors_plural_configured_insurance_bucket(self):
+        cursor = RecordingCursor()
+        client = FakeSupabaseClient()
+        with patch.dict(os.environ, {"IV_AGENT_DOCUMENT_BUCKETS": "Stiftung,TixiTaxi,IV,Versicherungen"}, clear=False):
+            service = StorageService(
+                "postgres://example",
+                client=client,
+                bucket="IV",
+                connection_factory=lambda: RecordingConnection(cursor),
+            )
+
+            document = service.upload_document(
+                user_id="default",
+                file_name="versicherung.jpg",
+                content=b"\xff\xd8\xff",
+                content_type="image/jpeg",
+                metadata={"source": "camera_capture", "storage_bucket": "Versicherung"},
+            )
+
+        self.assertEqual(document["storage_bucket"], "Versicherungen")
+        self.assertIn(("Versicherungen", document["storage_key"]), client.objects)
+
     def test_storage_service_list_documents_scopes_and_filters_queries(self):
         cursor = RecordingCursor(fetchall_results=[[]])
         service = StorageService(

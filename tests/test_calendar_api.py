@@ -132,8 +132,10 @@ class FakeDocumentService:
     def __init__(self, storage_bucket="IV"):
         self.documents = []
         self.storage_bucket = storage_bucket
+        self.upload_calls = []
 
     def upload_document(self, **kwargs):
+        self.upload_calls.append(kwargs)
         metadata = kwargs.get("metadata") or {}
         document = {
             "document_id": f"doc-{len(self.documents) + 1}",
@@ -756,7 +758,7 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_invoice_capture_returns_supabase_backend(self):
         client = app_module.app.test_client()
-        fake_document_service = FakeDocumentService(storage_bucket="IV")
+        fake_document_service = FakeDocumentService(storage_bucket="Versicherung")
 
         with patch.object(app_module, "get_storage_service", return_value=fake_document_service), patch.object(
             app_module,
@@ -777,7 +779,9 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         payload = response.get_json()
         self.assertEqual(payload["capture"]["storage_backend"], "supabase")
-        self.assertEqual(payload["capture"]["storage_bucket"], "IV")
+        self.assertEqual(payload["capture"]["storage_bucket"], "Versicherung")
+        self.assertEqual(fake_document_service.upload_calls[0]["metadata"]["storage_bucket"], "Versicherung")
+        self.assertEqual(fake_document_service.upload_calls[0]["metadata"]["target_bucket"], "Versicherung")
         self.assertIn("/api/invoices/session123/files/doc-1/phone.jpg", payload["capture"]["file_url"])
 
     def test_invoice_capture_returns_clear_storage_configuration_error(self):
@@ -804,6 +808,30 @@ class CalendarApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("Supabase Storage upload failed", response.get_json()["error"])
+
+    def test_documents_browser_returns_backend_bucket_configuration(self):
+        client = app_module.app.test_client()
+        browser_payload = {
+            "configured": True,
+            "default_bucket": "IV",
+            "document_buckets": ["Stiftung", "TixiTaxi", "IV", "Versicherung"],
+            "total_count": 0,
+            "buckets": [
+                {"id": "Stiftung", "name": "Stiftung", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+                {"id": "TixiTaxi", "name": "TixiTaxi", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+                {"id": "IV", "name": "IV", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+                {"id": "Versicherung", "name": "Versicherung", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+            ],
+        }
+
+        with patch.object(app_module, "build_document_browser", return_value=browser_payload) as browser_mock:
+            response = client.get("/api/documents/browser?profile_id=default")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["document_buckets"], ["Stiftung", "TixiTaxi", "IV", "Versicherung"])
+        self.assertEqual(len(payload["buckets"]), 4)
+        browser_mock.assert_called_once_with(user_id="default")
 
     def test_scan_url_uses_camera_route_and_scan_redirects(self):
         client = app_module.app.test_client()

@@ -296,6 +296,25 @@ def _supabase_storage_url(bucket: str, path: str) -> str:
     return f"supabase://{bucket}/{path.lstrip('/')}"
 
 
+def _is_transient_supabase_storage_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "edbhandlerexited",
+            "connection to database closed",
+            "connection reset",
+            "temporarily unavailable",
+            "timeout",
+        )
+    )
+
+
+def _is_supabase_object_exists_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "already exists" in message or "asset already exists" in message or "duplicate" in message
+
+
 def _supabase_upload(
     client: Any,
     *,
@@ -305,21 +324,29 @@ def _supabase_upload(
     content_type: str,
     upsert: bool = True,
 ) -> None:
-    try:
-        client.storage.from_(bucket).upload(
-            path=path,
-            file=content,
-            file_options={
-                "content-type": content_type or "application/octet-stream",
-                "cache-control": "3600",
-                "upsert": "true" if upsert else "false",
-            },
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Supabase Storage upload failed for bucket '{bucket}'. "
-            "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files."
-        ) from exc
+    attempts = 2
+    for attempt in range(attempts):
+        try:
+            client.storage.from_(bucket).upload(
+                path=path,
+                file=content,
+                file_options={
+                    "content-type": content_type or "application/octet-stream",
+                    "cache-control": "3600",
+                    "upsert": "true" if upsert else "false",
+                },
+            )
+            return
+        except Exception as exc:
+            if not upsert and _is_supabase_object_exists_error(exc):
+                return
+            if attempt + 1 < attempts and _is_transient_supabase_storage_error(exc):
+                continue
+            raise RuntimeError(
+                f"Supabase Storage upload failed for bucket '{bucket}'. "
+                "Verify SUPABASE_SERVICE_ROLE_KEY and create the required private bucket before uploading files. "
+                f"Original error: {exc}"
+            ) from exc
 
 
 def _supabase_download(client: Any, *, bucket: str, path: str) -> bytes:
