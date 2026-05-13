@@ -42,3 +42,5 @@ iv_agent/data/calendar.json
 
 .vercel
 .env*.local
+
+.vercel
