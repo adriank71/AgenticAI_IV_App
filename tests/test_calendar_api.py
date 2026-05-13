@@ -10,9 +10,13 @@ from unittest.mock import patch
 
 from iv_agent import app as app_module
 from iv_agent import calendar_manager
+from iv_agent import storage as storage_module
 from iv_agent import reminders_agent
 from iv_agent import voice_calendar_agent
+from iv_agent import reminders as reminders_module
 from iv_agent.services import calendar_service
+from iv_agent.services import storage_service as storage_service_module
+from iv_agent.storage import SupabaseStorageTemplateStore
 
 
 @contextmanager
@@ -25,9 +29,17 @@ def isolated_calendar_storage():
         calendar_path = os.path.join(temp_dir, "calendar.json")
         with patch.object(calendar_manager, "DATA_DIR", temp_dir), patch.object(
             calendar_manager, "CALENDAR_PATH", calendar_path
-        ):
+        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local", "DATABASE_URL": ""}, clear=False):
+            calendar_manager._EVENT_STORE_CACHE.clear()
+            calendar_service._CALENDAR_STORE_CACHE.clear()
+            storage_service_module._SERVICE_CACHE.clear()
+            storage_module.clear_store_cache()
             yield calendar_path
     finally:
+        calendar_manager._EVENT_STORE_CACHE.clear()
+        calendar_service._CALENDAR_STORE_CACHE.clear()
+        storage_service_module._SERVICE_CACHE.clear()
+        storage_module.clear_store_cache()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -44,9 +56,13 @@ def isolated_profile_storage():
     try:
         with patch.object(app_module, "DEFAULT_PROFILE_PATH", profile_path), patch.object(
             app_module, "PROFILE_DIR", profile_dir
-        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local"}, clear=False):
+        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local", "DATABASE_URL": ""}, clear=False):
+            storage_service_module._SERVICE_CACHE.clear()
+            storage_module.clear_store_cache()
             yield profile_path
     finally:
+        storage_service_module._SERVICE_CACHE.clear()
+        storage_module.clear_store_cache()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -80,9 +96,11 @@ def isolated_reminder_storage():
     try:
         with patch.object(app_module.reminders_module, "DATA_DIR", temp_dir), patch.object(
             app_module.reminders_module, "REMINDERS_PATH", reminders_path
-        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local"}, clear=False):
+        ), patch.dict(os.environ, {"IV_AGENT_STORAGE_BACKEND": "local", "DATABASE_URL": ""}, clear=False):
+            reminders_module._REMINDER_STORE_CACHE.clear()
             yield reminders_path
     finally:
+        reminders_module._REMINDER_STORE_CACHE.clear()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -629,6 +647,73 @@ class CalendarApiTests(unittest.TestCase):
         single_fill_mock.assert_not_called()
         self.assertEqual(payload["generated_reports"][0]["gross_amount_chf"], "157.50")
 
+    def test_generate_report_uses_supabase_report_template_bucket(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+
+        class FakeSupabaseBucket:
+            def __init__(self, objects, bucket):
+                self.objects = objects
+                self.bucket = bucket
+
+            def download(self, path):
+                return self.objects[(self.bucket, path)]["content"]
+
+        class FakeSupabaseStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def from_(self, bucket):
+                return FakeSupabaseBucket(self.objects, bucket)
+
+        class FakeSupabaseClient:
+            def __init__(self):
+                self.objects = {}
+                self.storage = FakeSupabaseStorage(self.objects)
+
+        supabase_client = FakeSupabaseClient()
+        supabase_client.objects[("Report_template", "Stundenblatt.pdf")] = {
+            "content": b"%PDF-stundenblatt\n",
+            "options": {},
+        }
+        supabase_client.objects[("Report_template", "Rechnungsvorlage_aL_elektronisch (1).pdf")] = {
+            "content": b"%PDF-rechnung\n",
+            "options": {},
+        }
+        template_store = SupabaseStorageTemplateStore(client=supabase_client, bucket="Report_template")
+
+        with patch.object(
+            app_module,
+            "load_profile_payload",
+            return_value={"insured_name": "Max Muster", "ahv_number": "1", "street": "Street", "plz_ort": "City", "iban": "IBAN", "mitteilungsnummer": "REF"},
+        ), patch.object(app_module, "get_template_store", return_value=template_store), patch.object(
+            app_module, "get_report_store", return_value=fake_report_store
+        ), patch.object(
+            app_module, "fill_assistenz_dual_form_auto_bytes", return_value=b"%PDF-1.4\n"
+        ), patch.object(
+            app_module, "get_events", return_value=[]
+        ), patch.object(
+            app_module, "get_assistant_hours_for_events", return_value=4.5
+        ), patch.object(
+            app_module,
+            "get_assistant_hours_breakdown_for_events",
+            return_value={
+                "koerperpflege": 1.0,
+                "mahlzeiten_eingeben": 1.0,
+                "mahlzeiten_zubereiten": 1.5,
+                "begleitung_therapie": 1.0,
+            },
+        ):
+            response = client.post(
+                "/api/reports/generate",
+                json={"month": "2026-04", "report_types": ["assistenzbeitrag"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["generated_reports"][0]["type"], "assistenzbeitrag")
+        self.assertEqual(fake_report_store.saved_reports[0]["storage_backend"], "supabase")
+
     def test_template_resolution_prefers_configured_template_store(self):
         with patch.object(
             app_module,
@@ -992,6 +1077,10 @@ class CalendarApiTests(unittest.TestCase):
                 "server_only": True,
                 "models": {"calendar": "gpt-5.4-mini", "transcription": "whisper-1"},
             },
+        ), patch.object(
+            app_module,
+            "backend_health_status",
+            return_value={"ok": True, "checks": [], "database": {}, "storage": {}, "environment": {}},
         ):
             response = client.get("/api/ai/status")
 
@@ -999,6 +1088,7 @@ class CalendarApiTests(unittest.TestCase):
         payload_text = response.get_data(as_text=True)
         payload = response.get_json()
         self.assertTrue(payload["openai"]["configured"])
+        self.assertTrue(payload["backend"]["ok"])
         self.assertTrue(payload["openai"]["server_only"])
         self.assertIn("required_environment_variable", payload["openai"])
         self.assertNotIn("sk-", payload_text)

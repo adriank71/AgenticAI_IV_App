@@ -190,6 +190,8 @@ class KnowledgeServiceTests(unittest.TestCase):
         captured = {}
 
         def fake_urlopen(request, timeout):
+            if request.full_url == knowledge_service.MCSP_TOKEN_URL:
+                return FakeHttpResponse({"token": "bearer-token"})
             captured["url"] = request.full_url
             captured["headers"] = dict(request.header_items())
             captured["body"] = json.loads(request.data.decode("utf-8"))

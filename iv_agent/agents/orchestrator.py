@@ -662,6 +662,7 @@ def _run_agents_sdk(
         make_json_safe=make_json_safe,
         tool_event_factory=_tool_event,
     )
+    tool_events.append(_tool_event("CalendarAgent", "available", "CalendarAgent handoff registered", event_type="agent"))
 
     storage_agent = build_storage_agent(
         Agent,
@@ -679,6 +680,7 @@ def _run_agents_sdk(
         make_json_safe=make_json_safe,
         tool_event_factory=_tool_event,
     )
+    tool_events.append(_tool_event("StorageAgent", "available", "StorageAgent handoff registered", event_type="agent"))
 
     knowledge_agent = build_knowledge_agent(
         Agent,
@@ -691,6 +693,7 @@ def _run_agents_sdk(
         make_json_safe=make_json_safe,
         tool_event_factory=_tool_event,
     )
+    tool_events.append(_tool_event("KnowledgeAgent", "available", "KnowledgeAgent handoff registered", event_type="agent"))
 
     instructions = (
         "You are the IV-Helper orchestrator. Every chat message reaches you first. "

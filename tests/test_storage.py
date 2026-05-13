@@ -26,6 +26,8 @@ from iv_agent.storage import (
     SupabaseStorageAssetStore,
     SupabaseStorageInvoiceCaptureStore,
     SupabaseStorageTemplateStore,
+    backend_health_status,
+    clear_store_cache,
     make_asset_store,
     make_invoice_capture_store,
     make_template_store,
@@ -136,6 +138,9 @@ class FakeSupabaseStorage:
     def from_(self, bucket):
         return FakeSupabaseBucket(self.objects, bucket)
 
+    def list_buckets(self):
+        return [{"id": bucket} for bucket in sorted({bucket for bucket, _ in self.objects})]
+
 
 class FakeSupabaseClient:
     def __init__(self):
@@ -144,6 +149,9 @@ class FakeSupabaseClient:
 
 
 class StorageTests(unittest.TestCase):
+    def tearDown(self):
+        clear_store_cache()
+
     def test_document_filename_sanitization_and_text_extraction(self):
         self.assertEqual(
             sanitize_document_filename("../Rechnung Mai 2026.pdf", content_type="application/pdf"),
@@ -785,9 +793,37 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(content, b"%PDF-transport\n")
         self.assertEqual(content_type, "application/pdf")
         self.assertEqual(
-            client.objects[("report-template", "AK_Formular_EL_Transportkosten.pdf")]["options"]["upsert"],
+            client.objects[("Report_template", "AK_Formular_EL_Transportkosten.pdf")]["options"]["upsert"],
             "true",
         )
+
+    def test_supabase_template_store_reads_exact_filename_with_parentheses(self):
+        client = FakeSupabaseClient()
+        client.objects[("Report_template", "Rechnungsvorlage_aL_elektronisch (1).pdf")] = {
+            "content": b"%PDF-exact\n",
+            "options": {},
+        }
+        store = SupabaseStorageTemplateStore(client=client)
+
+        template = store.get_template("rechnung")
+        content, content_type = store.read_template_bytes("rechnung")
+
+        self.assertEqual(template["storage_key"], "Rechnungsvorlage_aL_elektronisch (1).pdf")
+        self.assertEqual(content, b"%PDF-exact\n")
+        self.assertEqual(content_type, "application/pdf")
+
+    def test_supabase_template_store_reads_legacy_sanitized_alias(self):
+        client = FakeSupabaseClient()
+        client.objects[("Report_template", "Rechnungsvorlage_aL_elektronisch_1_.pdf")] = {
+            "content": b"%PDF-alias\n",
+            "options": {},
+        }
+        store = SupabaseStorageTemplateStore(client=client)
+
+        content, content_type = store.read_template_bytes("rechnung")
+
+        self.assertEqual(content, b"%PDF-alias\n")
+        self.assertEqual(content_type, "application/pdf")
 
     def test_supabase_report_asset_store_uploads_to_reports_bucket(self):
         client = FakeSupabaseClient()
@@ -922,6 +958,41 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(make_asset_store("output"), "asset-store")
             self.assertEqual(make_invoice_capture_store("output"), "invoice-store")
             self.assertEqual(make_template_store(), "template-store")
+
+    def test_backend_health_status_checks_tables_and_buckets_without_secrets(self):
+        cursor = RecordingCursor(
+            fetchall_results=[
+                [
+                    {"table_name": "calendar_events"},
+                    {"table_name": "documents"},
+                    {"table_name": "document_folders"},
+                    {"table_name": "document_matches"},
+                ]
+            ]
+        )
+        client = FakeSupabaseClient()
+        for bucket in ("Report_template", "reports_generated", "Stiftung", "TixiTaxi", "IV", "Versicherung"):
+            client.objects[(bucket, ".keep")] = {"content": b"", "options": {}}
+
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgres://example",
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
+                "SUPABASE_STORAGE_TEMPLATES_BUCKET": "Report_template",
+                "SUPABASE_STORAGE_REPORTS_BUCKET": "reports_generated",
+            },
+            clear=False,
+        ), patch("iv_agent.storage._connect_postgres", return_value=RecordingConnection(cursor)), patch(
+            "iv_agent.storage._create_supabase_client", return_value=client
+        ):
+            status = backend_health_status(document_buckets=["Stiftung", "TixiTaxi", "IV", "Versicherung"])
+
+        self.assertTrue(status["ok"])
+        self.assertTrue(all(check["ok"] for check in status["checks"]))
+        self.assertIn("Report_template", status["storage"]["required_buckets"])
+        self.assertNotIn("service-role-key", str(status))
 
 if __name__ == "__main__":
     unittest.main()

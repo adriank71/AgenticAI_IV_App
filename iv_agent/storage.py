@@ -273,11 +273,11 @@ def _create_supabase_client():
 
 
 def _supabase_templates_bucket() -> str:
-    return os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "report-template").strip() or "report-template"
+    return os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "Report_template").strip() or "Report_template"
 
 
 def _supabase_reports_bucket() -> str:
-    return os.environ.get("SUPABASE_STORAGE_REPORTS_BUCKET", "iv-agent-reports").strip() or "iv-agent-reports"
+    return os.environ.get("SUPABASE_STORAGE_REPORTS_BUCKET", "reports_generated").strip() or "reports_generated"
 
 
 def _supabase_invoices_bucket() -> str:
@@ -289,6 +289,20 @@ SUPABASE_TEMPLATE_FILES = {
     "rechnung": "Rechnungsvorlage_aL_elektronisch (1).pdf",
     "transportkosten": "AK_Formular_EL_Transportkosten.pdf",
 }
+SUPABASE_TEMPLATE_FILE_ALIASES = {
+    "stundenblatt": ("Stundenblatt.pdf",),
+    "rechnung": (
+        "Rechnungsvorlage_aL_elektronisch_1_.pdf",
+        "Rechnungsvorlage_aL_elektronisch__1_.pdf",
+    ),
+    "transportkosten": ("AK_Formular_EL_Transportkosten.pdf",),
+}
+REQUIRED_DATABASE_TABLES = (
+    "calendar_events",
+    "documents",
+    "document_folders",
+    "document_matches",
+)
 _STORE_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
@@ -437,6 +451,197 @@ def _sanitize_storage_name(file_name: str) -> str:
     base_name = os.path.basename(str(file_name or "").strip())
     safe_name = re.sub(r"[^0-9A-Za-z._-]+", "_", base_name)
     return safe_name or "report.pdf"
+
+
+def _template_storage_name(file_name: str) -> str:
+    base_name = os.path.basename(str(file_name or "").strip())
+    return base_name or "template.pdf"
+
+
+def clear_store_cache() -> None:
+    _STORE_CACHE.clear()
+
+
+def _public_env_status(name: str) -> dict[str, Any]:
+    return {"name": name, "configured": bool(os.environ.get(name, "").strip())}
+
+
+def _storage_model_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                result = method()
+            except TypeError:
+                continue
+            if isinstance(result, dict):
+                return {str(key): item for key, item in result.items()}
+    result: dict[str, Any] = {}
+    for field in ("id", "name", "public", "created_at", "updated_at"):
+        if hasattr(value, field):
+            result[field] = getattr(value, field)
+    return result
+
+
+def _health_check_item(name: str, kind: str, status: str, message: str, *, required: bool = True) -> dict[str, Any]:
+    return {
+        "name": name,
+        "type": kind,
+        "status": status,
+        "ok": status == "ok",
+        "required": required,
+        "message": message,
+    }
+
+
+def backend_health_status(*, document_buckets: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+    """Run non-mutating checks for configured Postgres tables and Supabase Storage buckets."""
+    template_bucket = _supabase_templates_bucket()
+    reports_bucket = _supabase_reports_bucket()
+    required_buckets = []
+    for bucket_name in [template_bucket, reports_bucket, *(document_buckets or ())]:
+        candidate = str(bucket_name or "").strip()
+        if candidate and candidate not in required_buckets:
+            required_buckets.append(candidate)
+
+    env_status = {
+        "DATABASE_URL": _public_env_status("DATABASE_URL"),
+        "SUPABASE_URL": {"name": "SUPABASE_URL", "configured": _supabase_url_configured()},
+        "SUPABASE_SERVICE_ROLE_KEY": _public_env_status("SUPABASE_SERVICE_ROLE_KEY"),
+        "SUPABASE_STORAGE_TEMPLATES_BUCKET": {
+            "name": "SUPABASE_STORAGE_TEMPLATES_BUCKET",
+            "configured": bool(os.environ.get("SUPABASE_STORAGE_TEMPLATES_BUCKET", "").strip()),
+            "value": template_bucket,
+        },
+        "SUPABASE_STORAGE_REPORTS_BUCKET": {
+            "name": "SUPABASE_STORAGE_REPORTS_BUCKET",
+            "configured": bool(os.environ.get("SUPABASE_STORAGE_REPORTS_BUCKET", "").strip()),
+            "value": reports_bucket,
+        },
+    }
+
+    database_checks: list[dict[str, Any]] = []
+    if not os.environ.get("DATABASE_URL", "").strip():
+        database_checks.append(
+            _health_check_item(
+                "DATABASE_URL",
+                "env",
+                "missing",
+                "Set DATABASE_URL to enable Postgres-backed calendar and document metadata.",
+            )
+        )
+    else:
+        try:
+            with _connect_postgres(_database_url()) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = ANY(%s)
+                        """,
+                        (list(REQUIRED_DATABASE_TABLES),),
+                    )
+                    rows = cursor.fetchall()
+            existing_tables = {
+                str((row.get("table_name") if isinstance(row, dict) else row[0]) or "")
+                for row in rows
+            }
+            for table_name in REQUIRED_DATABASE_TABLES:
+                database_checks.append(
+                    _health_check_item(
+                        table_name,
+                        "table",
+                        "ok" if table_name in existing_tables else "missing",
+                        (
+                            "Table exists."
+                            if table_name in existing_tables
+                            else f"Create or migrate the public.{table_name} table before using this feature."
+                        ),
+                    )
+                )
+        except Exception as exc:
+            database_checks.append(
+                _health_check_item(
+                    "DATABASE_URL",
+                    "database",
+                    "error",
+                    f"Could not check Postgres tables. Verify DATABASE_URL. Original error: {exc}",
+                )
+            )
+
+    storage_checks: list[dict[str, Any]] = []
+    if not _supabase_url_configured():
+        storage_checks.append(
+            _health_check_item(
+                "SUPABASE_URL",
+                "env",
+                "missing",
+                "Set SUPABASE_URL to enable Supabase Storage.",
+            )
+        )
+    if not os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip():
+        storage_checks.append(
+            _health_check_item(
+                "SUPABASE_SERVICE_ROLE_KEY",
+                "env",
+                "missing",
+                "Set SUPABASE_SERVICE_ROLE_KEY with server-side Storage access.",
+            )
+        )
+    if _supabase_storage_configured():
+        try:
+            client = _create_supabase_client()
+            raw_buckets = client.storage.list_buckets()
+            existing_buckets = set()
+            for raw_bucket in raw_buckets or []:
+                bucket = _storage_model_to_dict(raw_bucket)
+                bucket_name = str(bucket.get("id") or bucket.get("name") or "").strip()
+                if bucket_name:
+                    existing_buckets.add(bucket_name)
+            for bucket_name in required_buckets:
+                storage_checks.append(
+                    _health_check_item(
+                        bucket_name,
+                        "bucket",
+                        "ok" if bucket_name in existing_buckets else "missing",
+                        (
+                            "Bucket exists."
+                            if bucket_name in existing_buckets
+                            else f"Create the private Supabase Storage bucket '{bucket_name}'."
+                        ),
+                    )
+                )
+        except Exception as exc:
+            storage_checks.append(
+                _health_check_item(
+                    "Supabase Storage",
+                    "storage",
+                    "error",
+                    f"Could not list Supabase Storage buckets. Verify SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. Original error: {exc}",
+                )
+            )
+
+    checks = [*database_checks, *storage_checks]
+    return {
+        "configured": all(item["configured"] for item in (env_status["DATABASE_URL"], env_status["SUPABASE_URL"], env_status["SUPABASE_SERVICE_ROLE_KEY"])),
+        "ok": bool(checks) and all(check.get("ok") for check in checks),
+        "environment": env_status,
+        "database": {
+            "configured": bool(os.environ.get("DATABASE_URL", "").strip()),
+            "required_tables": list(REQUIRED_DATABASE_TABLES),
+            "checks": database_checks,
+        },
+        "storage": {
+            "configured": _supabase_storage_configured(),
+            "required_buckets": required_buckets,
+            "checks": storage_checks,
+        },
+        "checks": checks,
+    }
 
 
 class LocalFileAssetStore:
@@ -781,7 +986,20 @@ class SupabaseStorageTemplateStore:
         normalized_key = str(template_key or "").strip()
         if not normalized_key:
             raise ValueError("template_key is required")
-        return _sanitize_storage_name(file_name or self._template_files.get(normalized_key) or f"{normalized_key}.pdf")
+        return _template_storage_name(file_name or self._template_files.get(normalized_key) or f"{normalized_key}.pdf")
+
+    def _candidate_paths(self, template_key: str, file_name: str | None = None) -> list[str]:
+        normalized_key = str(template_key or "").strip()
+        exact_name = self._file_name_for_key(normalized_key, file_name)
+        candidates = [exact_name]
+        for alias in SUPABASE_TEMPLATE_FILE_ALIASES.get(normalized_key, ()):
+            alias_name = _template_storage_name(alias)
+            if alias_name and alias_name not in candidates:
+                candidates.append(alias_name)
+        sanitized_name = _sanitize_storage_name(exact_name)
+        if sanitized_name and sanitized_name not in candidates:
+            candidates.append(sanitized_name)
+        return candidates
 
     def _template_path(self, template_key: str, file_name: str | None = None) -> str:
         normalized_key = str(template_key or "").strip()
@@ -847,13 +1065,23 @@ class SupabaseStorageTemplateStore:
         template = self.get_template(template_key)
         if not template:
             raise FileNotFoundError(template_key)
-        cache_key = template["storage_key"]
-        if cache_key in self._template_bytes_cache:
-            return self._template_bytes_cache[cache_key]
-        content = _supabase_download(self._client, bucket=self._bucket, path=template["storage_key"])
-        result = (content, template.get("content_type") or "application/pdf")
-        self._template_bytes_cache[cache_key] = result
-        return result
+        last_error: Exception | None = None
+        for storage_key in self._candidate_paths(template_key):
+            cache_key = storage_key
+            if cache_key in self._template_bytes_cache:
+                return self._template_bytes_cache[cache_key]
+            try:
+                content = _supabase_download(self._client, bucket=self._bucket, path=storage_key)
+            except FileNotFoundError as exc:
+                last_error = exc
+                continue
+            result = (content, _guess_content_type(storage_key, fallback="application/pdf"))
+            self._template_bytes_cache[cache_key] = result
+            return result
+        raise FileNotFoundError(
+            f"Supabase template '{template_key}' not found in bucket '{self._bucket}'. "
+            f"Tried: {', '.join(self._candidate_paths(template_key))}"
+        ) from last_error
 
 
 class LocalProfileStore:

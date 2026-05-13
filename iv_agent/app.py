@@ -59,6 +59,7 @@ try:
     from .storage import (
         _create_supabase_client,
         _supabase_storage_configured,
+        backend_health_status,
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
@@ -122,6 +123,7 @@ except ImportError:
     from storage import (
         _create_supabase_client,
         _supabase_storage_configured,
+        backend_health_status,
         make_profile_store,
         make_report_store,
         make_invoice_capture_store,
@@ -632,7 +634,7 @@ def generate_transportkosten_report(
     template_reference = resolve_transportkosten_template_path()
     if not template_reference:
         raise FileNotFoundError(
-            "Transportkosten template not found. Upload AK_Formular_EL_Transportkosten.pdf to the report-template bucket."
+            "Transportkosten template not found. Upload AK_Formular_EL_Transportkosten.pdf to the Report_template bucket."
         )
 
     user_id = normalize_user_id(profile_id or "default")
@@ -984,7 +986,12 @@ def api_ai_status():
         or "gpt-5.4-mini"
     ).strip() or "gpt-5.4-mini"
     status["models"]["vision"] = OPENAI_VISION_MODEL
-    return jsonify({"openai": status})
+    return jsonify(
+        {
+            "openai": status,
+            "backend": backend_health_status(document_buckets=document_bucket_names()),
+        }
+    )
 
 
 @app.post("/api/chat")

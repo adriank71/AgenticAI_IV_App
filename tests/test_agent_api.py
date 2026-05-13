@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import sys
@@ -14,6 +15,9 @@ import iv_agent as iv_agent_package
 from iv_agent import calendar_manager
 from iv_agent import voice_calendar_agent
 from iv_agent.agents import orchestrator as agent_orchestrator
+from iv_agent.tools.calendar_tools import build_calendar_tools
+from iv_agent.tools.storage_tools import build_storage_tools
+from iv_agent.tools.knowledge_tools import build_knowledge_tools
 
 
 @contextmanager
@@ -179,6 +183,102 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(created_agents[-1].name, "IV-Helper Orchestrator")
         self.assertEqual([agent.name for agent in created_agents[-1].handoffs], ["CalendarAgent", "StorageAgent", "KnowledgeAgent"])
         self.assertTrue(any(event["name"] == "orchestrator" and event["status"] == "completed" for event in payload["tool_events"]))
+
+    def test_calendar_agent_tool_drafts_pending_create_action(self):
+        tool_events = []
+        drafted_actions = []
+        structured_actions = []
+
+        with isolated_pending_action_storage():
+            tools = {
+                tool.__name__: tool
+                for tool in build_calendar_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    context_timezone="Europe/Berlin",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    drafted_actions=drafted_actions,
+                    structured_actions=structured_actions,
+                    register_pending_actions=agent_orchestrator.register_pending_actions,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(
+                tools["create_calendar_event"](
+                    title="Therapie",
+                    start_at="2026-05-04T09:00:00+02:00",
+                    end_at="2026-05-04T10:00:00+02:00",
+                    category="other",
+                )
+            )
+
+        self.assertEqual(len(payload["pending_actions"]), 1)
+        self.assertEqual(payload["pending_actions"][0]["type"], "create_event")
+        self.assertEqual(payload["pending_actions"][0]["payload"]["title"], "Therapie")
+        self.assertEqual(payload["pending_actions"][0]["payload"]["user_id"], "default")
+        self.assertTrue(any(event["name"] == "create_calendar_event" and event["status"] == "completed" for event in tool_events))
+
+    def test_storage_agent_tool_reads_documents_and_collects_artifacts(self):
+        tool_events = []
+        artifacts = []
+        document = {
+            "document_id": "doc-1",
+            "file_name": "iv-brief.pdf",
+            "content_type": "application/pdf",
+            "storage_bucket": "IV",
+            "summary": "IV Brief",
+        }
+
+        with patch("iv_agent.tools.storage_tools.service_list_documents", return_value=[document]):
+            tools = {
+                tool.__name__: tool
+                for tool in build_storage_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    drafted_actions=[],
+                    structured_actions=[],
+                    collected_artifacts=artifacts,
+                    register_pending_actions=agent_orchestrator.register_pending_actions,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(tools["list_documents"](storage_bucket="IV"))
+
+        self.assertEqual(payload["documents"][0]["document_id"], "doc-1")
+        self.assertEqual(artifacts[0]["download_url"], "/api/documents/doc-1/file?profile_id=default&download=1")
+        self.assertTrue(any(event["name"] == "list_documents" and event["status"] == "completed" for event in tool_events))
+
+    def test_knowledge_agent_tool_returns_watsonx_unavailable_result(self):
+        tool_events = []
+        unavailable = {
+            "available": False,
+            "reason": "WatsonX Orchestrate ist nicht konfiguriert.",
+            "answer": "",
+            "citations": [],
+        }
+
+        with patch("iv_agent.tools.knowledge_tools.knowledge_service.ask_watsonx_iv_assistant", return_value=unavailable):
+            tools = {
+                tool.__name__: tool
+                for tool in build_knowledge_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(tools["ask_watsonx_iv_assistant"]("Was bedeutet IV-Grad?"))
+
+        self.assertFalse(payload["available"])
+        self.assertIn("WatsonX", payload["reason"])
+        self.assertTrue(any(event["name"] == "ask_watsonx_iv_assistant" and event["status"] == "completed" for event in tool_events))
 
     def test_agent_chat_uploads_attachments_before_model_input(self):
         client = app_module.app.test_client()

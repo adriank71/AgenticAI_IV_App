@@ -58,7 +58,7 @@ def _load_env_local() -> None:
                 continue
 
             key, value = line.split("=", 1)
-            key = key.strip()
+            key = key.strip().lstrip("\ufeff")
             if key.startswith("export "):
                 key = key[7:].strip()
             if not key or any(char.isspace() for char in key):
@@ -71,7 +71,8 @@ def _load_env_local() -> None:
                 value = value[1:-1]
 
             target_key = OPENAI_API_KEY_ALIASES.get(key, key)
-            os.environ.setdefault(target_key, value)
+            if not os.environ.get(target_key):
+                os.environ[target_key] = value
 
 
 _load_env_local()
