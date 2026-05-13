@@ -1,6 +1,8 @@
 import io
 import os
 import shutil
+import sys
+import types
 import unittest
 import uuid
 from contextlib import contextmanager
@@ -121,6 +123,60 @@ class AgentApiTests(unittest.TestCase):
         self.assertNotIn("n8n", payload["answer"].lower())
         self.assertEqual(payload["pending_actions"], [])
         self.assertTrue(any(event["name"] == "calendar_snapshot" for event in payload["tool_events"]))
+
+    def test_agent_chat_agents_sdk_path_builds_specialized_agents(self):
+        created_agents = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.name = kwargs.get("name")
+                self.handoffs = kwargs.get("handoffs", [])
+                created_agents.append(self)
+
+        class FakeRunner:
+            @staticmethod
+            def run_sync(agent, input_text, max_turns=0):
+                self = types.SimpleNamespace()
+                self.final_output = "SDK ok"
+                return self
+
+        class FakeTrace:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        fake_agents_module = types.ModuleType("agents")
+        fake_agents_module.Agent = FakeAgent
+        fake_agents_module.Runner = FakeRunner
+        fake_agents_module.function_tool = lambda func: func
+        fake_agents_module.set_tracing_disabled = lambda disabled: None
+        fake_agents_module.trace = lambda **kwargs: FakeTrace()
+
+        with isolated_pending_action_storage(), patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key"},
+            clear=False,
+        ), patch.dict(sys.modules, {"agents": fake_agents_module}), patch.object(
+            agent_orchestrator,
+            "_agents_sdk_available",
+            return_value=True,
+        ):
+            payload = agent_orchestrator.run_agent_chat(
+                {
+                    "message": "Zeige mir meine Dokumente",
+                    "thread_id": "thread-test",
+                    "attachments": [],
+                    "client_context": {"profile_id": "default", "timezone": "Europe/Berlin"},
+                }
+            )
+
+        self.assertEqual(payload["answer"], "SDK ok")
+        self.assertEqual(created_agents[-1].name, "IV-Helper Orchestrator")
+        self.assertEqual([agent.name for agent in created_agents[-1].handoffs], ["CalendarAgent", "StorageAgent", "KnowledgeAgent"])
+        self.assertTrue(any(event["name"] == "orchestrator" and event["status"] == "completed" for event in payload["tool_events"]))
 
     def test_agent_chat_uploads_attachments_before_model_input(self):
         client = app_module.app.test_client()
