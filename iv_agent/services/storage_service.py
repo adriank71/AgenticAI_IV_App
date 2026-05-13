@@ -280,12 +280,101 @@ def _extract_service_period(text: str) -> str:
     return ""
 
 
+_CHF_CURRENCY_PATTERN = r"(?:CHF|Fr\.?)"
+_AMOUNT_NUMBER_PATTERN = r"(?:[0-9]{1,3}(?:[ '\u00a0]?[0-9]{3})*(?:[.,][0-9]{2})|[0-9]+(?:[.,][0-9]{2})?)"
+_INVOICE_TOTAL_LABELS = (
+    "total",
+    "totalbetrag",
+    "betrag total",
+    "gesamtbetrag",
+    "rechnungsbetrag",
+    "zahlbetrag",
+    "zu bezahlen",
+    "iv-verguetung",
+    "iv-vergütung",
+)
+
+
+def _is_date_like_amount(value: Any) -> bool:
+    raw = re.sub(r"\s+", "", str(value or "").strip())
+    raw = raw.replace("CHF", "").replace("Fr.", "").replace("Fr", "").strip()
+    return bool(
+        re.fullmatch(r"\d{1,2}[.,]\d{1,2}[.,]\d{2,4}", raw)
+        or re.fullmatch(r"\d{4}[.,]\d{1,2}[.,]\d{1,2}", raw)
+    )
+
+
+def _candidate_is_inside_date(text: str, start: int, end: int) -> bool:
+    before = str(text or "")[max(0, start - 6) : start]
+    after = str(text or "")[end : min(len(text or ""), end + 6)]
+    return bool(
+        re.search(r"\d[.,]\s*$", before)
+        or re.match(r"^\s*[.,]\d", after)
+        or re.search(r"\d{1,2}[.,]\d{1,2}[.,]\d{2,4}", f"{before}{text[start:end]}{after}")
+    )
+
+
+def _format_chf_amount(amount: float) -> str:
+    return f"CHF {amount:.2f}"
+
+
+def _invoice_amount_candidate(text: str, amount: str, start: int, end: int) -> float | None:
+    if _is_date_like_amount(amount) or _candidate_is_inside_date(text, start, end):
+        return None
+    return _parse_chf_amount(amount)
+
+
+def extract_invoice_amount_fields(text: str) -> dict[str, Any]:
+    raw_text = str(text or "")
+    if not raw_text.strip():
+        return {}
+
+    label_pattern = "|".join(re.escape(label) for label in _INVOICE_TOTAL_LABELS)
+    labeled_pattern = re.compile(
+        rf"\b(?P<label>{label_pattern})\b[^\n\r0-9]{{0,80}}(?:{_CHF_CURRENCY_PATTERN}\s*)?[:\-]?\s*(?P<amount>{_AMOUNT_NUMBER_PATTERN})",
+        flags=re.IGNORECASE,
+    )
+    for match in labeled_pattern.finditer(raw_text):
+        amount_text = match.group("amount")
+        amount = _invoice_amount_candidate(raw_text, amount_text, match.start("amount"), match.end("amount"))
+        if amount is None:
+            continue
+        label = " ".join(match.group("label").lower().split())
+        return {
+            "total": amount,
+            "currency": "CHF",
+            "formatted": _format_chf_amount(amount),
+            "source": f"label:{label}",
+            "confidence": "high",
+        }
+
+    currency_pattern = re.compile(
+        rf"\b(?:{_CHF_CURRENCY_PATTERN}\s*(?P<amount_after>{_AMOUNT_NUMBER_PATTERN})|(?P<amount_before>{_AMOUNT_NUMBER_PATTERN})\s*{_CHF_CURRENCY_PATTERN})\b",
+        flags=re.IGNORECASE,
+    )
+    for match in currency_pattern.finditer(raw_text):
+        amount_text = match.group("amount_after") or match.group("amount_before") or ""
+        group_name = "amount_after" if match.group("amount_after") else "amount_before"
+        amount = _invoice_amount_candidate(raw_text, amount_text, match.start(group_name), match.end(group_name))
+        if amount is None:
+            continue
+        confidence = "medium" if amount >= 5 else "low"
+        if confidence == "low":
+            continue
+        return {
+            "total": amount,
+            "currency": "CHF",
+            "formatted": _format_chf_amount(amount),
+            "source": "currency_context",
+            "confidence": confidence,
+        }
+
+    return {}
+
+
 def _extract_amount(text: str) -> str:
-    match = re.search(r"\b(?:CHF|Fr\.?)\s*([0-9][0-9'.,]*)\b|\b([0-9][0-9'.,]*)\s*(?:CHF|Fr\.?)\b", text, flags=re.IGNORECASE)
-    if not match:
-        return ""
-    amount = match.group(1) or match.group(2)
-    return f"CHF {amount}"
+    fields = extract_invoice_amount_fields(text)
+    return str(fields.get("formatted") or "")
 
 
 def _parse_chf_amount(value: Any) -> float | None:
@@ -311,6 +400,23 @@ def _parse_chf_amount(value: Any) -> float | None:
         return round(float(number), 2)
     except ValueError:
         return None
+
+
+def _normalize_invoice_amount_fields(fields: Any, text: str = "") -> dict[str, Any]:
+    input_fields = _coerce_json_dict(fields)
+    detected = extract_invoice_amount_fields(text)
+    normalized = dict(detected)
+    if _parse_chf_amount(input_fields.get("total")) is not None:
+        normalized.update(input_fields)
+    total = _parse_chf_amount(normalized.get("total"))
+    if total is None:
+        return {}
+    normalized["total"] = total
+    normalized["currency"] = str(normalized.get("currency") or "CHF").strip().upper() or "CHF"
+    normalized["formatted"] = _format_chf_amount(total)
+    normalized["source"] = str(normalized.get("source") or "metadata").strip() or "metadata"
+    normalized["confidence"] = str(normalized.get("confidence") or "medium").strip() or "medium"
+    return normalized
 
 
 def _extract_deadline(text: str) -> str:
@@ -630,7 +736,8 @@ def build_chat_document_artifact(document: dict[str, Any], *, include_preview_ur
     invoice_fields = metadata.get("invoice_fields") if isinstance(metadata.get("invoice_fields"), dict) else {}
     amount = _parse_chf_amount(invoice_fields.get("total"))
     if amount is None:
-        amount = _parse_chf_amount(facts.get("amount") or _extract_amount(document.get("summary") or document.get("extracted_text") or ""))
+        detected_fields = extract_invoice_amount_fields(document.get("extracted_text") or document.get("summary") or "")
+        amount = _parse_chf_amount(detected_fields.get("total") or facts.get("amount"))
     content_type = document.get("content_type") or "application/octet-stream"
     artifact = {
         "id": document.get("document_id"),
@@ -1054,6 +1161,12 @@ class StorageService:
             safe_file_name=safe_file_name,
             record_date=record_date,
         )
+        invoice_fields = _normalize_invoice_amount_fields(input_metadata.get("invoice_fields"), extracted_text)
+        if invoice_fields and normalize_document_type(classification.get("document_type") or "") in {"invoice", "receipt"}:
+            classification.setdefault("facts", {})
+            if isinstance(classification["facts"], dict):
+                classification["facts"]["amount"] = invoice_fields["formatted"]
+            input_metadata["invoice_fields"] = invoice_fields
         merged_metadata = self._update_bucket_metadata(
             {**input_metadata, "classification": classification},
             bucket_name=storage_bucket,
@@ -1330,18 +1443,28 @@ class StorageService:
             facts = metadata.get("classification", {}).get("facts", {}) if isinstance(metadata.get("classification"), dict) else {}
             amount = _parse_chf_amount(invoice_fields.get("total"))
             amount_source = "invoice_fields.total" if amount is not None else ""
+            amount_confidence = str(invoice_fields.get("confidence") or "").strip() if amount is not None else ""
+            if amount is None:
+                detected_fields = extract_invoice_amount_fields(document.get("extracted_text") or document.get("summary") or "")
+                amount = _parse_chf_amount(detected_fields.get("total"))
+                amount_source = str(detected_fields.get("source") or "document_text") if amount is not None else ""
+                amount_confidence = str(detected_fields.get("confidence") or "") if amount is not None else ""
             if amount is None:
                 amount = _parse_chf_amount(facts.get("amount"))
                 amount_source = "classification.facts.amount" if amount is not None else ""
-            if amount is None:
-                amount = _parse_chf_amount(_extract_amount(document.get("summary") or document.get("extracted_text") or ""))
-                amount_source = "document_text" if amount is not None else ""
+                amount_confidence = "legacy" if amount is not None else ""
             if amount is None:
                 documents_without_amount.append(artifact)
                 continue
 
             total += amount
-            counted = {**artifact, "amount": amount, "amount_currency": "CHF", "amount_source": amount_source}
+            counted = {
+                **artifact,
+                "amount": amount,
+                "amount_currency": "CHF",
+                "amount_source": amount_source,
+                "amount_confidence": amount_confidence,
+            }
             counted_documents.append(counted)
             fuzzy_key = (
                 str(document.get("file_name") or "").strip().lower(),
@@ -1383,6 +1506,94 @@ class StorageService:
             "documents_without_amount": documents_without_amount,
             "possible_duplicates": possible_duplicates,
             "uncertainty_warnings": warnings,
+        }
+
+    def backfill_invoice_amount_metadata(
+        self,
+        *,
+        user_id: str,
+        query: str = "",
+        storage_bucket: str = "",
+        year: int | None = None,
+        month: int | None = None,
+        start_date: str | date | None = None,
+        end_date: str | date | None = None,
+        institution: str = "",
+        tags: list[str] | None = None,
+        limit: int = 100,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        bucket_filter = _coerce_bucket_name(
+            storage_bucket or infer_document_bucket_from_text(query),
+            allowed=self._document_buckets,
+            fallback="",
+        )
+        documents = self.list_documents(
+            user_id=user_id,
+            query=_invoice_sum_query_filter(query, bucket_filter),
+            year=year,
+            month=month,
+            start_date=start_date,
+            end_date=end_date,
+            document_type="invoice",
+            institution=institution,
+            tags=tags,
+            storage_bucket=bucket_filter,
+            limit=limit,
+        )
+        changed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
+        unchanged: list[dict[str, Any]] = []
+
+        for document in documents:
+            metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+            current_fields = _normalize_invoice_amount_fields(
+                metadata.get("invoice_fields"),
+                document.get("extracted_text") or document.get("summary") or "",
+            )
+            if not current_fields:
+                missing.append(self.build_chat_document_artifact(document))
+                continue
+
+            existing_total = _parse_chf_amount((metadata.get("invoice_fields") or {}).get("total") if isinstance(metadata.get("invoice_fields"), dict) else None)
+            existing_amount = str((metadata.get("classification") or {}).get("facts", {}).get("amount") or "") if isinstance(metadata.get("classification"), dict) else ""
+            if existing_total == current_fields["total"] and existing_amount == current_fields["formatted"]:
+                unchanged.append(self.build_chat_document_artifact(document))
+                continue
+
+            artifact = self.build_chat_document_artifact(document)
+            artifact["amount"] = current_fields["total"]
+            artifact["amount_currency"] = "CHF"
+            artifact["amount_source"] = current_fields.get("source")
+            artifact["amount_confidence"] = current_fields.get("confidence")
+            changed.append(artifact)
+
+            if dry_run:
+                continue
+
+            next_metadata = dict(metadata)
+            classification = dict(next_metadata.get("classification") or {})
+            facts = dict(classification.get("facts") or {})
+            facts["amount"] = current_fields["formatted"]
+            classification["facts"] = facts
+            next_metadata["classification"] = classification
+            next_metadata["invoice_fields"] = current_fields
+            self.update_document_metadata(
+                user_id=user_id,
+                document_id=str(document.get("document_id") or ""),
+                updates={"metadata": next_metadata},
+            )
+
+        return {
+            "user_id": normalize_user_id(user_id),
+            "dry_run": bool(dry_run),
+            "matched_document_count": len(documents),
+            "changed_count": len(changed),
+            "unchanged_count": len(unchanged),
+            "missing_amount_count": len(missing),
+            "changed_documents": changed,
+            "unchanged_documents": unchanged,
+            "documents_without_amount": missing,
         }
 
     def get_document(self, *, user_id: str, document_id: str, include_signed_url: bool = False) -> dict[str, Any] | None:
@@ -1444,10 +1655,21 @@ class StorageService:
             classification["facts"] = extract_structured_facts(document["extracted_text"])
         if not classification.get("document_date"):
             classification["document_date"] = classification["facts"].get("document_date")
+        invoice_fields = _normalize_invoice_amount_fields(
+            (document.get("metadata") or {}).get("invoice_fields"),
+            document["extracted_text"],
+        )
+        if invoice_fields and normalize_document_type(classification.get("document_type") or "") in {"invoice", "receipt"}:
+            classification.setdefault("facts", {})
+            if isinstance(classification["facts"], dict):
+                classification["facts"]["amount"] = invoice_fields["formatted"]
+        metadata_updates = {"classification": classification}
+        if invoice_fields:
+            metadata_updates["invoice_fields"] = invoice_fields
         updated = self.update_document_metadata(
             user_id=user_id,
             document_id=document_id,
-            updates=classification,
+            updates={**classification, "metadata": metadata_updates},
         )
         return {"document": updated, "classification": classification, "used_openai": bool(classification.get("used_openai"))}
 
@@ -2035,6 +2257,10 @@ def count_documents(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 def sum_invoice_amounts(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_storage_service().sum_invoice_amounts(*args, **kwargs)
+
+
+def backfill_invoice_amount_metadata(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return get_storage_service().backfill_invoice_amount_metadata(*args, **kwargs)
 
 
 def get_document(*args: Any, **kwargs: Any) -> dict[str, Any] | None:

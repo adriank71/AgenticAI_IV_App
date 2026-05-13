@@ -538,6 +538,15 @@ class AgentApiTests(unittest.TestCase):
             self.assertEqual(archive.read("doc-1.txt"), b"content-doc-1")
         self.assertEqual(fake_service.calls, [("profile_a", "doc-1"), ("profile_a", "doc-2")])
 
+    def test_chat_frontend_renders_document_bundle_artifacts(self):
+        app_js = os.path.join(os.getcwd(), "iv_agent", "static", "app.js")
+        with open(app_js, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('artifact.type === "document_bundle"', source)
+        self.assertIn('artifact.type === "document_bundle" ? "folder_zip"', source)
+        self.assertIn("Download-Paket", source)
+
     def test_camera_capture_stores_document_when_vision_fails(self):
         uploaded_document = {
             "document_id": "doc-1",

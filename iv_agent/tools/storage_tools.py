@@ -1,4 +1,5 @@
 import json
+import re
 import urllib.parse
 from typing import Any
 
@@ -53,6 +54,98 @@ def _optional_int(value: int | str | None) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed or None
+
+
+def _normalize_query_text(value: Any) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+
+
+def _structured_storage_query(query: str, *, storage_bucket: str = "", institution: str = "") -> str:
+    raw = str(query or "").strip()
+    if not raw:
+        return ""
+    normalized = _normalize_query_text(raw)
+    bucket_hint = str(storage_bucket or infer_document_bucket_from_text(f"{query} {institution}") or "").strip()
+    stop_tokens = {
+        "wie",
+        "viel",
+        "sind",
+        "ist",
+        "meine",
+        "mein",
+        "alle",
+        "gesamt",
+        "insgesamt",
+        "summe",
+        "summen",
+        "summiere",
+        "betrag",
+        "betraege",
+        "chf",
+        "rechnung",
+        "rechnungen",
+        "invoice",
+        "invoices",
+        "dokument",
+        "dokumente",
+        "datei",
+        "dateien",
+        "download",
+        "downloads",
+        "bundle",
+        "paket",
+        "zip",
+        "lade",
+        "herunter",
+        "ignorieren",
+        "ignoriere",
+        "duplikate",
+        "duplicate",
+        "duplicates",
+        "im",
+        "in",
+        "vom",
+        "von",
+        "aus",
+        "als",
+        "der",
+        "die",
+        "das",
+        "und",
+        "fuer",
+        "für",
+        "januar",
+        "februar",
+        "maerz",
+        "märz",
+        "april",
+        "mai",
+        "juni",
+        "juli",
+        "august",
+        "september",
+        "oktober",
+        "november",
+        "dezember",
+    }
+    for bucket_word in ("tixitaxi", "tixi", "taxi", "iv", "iv-stelle", "stiftung", "pro", "infirmis", "versicherung"):
+        stop_tokens.add(bucket_word)
+    words = re.findall(r"[a-z0-9_-]+", normalized)
+    meaningful = [word for word in words if len(word) > 2 and word not in stop_tokens and not re.fullmatch(r"20\d{2}", word)]
+    if not meaningful and (
+        bucket_hint
+        or any(word in normalized for word in ("rechnung", "summe", "download", "bundle", "zip", "dokument", "duplikat"))
+    ):
+        return ""
+    return " ".join(meaningful) if meaningful else raw
 
 
 def build_storage_tools(
@@ -302,18 +395,21 @@ def build_storage_tools(
     ) -> str:
         """Sum stored invoice amounts after filtering documents first; exact duplicate checksums are ignored."""
         def read() -> dict[str, Any]:
+            bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+            query_filter = _structured_storage_query(query, storage_bucket=bucket_filter, institution=institution)
             payload = service_sum_invoice_amounts(
                 user_id=context_user_id,
-                query=query,
+                query=query_filter,
                 year=_optional_int(year),
                 month=_optional_int(month),
                 start_date=start_date or None,
                 end_date=end_date or None,
                 institution=institution,
                 tags=_json_list(tags_json),
-                storage_bucket=storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
+                storage_bucket=bucket_filter,
                 limit=limit,
             )
+            payload.setdefault("original_query", query)
             _collect_document_artifacts(payload.get("counted_documents") or [])
             _collect_document_artifacts(payload.get("documents_without_amount") or [])
             return payload
@@ -350,6 +446,10 @@ def build_storage_tools(
         document_type: str = "",
         institution: str = "",
         tags_json: str = "[]",
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
         limit: int = 10,
     ) -> str:
         """Create a downloadable ZIP artifact URL for selected or searched documents without changing storage."""
@@ -363,13 +463,19 @@ def build_storage_tools(
                     if document:
                         documents.append(document)
             else:
+                bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+                query_filter = _structured_storage_query(query, storage_bucket=bucket_filter, institution=institution)
                 documents = service_search_documents(
                     user_id=context_user_id,
-                    query=query,
+                    query=query_filter,
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
                     document_type=document_type,
                     institution=institution,
                     tags=_json_list(tags_json),
-                    storage_bucket=storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
+                    storage_bucket=bucket_filter,
                     limit=min(max(1, int(limit or 10)), 20),
                 )
             selected_ids = [

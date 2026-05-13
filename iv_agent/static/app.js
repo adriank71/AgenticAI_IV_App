@@ -3091,7 +3091,7 @@ function formatArtifactFileSize(value) {
 
 function buildChatArtifactList(artifacts) {
   const files = artifacts
-    .filter((artifact) => artifact && (artifact.type === "document" || artifact.type === "report"))
+    .filter((artifact) => artifact && (artifact.type === "document" || artifact.type === "report" || artifact.type === "document_bundle"))
     .filter((artifact, index, all) => {
       const id = String(artifact.document_id || artifact.report_id || artifact.id || "");
       return !id || all.findIndex((item) => String(item.document_id || item.report_id || item.id || "") === id) === index;
@@ -3105,9 +3105,10 @@ function buildChatArtifactList(artifacts) {
   title.className = "chat-policy-title";
   const hasReports = files.some((artifact) => artifact.type === "report");
   const hasDocuments = files.some((artifact) => artifact.type === "document");
+  const hasBundles = files.some((artifact) => artifact.type === "document_bundle");
   title.textContent = hasReports && hasDocuments
     ? "Dateien"
-    : (hasReports ? (files.length === 1 ? "Report" : "Reports") : (files.length === 1 ? "Dokument" : "Dokumente"));
+    : (hasBundles ? (files.length === 1 ? "Download-Paket" : "Dateien") : (hasReports ? (files.length === 1 ? "Report" : "Reports") : (files.length === 1 ? "Dokument" : "Dokumente")));
   card.appendChild(title);
 
   files.slice(0, 8).forEach((artifact) => {
@@ -3117,7 +3118,7 @@ function buildChatArtifactList(artifacts) {
     const icon = document.createElement("span");
     icon.className = "material-symbols-outlined";
     icon.textContent = artifact.icon
-      || (artifact.type === "report" ? "picture_as_pdf" : (String(artifact.content_type || "").startsWith("image/") ? "image" : "draft"));
+      || (artifact.type === "document_bundle" ? "folder_zip" : (artifact.type === "report" ? "picture_as_pdf" : (String(artifact.content_type || "").startsWith("image/") ? "image" : "draft")));
     row.appendChild(icon);
 
     const body = document.createElement("div");
@@ -3127,6 +3128,8 @@ function buildChatArtifactList(artifacts) {
     body.appendChild(name);
 
     const metaParts = [
+      artifact.type === "document_bundle" ? "ZIP" : "",
+      artifact.document_ids && artifact.document_ids.length ? `${artifact.document_ids.length} Dokumente` : "",
       artifact.type === "report" ? artifact.month : "",
       artifact.report_type,
       artifact.storage_bucket,

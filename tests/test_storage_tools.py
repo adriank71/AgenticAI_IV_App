@@ -89,7 +89,21 @@ class StorageToolsTests(unittest.TestCase):
 
         self.assertEqual(payload["total_amount_chf"], 42.5)
         self.assertEqual(sum_mock.call_args.kwargs["storage_bucket"], "TixiTaxi")
+        self.assertEqual(sum_mock.call_args.kwargs["query"], "")
         self.assertEqual(artifacts[0]["document_id"], "doc-1")
+
+    def test_sum_invoice_amounts_tool_drops_natural_language_question_filter(self):
+        with patch("iv_agent.tools.storage_tools.service_sum_invoice_amounts", return_value={"total_amount_chf": 0}) as sum_mock:
+            tools, _events = self._build_tools([])
+            tools["sum_invoice_amounts"](
+                query="Wie viel CHF sind meine Rechnungen im Mai insgesamt? Ignoriere Duplikate",
+                year=2026,
+                month=5,
+            )
+
+        self.assertEqual(sum_mock.call_args.kwargs["query"], "")
+        self.assertEqual(sum_mock.call_args.kwargs["year"], 2026)
+        self.assertEqual(sum_mock.call_args.kwargs["month"], 5)
 
     def test_bundle_documents_tool_returns_zip_artifact(self):
         artifacts = []
@@ -110,6 +124,31 @@ class StorageToolsTests(unittest.TestCase):
         self.assertIn("/api/documents/bundle?", payload["bundle"]["download_url"])
         self.assertIn("document_ids=doc-1", payload["bundle"]["download_url"])
         self.assertEqual(artifacts[-1]["type"], "document_bundle")
+
+    def test_bundle_documents_tool_uses_structured_filters_for_generic_download(self):
+        document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "file_name": "rechnung.txt",
+            "content_type": "text/plain",
+            "storage_bucket": "IV",
+        }
+
+        with patch("iv_agent.tools.storage_tools.service_search_documents", return_value=[document]) as search_mock:
+            tools, _events = self._build_tools([])
+            payload = json.loads(
+                tools["bundle_documents"](
+                    query="Lade alle Rechnungen aus Mai als ZIP herunter",
+                    document_type="invoice",
+                    year=2026,
+                    month=5,
+                )
+            )
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(search_mock.call_args.kwargs["query"], "")
+        self.assertEqual(search_mock.call_args.kwargs["year"], 2026)
+        self.assertEqual(search_mock.call_args.kwargs["month"], 5)
 
 
 if __name__ == "__main__":

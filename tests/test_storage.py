@@ -12,6 +12,7 @@ from iv_agent.reminders import PostgresReminderStore
 from iv_agent.services.storage_service import (
     StorageService,
     build_chat_document_artifact,
+    extract_invoice_amount_fields,
     extract_document_text,
     process_chat_attachments,
     sanitize_document_filename,
@@ -181,6 +182,15 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(docx_error)
         self.assertIn("Therapie Bericht", docx_text)
 
+    def test_invoice_amount_extraction_prefers_totals_and_ignores_dates(self):
+        self.assertEqual(extract_invoice_amount_fields("Betrag CHF 02.05.2026"), {})
+        self.assertEqual(extract_invoice_amount_fields("Total CHF: 74.33")["total"], 74.33)
+        self.assertEqual(
+            extract_invoice_amount_fields("Gesamtbetrag Transportkosten: CHF 289.90")["total"],
+            289.90,
+        )
+        self.assertEqual(extract_invoice_amount_fields("IV-VERGUETUNG CHF 260.91")["total"], 260.91)
+
     def test_storage_service_uploads_document_to_iv_bucket_with_review_metadata(self):
         cursor = RecordingCursor()
         client = FakeSupabaseClient()
@@ -204,6 +214,8 @@ class StorageTests(unittest.TestCase):
         self.assertIn(("IV", document["storage_key"]), client.objects)
         self.assertEqual(document["document_type"], "invoice")
         self.assertEqual(document["institution"], "IV-Stelle")
+        self.assertEqual(document["metadata"]["invoice_fields"]["total"], 50.0)
+        self.assertEqual(document["metadata"]["classification"]["facts"]["amount"], "CHF 50.00")
         self.assertEqual(document["suggested_bucket"], "IV")
         self.assertFalse(document["bucket_confirmed"])
         self.assertTrue(any("INSERT INTO documents" in query for query, _ in cursor.statements))
@@ -367,9 +379,17 @@ class StorageTests(unittest.TestCase):
             "checksum_sha256": "missing",
             "metadata": {},
             "summary": "Tixi Rechnung ohne Betrag",
-            "extracted_text": "Tixi Rechnung ohne Betrag",
+            "extracted_text": "Tixi Rechnung Betrag CHF 02.05.2026",
         }
-        cursor = RecordingCursor(fetchall_results=[[first, second, missing]])
+        labeled = {
+            **first,
+            "document_id": "doc-4",
+            "checksum_sha256": "labeled",
+            "metadata": {},
+            "summary": "IV Rechnung",
+            "extracted_text": "Gesamtbetrag Transportkosten: CHF 289.90",
+        }
+        cursor = RecordingCursor(fetchall_results=[[first, second, missing, labeled]])
         service = StorageService(
             "postgres://example",
             client=FakeSupabaseClient(),
@@ -381,15 +401,57 @@ class StorageTests(unittest.TestCase):
 
         self.assertEqual(result["storage_bucket"], "TixiTaxi")
         self.assertEqual(result["query_filter"], "")
-        self.assertEqual(result["matched_document_count"], 3)
-        self.assertEqual(result["counted_document_count"], 1)
+        self.assertEqual(result["matched_document_count"], 4)
+        self.assertEqual(result["counted_document_count"], 2)
         self.assertEqual(result["ignored_duplicate_count"], 1)
         self.assertEqual(result["missing_amount_count"], 1)
-        self.assertEqual(result["total_amount_chf"], 10.0)
+        self.assertEqual(result["total_amount_chf"], 299.9)
         query, params = cursor.statements[-1]
         self.assertIn("storage_bucket = %s", query)
         self.assertIn("lower(document_type) = lower(%s)", query)
         self.assertEqual(params[1], "TixiTaxi")
+
+    def test_backfill_invoice_amount_metadata_dry_run_reports_metadata_changes(self):
+        document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "folder_id": None,
+            "file_name": "iv_rechnung.txt",
+            "safe_file_name": "iv_rechnung.txt",
+            "storage_bucket": "IV",
+            "storage_key": "Documents/default/2026/05/doc-1-iv_rechnung.txt",
+            "storage_url": "supabase://IV/Documents/default/2026/05/doc-1-iv_rechnung.txt",
+            "content_type": "text/plain",
+            "content_size": 10,
+            "checksum_sha256": "checksum",
+            "document_type": "invoice",
+            "institution": "IV-Stelle",
+            "document_date": "2026-05-06",
+            "year": 2026,
+            "month": 5,
+            "tags": ["rechnung"],
+            "summary": "IV Rechnung",
+            "extracted_text": "Gesamtbetrag Transportkosten: CHF 289.90",
+            "extraction_status": "completed",
+            "extraction_error": None,
+            "metadata": {"classification": {"facts": {"amount": "CHF 06.05.2026"}}},
+            "created_at": "2026-05-06T10:00:00+00:00",
+            "updated_at": "2026-05-06T10:00:00+00:00",
+        }
+        cursor = RecordingCursor(fetchall_results=[[document]])
+        service = StorageService(
+            "postgres://example",
+            client=FakeSupabaseClient(),
+            bucket="IV",
+            connection_factory=lambda: RecordingConnection(cursor),
+        )
+
+        result = service.backfill_invoice_amount_metadata(user_id="default", year=2026, month=5, dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["changed_count"], 1)
+        self.assertEqual(result["changed_documents"][0]["amount"], 289.9)
+        self.assertFalse(any("UPDATE documents" in query for query, _ in cursor.statements))
 
     def test_process_chat_attachments_uploads_and_removes_base64(self):
         uploaded = {
