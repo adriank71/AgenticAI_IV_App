@@ -1,4 +1,5 @@
 import json
+import urllib.parse
 from typing import Any
 
 try:
@@ -340,6 +341,67 @@ def build_storage_tools(
         )
 
     tools.append(match_documents)
+
+    @function_tool
+    def bundle_documents(
+        document_ids_json: str = "[]",
+        query: str = "",
+        storage_bucket: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        limit: int = 10,
+    ) -> str:
+        """Create a downloadable ZIP artifact URL for selected or searched documents without changing storage."""
+
+        def read() -> dict[str, Any]:
+            document_ids = _json_list(document_ids_json)
+            documents: list[dict[str, Any]] = []
+            if document_ids:
+                for document_id in document_ids[:20]:
+                    document = service_get_document(user_id=context_user_id, document_id=document_id)
+                    if document:
+                        documents.append(document)
+            else:
+                documents = service_search_documents(
+                    user_id=context_user_id,
+                    query=query,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=_json_list(tags_json),
+                    storage_bucket=storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
+                    limit=min(max(1, int(limit or 10)), 20),
+                )
+            selected_ids = [
+                str(document.get("document_id") or "").strip()
+                for document in documents
+                if isinstance(document, dict) and str(document.get("document_id") or "").strip()
+            ][:20]
+            _collect_document_artifacts(documents)
+            if not selected_ids:
+                return {"bundle": None, "documents": [], "count": 0}
+            query_params = urllib.parse.urlencode(
+                {
+                    "profile_id": context_user_id,
+                    "document_ids": ",".join(selected_ids),
+                }
+            )
+            bundle = {
+                "id": f"document-bundle-{selected_ids[0]}-{len(selected_ids)}",
+                "type": "document_bundle",
+                "title": "Dokumentenpaket.zip",
+                "file_name": "documents_bundle.zip",
+                "content_type": "application/zip",
+                "document_ids": selected_ids,
+                "download_url": f"/api/documents/bundle?{query_params}",
+            }
+            if collected_artifacts is not None:
+                collected_artifacts.append(bundle)
+            return {"bundle": bundle, "documents": documents, "count": len(selected_ids)}
+
+        return _storage_tool_result("bundle_documents", read)
+
+    tools.append(bundle_documents)
 
     @function_tool
     def create_document_folder(name: str, parent_folder_id: str = "", color: str = "", document_ids_json: str = "[]") -> str:

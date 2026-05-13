@@ -152,6 +152,8 @@ const state = {
   chatStarted: false,
   storageBrowser: null,
   documentsBrowser: null,
+  documentsBrowserFetchedAt: 0,
+  documentBucketRefreshTimer: null,
   activeStorageBucket: "",
   lastAutoOpenedPanel: "",
   recentDocumentIds: {},
@@ -1329,6 +1331,11 @@ async function switchAppView(viewName) {
 
   if (viewName === "automations") {
     await refreshAutomations();
+    return;
+  }
+
+  if (viewName === "reports") {
+    await refreshDocumentBucketBoard({ useCache: true });
     return;
   }
 
@@ -5182,16 +5189,24 @@ function initInvoices() {
   }
 
   refreshDocumentBucketBoard({ force: true }).catch(() => {});
-  setInterval(() => {
+  if (state.documentBucketRefreshTimer) {
+    window.clearInterval(state.documentBucketRefreshTimer);
+  }
+  state.documentBucketRefreshTimer = window.setInterval(() => {
     refreshDocumentBucketBoard().catch(() => {});
-  }, 5000);
+  }, 10000);
 }
 
 async function refreshDocumentBucketBoard(options = {}) {
   if (!elements.documentBucketBoard || !elements.documentBrowserStatus) {
     return;
   }
+  const now = Date.now();
   if (options.useCache && state.documentsBrowser) {
+    renderDocumentBucketBoard();
+    return;
+  }
+  if (!options.force && state.documentsBrowser && now - Number(state.documentsBrowserFetchedAt || 0) < 10000) {
     renderDocumentBucketBoard();
     return;
   }
@@ -5202,6 +5217,7 @@ async function refreshDocumentBucketBoard(options = {}) {
       showLoading: false,
       suppressErrorBanner: true,
     });
+    state.documentsBrowserFetchedAt = Date.now();
     renderDocumentBucketBoard();
   } catch (error) {
     elements.documentBrowserStatus.textContent = error.message || "Document buckets konnten nicht geladen werden.";

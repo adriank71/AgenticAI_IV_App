@@ -299,6 +299,8 @@ def _run_orchestrator_unavailable(
     ]
     lower_message = request_payload["message"].lower()
     calendar_hint = ""
+    document_answer = ""
+    document_artifacts: list[dict[str, Any]] = []
     if local_tools and "calendar_snapshot" in local_tools and any(
         token in lower_message for token in ("calendar", "kalender", "termin", "event")
     ):
@@ -320,15 +322,70 @@ def _run_orchestrator_unavailable(
             logger.warning("Could not inspect local calendar while orchestrator is unavailable: %s", exc)
             tool_events.append(_tool_event("calendar_snapshot", "failed", "Local calendar snapshot failed"))
 
-    return {
-        "answer": (
+    if any(
+        token in lower_message
+        for token in ("dokument", "datei", "rechnung", "storage", "bucket", "download", "ablage")
+    ):
+        try:
+            try:
+                from ..services.storage_service import (
+                    build_chat_document_artifact,
+                    infer_document_bucket_from_text,
+                    list_documents,
+                    search_documents,
+                )
+            except ImportError:
+                from services.storage_service import (
+                    build_chat_document_artifact,
+                    infer_document_bucket_from_text,
+                    list_documents,
+                    search_documents,
+                )
+            context = request_payload.get("client_context", {}) if isinstance(request_payload.get("client_context"), dict) else {}
+            user_id = str(context.get("profile_id") or context.get("user_id") or "default").strip() or "default"
+            bucket = infer_document_bucket_from_text(request_payload["message"])
+            documents = (
+                search_documents(user_id=user_id, query=request_payload["message"], storage_bucket=bucket, limit=10)
+                if any(token in lower_message for token in ("suche", "finde", "zeige", "rechnung", "download"))
+                else list_documents(user_id=user_id, storage_bucket=bucket, limit=10)
+            )
+            document_artifacts = [build_chat_document_artifact(document) for document in documents]
+            lines = [
+                f"Ich konnte lokal {len(documents)} Dokument(e) aus der Storage-Metadata lesen.",
+            ]
+            for document in documents[:5]:
+                parts = [
+                    str(document.get("file_name") or "Dokument"),
+                    str(document.get("document_type") or "").strip(),
+                    str(document.get("institution") or "").strip(),
+                    str(document.get("storage_bucket") or "").strip(),
+                ]
+                lines.append("- " + " | ".join(part for part in parts if part))
+            if documents:
+                lines.append("Die Download-Links sind als Dokument-Artefakte angehaengt.")
+            document_answer = "\n".join(lines)
+            tool_events.append(_tool_event("list_user_documents", "completed", "Local document metadata read"))
+        except Exception as exc:
+            logger.warning("Could not inspect documents while orchestrator is unavailable: %s", exc)
+            tool_events.append(_tool_event("list_user_documents", "failed", "Local document metadata failed"))
+
+    if document_answer:
+        answer = (
+            f"{document_answer}\n\n"
+            f"Hinweis: Der OpenAI Agents SDK Lauf konnte aktuell nicht starten: {reason}."
+        )
+    else:
+        answer = (
             "Der Chat ist jetzt auf den Orchestrator ausgerichtet, aber der OpenAI Agents SDK Lauf "
             f"kann aktuell nicht starten: {reason}.{calendar_hint} "
             "Lokale Kalender- und Dokumentfunktionen bleiben ueber die Backend-APIs verfuegbar."
-        ),
+        )
+
+    return {
+        "answer": answer,
         "citations": [],
         "tool_events": tool_events,
-        "artifacts": [],
+        "artifacts": document_artifacts,
         "pending_actions": [],
         "structured_actions": [],
         "thread_id": request_payload["thread_id"],

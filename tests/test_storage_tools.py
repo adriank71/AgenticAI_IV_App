@@ -91,6 +91,26 @@ class StorageToolsTests(unittest.TestCase):
         self.assertEqual(sum_mock.call_args.kwargs["storage_bucket"], "TixiTaxi")
         self.assertEqual(artifacts[0]["document_id"], "doc-1")
 
+    def test_bundle_documents_tool_returns_zip_artifact(self):
+        artifacts = []
+        document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "file_name": "rechnung.txt",
+            "content_type": "text/plain",
+            "storage_bucket": "IV",
+        }
+
+        with patch("iv_agent.tools.storage_tools.service_get_document", return_value=document):
+            tools, _events = self._build_tools(artifacts)
+            payload = json.loads(tools["bundle_documents"](document_ids_json='["doc-1"]'))
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["bundle"]["type"], "document_bundle")
+        self.assertIn("/api/documents/bundle?", payload["bundle"]["download_url"])
+        self.assertIn("document_ids=doc-1", payload["bundle"]["download_url"])
+        self.assertEqual(artifacts[-1]["type"], "document_bundle")
+
 
 if __name__ == "__main__":
     unittest.main()

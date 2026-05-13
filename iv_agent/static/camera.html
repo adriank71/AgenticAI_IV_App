@@ -342,6 +342,16 @@
       return lines.join("\n");
     }
 
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+
     if (!sid) {
       captureButton.setAttribute("disabled", "");
       fileInput.disabled = true;
@@ -363,7 +373,7 @@
         const imageBase64 = await blobToBase64(jpeg);
         setStatus("Uploading to document buckets...");
 
-        const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/capture`, {
+        const response = await fetchWithTimeout(`/api/invoices/${encodeURIComponent(sid)}/capture`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -371,7 +381,7 @@
             mime: "image/jpeg",
             file_name: file.name || "",
           }),
-        });
+        }, 45000);
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
           throw new Error(payload.error || response.statusText || "Upload failed");
@@ -379,7 +389,10 @@
 
         setStatus(formatSuccessMessage(payload));
       } catch (error) {
-        setStatus(`Upload failed: ${error.message}`, true);
+        const message = error.name === "AbortError"
+          ? "Upload timed out. Please check the document database and try again if the photo is missing."
+          : error.message;
+        setStatus(`Upload failed: ${message}`, true);
       } finally {
         captureButton.removeAttribute("disabled");
         event.target.value = "";

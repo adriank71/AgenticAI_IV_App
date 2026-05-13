@@ -5,10 +5,12 @@ import sys
 import types
 import unittest
 import uuid
+import zipfile
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from iv_agent import app as app_module
+import iv_agent as iv_agent_package
 from iv_agent import calendar_manager
 from iv_agent import voice_calendar_agent
 from iv_agent.agents import orchestrator as agent_orchestrator
@@ -253,6 +255,167 @@ class AgentApiTests(unittest.TestCase):
         self.assertIn("Datei gespeichert", payload["answer"])
         self.assertIn("Bucket IV", payload["answer"])
         self.assertIn("automatisch gesetzt", payload["answer"])
+
+    def test_env_local_loader_allows_supabase_and_database_keys(self):
+        temp_dir = os.path.join(os.getcwd(), "output", "test_tmp", f"env_{uuid.uuid4().hex}")
+        try:
+            package_dir = os.path.join(temp_dir, "iv_agent")
+            os.makedirs(package_dir)
+            env_path = os.path.join(temp_dir, ".env.local")
+            with open(env_path, "w", encoding="utf-8") as file:
+                file.write("DATABASE_URL=postgres://example\n")
+                file.write("SUPABASE_URL=https://project.supabase.co\n")
+                file.write("SUPABASE_SERVICE_ROLE_KEY=service-key\n")
+                file.write("IV_AGENT_DOCUMENT_BUCKETS=IV,Versicherung\n")
+            with patch.object(iv_agent_package, "__file__", os.path.join(package_dir, "__init__.py")), patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "",
+                    "SUPABASE_URL": "",
+                    "SUPABASE_SERVICE_ROLE_KEY": "",
+                    "IV_AGENT_DOCUMENT_BUCKETS": "",
+                },
+                clear=False,
+            ):
+                for key in ("DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "IV_AGENT_DOCUMENT_BUCKETS"):
+                    os.environ.pop(key, None)
+                iv_agent_package._load_env_local()
+                loaded_values = {
+                    key: os.environ.get(key)
+                    for key in ("DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "IV_AGENT_DOCUMENT_BUCKETS")
+                }
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        self.assertEqual(loaded_values["DATABASE_URL"], "postgres://example")
+        self.assertEqual(loaded_values["SUPABASE_URL"], "https://project.supabase.co")
+        self.assertEqual(loaded_values["SUPABASE_SERVICE_ROLE_KEY"], "service-key")
+        self.assertEqual(loaded_values["IV_AGENT_DOCUMENT_BUCKETS"], "IV,Versicherung")
+
+    def test_documents_browser_uses_structured_storage_service(self):
+        client = app_module.app.test_client()
+
+        class FakeStorageService:
+            def build_document_browser(self, *, user_id):
+                self.user_id = user_id
+                return {
+                    "configured": True,
+                    "document_buckets": ["IV"],
+                    "total_count": 1,
+                    "buckets": [
+                        {
+                            "id": "IV",
+                            "name": "IV",
+                            "count": 1,
+                            "confirmed_count": 0,
+                            "unconfirmed_count": 1,
+                            "documents": [
+                                {
+                                    "document_id": "doc-1",
+                                    "file_name": "brief.txt",
+                                    "storage_bucket": "IV",
+                                    "bucket_confirmed": False,
+                                }
+                            ],
+                        }
+                    ],
+                }
+
+        fake_service = FakeStorageService()
+        with patch.object(app_module, "get_storage_service", return_value=fake_service):
+            response = client.get("/api/documents/browser?profile_id=profile_a")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(fake_service.user_id, "profile_a")
+        self.assertEqual(payload["buckets"][0]["documents"][0]["document_id"], "doc-1")
+        self.assertFalse(payload["buckets"][0]["documents"][0]["bucket_confirmed"])
+
+    def test_document_bundle_endpoint_zips_requested_documents(self):
+        client = app_module.app.test_client()
+
+        class FakeStorageService:
+            def __init__(self):
+                self.calls = []
+
+            def read_document_bytes(self, *, user_id, document_id):
+                self.calls.append((user_id, document_id))
+                if document_id == "missing":
+                    raise FileNotFoundError("Document not found")
+                return f"content-{document_id}".encode("utf-8"), {
+                    "document_id": document_id,
+                    "file_name": f"{document_id}.txt",
+                    "content_type": "text/plain",
+                }
+
+        fake_service = FakeStorageService()
+        with patch.object(app_module, "get_storage_service", return_value=fake_service):
+            response = client.get("/api/documents/bundle?profile_id=profile_a&document_ids=doc-1,doc-2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/zip")
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            self.assertEqual(sorted(archive.namelist()), ["doc-1.txt", "doc-2.txt"])
+            self.assertEqual(archive.read("doc-1.txt"), b"content-doc-1")
+        self.assertEqual(fake_service.calls, [("profile_a", "doc-1"), ("profile_a", "doc-2")])
+
+    def test_camera_capture_stores_document_when_vision_fails(self):
+        uploaded_document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "file_name": "photo.jpg",
+            "safe_file_name": "photo.jpg",
+            "storage_bucket": "Versicherung",
+            "storage_key": "Documents/default/2026/05/doc-1-photo.jpg",
+            "storage_url": "supabase://Versicherung/Documents/default/2026/05/doc-1-photo.jpg",
+            "content_type": "image/jpeg",
+            "content_size": 3,
+            "document_type": "image",
+            "institution": "",
+            "document_date": None,
+            "tags": [],
+            "summary": "Text konnte nicht extrahiert werden.",
+            "extracted_text": "",
+            "extraction_status": "no_text",
+            "extraction_error": "Text konnte nicht extrahiert werden.",
+            "metadata": {
+                "camera_session_id": "session123",
+                "folder_path": "Invoices/session123",
+                "invoice_extraction_error": "vision timeout",
+            },
+            "bucket_confirmed": False,
+            "bucket_reason": "Upload-Regel hat den Bucket Versicherung vorgegeben.",
+            "bucket_confidence": "high",
+            "created_at": "2026-05-01T10:00:00+00:00",
+            "updated_at": "2026-05-01T10:00:00+00:00",
+        }
+
+        class FakeStorageService:
+            def upload_document(self, **kwargs):
+                self.kwargs = kwargs
+                return uploaded_document
+
+        fake_service = FakeStorageService()
+        with app_module.app.app_context(), patch.object(
+            app_module, "get_storage_service", return_value=fake_service
+        ), patch.object(
+            app_module, "_call_openai_vision", side_effect=RuntimeError("vision timeout")
+        ), patch.object(app_module, "list_documents_for_session", return_value=[uploaded_document]):
+            response = app_module.capture_invoice(
+                "session123",
+                {
+                    "image_base64": "/9j/",
+                    "mime": "image/jpeg",
+                    "file_name": "photo.jpg",
+                },
+            )
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(payload["stored"])
+        self.assertEqual(payload["capture"]["storage_bucket"], "Versicherung")
+        self.assertFalse(payload["capture"]["bucket_confirmed"])
+        self.assertEqual(fake_service.kwargs["metadata"]["storage_bucket"], "Versicherung")
 
     def test_agent_chat_preserves_document_artifacts_from_agent_response(self):
         client = app_module.app.test_client()

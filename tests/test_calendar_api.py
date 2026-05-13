@@ -834,36 +834,54 @@ class CalendarApiTests(unittest.TestCase):
             def __init__(self, objects_by_bucket):
                 self.storage = FakeSupabaseStorage(objects_by_bucket)
 
-        objects_by_bucket = {
-            (
-                "IV",
-                "",
-            ): [
-                {
-                    "id": "obj-iv-1",
-                    "name": "iv-brief.pdf",
-                    "metadata": {"size": 1234, "mimetype": "application/pdf"},
-                    "created_at": "2026-05-01T10:00:00+00:00",
-                    "updated_at": "2026-05-01T10:00:00+00:00",
+        class FakeStorageService:
+            def build_document_browser(self, *, user_id):
+                self.user_id = user_id
+                return {
+                    "configured": True,
+                    "default_bucket": "IV",
+                    "document_buckets": ["Stiftung", "TixiTaxi", "IV", "Versicherung"],
+                    "total_count": 2,
+                    "buckets": [
+                        {"id": "Stiftung", "name": "Stiftung", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+                        {"id": "TixiTaxi", "name": "TixiTaxi", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+                        {
+                            "id": "IV",
+                            "name": "IV",
+                            "count": 1,
+                            "confirmed_count": 0,
+                            "unconfirmed_count": 1,
+                            "documents": [
+                                {
+                                    "document_id": "doc-iv-1",
+                                    "file_name": "iv-brief.pdf",
+                                    "storage_bucket": "IV",
+                                    "bucket_confirmed": False,
+                                    "signed_url": "https://signed.invalid/IV/iv-brief.pdf",
+                                }
+                            ],
+                        },
+                        {
+                            "id": "Versicherung",
+                            "name": "Versicherung",
+                            "count": 1,
+                            "confirmed_count": 0,
+                            "unconfirmed_count": 1,
+                            "documents": [
+                                {
+                                    "document_id": "doc-v-1",
+                                    "file_name": "police.jpg",
+                                    "storage_bucket": "Versicherung",
+                                    "bucket_confirmed": False,
+                                    "previewable": True,
+                                }
+                            ],
+                        },
+                    ],
                 }
-            ],
-            (
-                "Versicherung",
-                "",
-            ): [
-                {
-                    "id": "obj-v-1",
-                    "name": "police.jpg",
-                    "metadata": {"size": 4321, "mimetype": "image/jpeg"},
-                    "created_at": "2026-05-02T10:00:00+00:00",
-                    "updated_at": "2026-05-02T10:00:00+00:00",
-                }
-            ],
-        }
 
-        with patch.object(app_module, "_supabase_storage_configured", return_value=True), patch.object(
-            app_module, "_create_supabase_client", return_value=FakeSupabaseClient(objects_by_bucket)
-        ):
+        fake_service = FakeStorageService()
+        with patch.object(app_module, "get_storage_service", return_value=fake_service):
             response = client.get("/api/documents/browser?profile_id=default")
 
         self.assertEqual(response.status_code, 200)
@@ -872,9 +890,11 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(len(payload["buckets"]), 4)
         self.assertEqual(payload["total_count"], 2)
         bucket_map = {bucket["id"]: bucket for bucket in payload["buckets"]}
+        self.assertEqual(fake_service.user_id, "default")
+        self.assertEqual(bucket_map["IV"]["documents"][0]["document_id"], "doc-iv-1")
         self.assertEqual(bucket_map["IV"]["documents"][0]["file_name"], "iv-brief.pdf")
         self.assertEqual(bucket_map["IV"]["documents"][0]["storage_bucket"], "IV")
-        self.assertTrue(bucket_map["IV"]["documents"][0]["raw_storage_object"])
+        self.assertFalse(bucket_map["IV"]["documents"][0]["bucket_confirmed"])
         self.assertIn("https://signed.invalid/IV/iv-brief.pdf", bucket_map["IV"]["documents"][0]["signed_url"])
         self.assertTrue(bucket_map["Versicherung"]["documents"][0]["previewable"])
 

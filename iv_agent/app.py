@@ -7,6 +7,7 @@ import binascii
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -1444,6 +1445,16 @@ OPENAI_VISION_MODEL = (
     or os.environ.get("OPENAI_CALENDAR_AGENT_MODEL")
     or "gpt-5.4-mini"
 ).strip() or "gpt-5.4-mini"
+
+
+def _openai_vision_timeout_seconds() -> float:
+    try:
+        return max(5.0, float(os.environ.get("OPENAI_VISION_TIMEOUT_SECONDS", "15") or "15"))
+    except ValueError:
+        return 15.0
+
+
+OPENAI_VISION_TIMEOUT_SECONDS = _openai_vision_timeout_seconds()
 INVOICE_MIME_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -1906,7 +1917,7 @@ def _document_browser_user_id() -> str:
 @app.get("/api/documents/browser")
 def api_documents_browser():
     try:
-        payload = _build_supabase_document_browser()
+        payload = get_storage_service().build_document_browser(user_id=_document_browser_user_id())
         return jsonify(make_json_safe(payload))
     except RuntimeError as exc:
         logger.error("Document browser configuration error: %s", exc)
@@ -1914,6 +1925,67 @@ def api_documents_browser():
     except Exception as exc:
         logger.exception("Document browser failed")
         return json_error(f"Failed to load document browser: {exc}", 502)
+
+
+def _bundle_document_ids() -> list[str]:
+    raw_values: list[str] = []
+    raw_values.extend(request.args.getlist("document_id"))
+    raw_values.extend(request.args.getlist("document_ids"))
+    document_ids: list[str] = []
+    for raw_value in raw_values:
+        for part in str(raw_value or "").split(","):
+            document_id = part.strip()
+            if document_id and document_id not in document_ids:
+                document_ids.append(document_id)
+    return document_ids
+
+
+def _safe_zip_member_name(document: dict[str, Any], index: int) -> str:
+    raw_name = os.path.basename(str(document.get("file_name") or document.get("safe_file_name") or "").strip())
+    safe_name = "".join(character if character.isalnum() or character in {" ", ".", "_", "-"} else "_" for character in raw_name).strip(" ._-")
+    if not safe_name:
+        safe_name = f"document-{index}"
+    return safe_name[:160]
+
+
+@app.get("/api/documents/bundle")
+def api_documents_bundle():
+    user_id = normalize_user_id(request.args.get("profile_id") or request.args.get("user_id") or "default")
+    document_ids = _bundle_document_ids()
+    if not document_ids:
+        return json_error("document_ids is required", 400)
+    if len(document_ids) > 20:
+        return json_error("A bundle can include at most 20 documents", 400)
+
+    service = get_storage_service()
+    zip_buffer = io.BytesIO()
+    used_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index, document_id in enumerate(document_ids, start=1):
+                content, document = service.read_document_bytes(user_id=user_id, document_id=document_id)
+                member_name = _safe_zip_member_name(document, index)
+                if member_name in used_names:
+                    root, extension = os.path.splitext(member_name)
+                    member_name = f"{root}-{index}{extension}"
+                used_names.add(member_name)
+                archive.writestr(member_name, content)
+    except FileNotFoundError:
+        return json_error("One or more documents were not found", 404)
+    except RuntimeError as exc:
+        logger.error("Document bundle configuration error: %s", exc)
+        return json_error(str(exc), 503)
+    except Exception as exc:
+        logger.exception("Document bundle failed")
+        return json_error(f"Failed to bundle documents: {exc}", 502)
+
+    zip_buffer.seek(0)
+    return send_file(
+        zip_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="documents_bundle.zip",
+    )
 
 
 @app.get("/api/documents/<document_id>/file")
@@ -2118,6 +2190,8 @@ def _format_invoice(fields: dict) -> str:
 
 def _call_openai_vision(image_b64: str, mime: str) -> dict:
     openai_client = _get_openai_client()
+    if hasattr(openai_client, "with_options"):
+        openai_client = openai_client.with_options(timeout=OPENAI_VISION_TIMEOUT_SECONDS)
     response = openai_client.responses.create(
         model=OPENAI_VISION_MODEL,
         input=[

@@ -46,7 +46,8 @@ def build_storage_agent(
         f"Current user_id/profile_id: {context_user_id}. Current datetime: {now_value}. "
         f"Documents uploaded in this turn: {uploaded_summary or 'none'}. "
         "Use list_documents, search_documents, count_documents, get_document_details, summarize_document, classify_document, "
-        "group_documents, sum_invoice_amounts, list_document_folders, and match_documents for reads. "
+        "group_documents, sum_invoice_amounts, list_document_folders, match_documents, and bundle_documents for reads/download bundles. "
+        "When documents were uploaded in this turn, always base your answer on the stored document metadata/attachments, name the suggested bucket, and say whether bucket_confirmed is still false. "
         "For any document retrieval request such as 'gib mir alle Dokumente', 'zeige Rechnungen', or 'finde Dateien', read storage first and return the documents from the tool result; never answer only from chat history. "
         "For invoice total or sum questions, always apply the user's document filters first and call sum_invoice_amounts; do not add amounts from memory or from a plain text summary. "
         "If the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, pass that value as storage_bucket to document read tools. "
@@ -54,7 +55,8 @@ def build_storage_agent(
         "For folder creation, moving documents, deleting documents, bucket reassignment, or user-visible metadata updates, draft a pending action. "
         "Never claim a delete, move, bucket change, folder creation, or metadata update is complete before user confirmation. "
         "If an image-only document has no extracted text, state that text could not be extracted instead of inventing details. "
-        "When listing documents, include filename, document type if known, institution if known, and document_id only when needed for a follow-up action."
+        "When listing documents, include filename, document type if known, institution if known, and document_id only when needed for a follow-up action. "
+        "For requests to download several files together, call bundle_documents and return its ZIP artifact/download URL."
     )
     return Agent(
         name="StorageAgent",
