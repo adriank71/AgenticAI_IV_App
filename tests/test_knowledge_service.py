@@ -41,11 +41,16 @@ DOC_B = {
 class FakeHttpResponse:
     status = 200
 
-    def __init__(self, payload):
+    def __init__(self, payload, *, headers=None, lines=None):
         self.payload = payload
+        self.headers = headers or {}
+        self.lines = lines or []
 
     def read(self):
         return json.dumps(self.payload).encode("utf-8")
+
+    def __iter__(self):
+        return iter(self.lines)
 
     def __enter__(self):
         return self
@@ -214,11 +219,56 @@ class KnowledgeServiceTests(unittest.TestCase):
 
         self.assertTrue(result["available"])
         self.assertEqual(result["answer"], "Antwort vom IV Assistant")
-        self.assertEqual(captured["url"], "https://watsonx.example/api/v1/orchestrate/agent-123/chat/completions")
+        self.assertEqual(captured["url"], "https://watsonx.example/v1/orchestrate/agent-123/chat/completions")
         self.assertEqual(captured["timeout"], 7)
         self.assertIn("Authorization", captured["headers"])
-        self.assertEqual(captured["body"]["stream"], False)
+        self.assertEqual(captured["body"]["stream"], True)
         self.assertNotIn(api_token, json.dumps(result))
+
+    def test_watsonx_client_accepts_colleague_env_aliases_and_streams_response(self):
+        captured = {}
+        stream_lines = [
+            b'data: {"thread_id":"watson-thread-1"}\n',
+            b'data: {"object":"thread.message.completed","data":{"message":{"content":[{"text":"Streaming Antwort"}]}}}\n',
+            b"data: [DONE]\n",
+        ]
+
+        def fake_urlopen(request, timeout):
+            if request.full_url == knowledge_service.MCSP_TOKEN_URL:
+                return FakeHttpResponse({"token": "bearer-token"})
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeHttpResponse(
+                {},
+                headers={"Content-Type": "text/event-stream"},
+                lines=stream_lines,
+            )
+
+        env = {
+            "WATSONX_ORCHESTRATE_BASE_URL": "",
+            "WATSONX_ORCHESTRATE_API_KEY": "",
+            "WATSONX_ORCHESTRATE_IV_ASSISTANT_AGENT_ID": "",
+            "INSTANCE_URL": "https://api.dl.watson-orchestrate.ibm.com/instances/test-instance",
+            "ORCHESTRATE_API_KEY": "placeholder-token",
+            "RAG_AGENT_ID": "c6e9fba5-bbb4-46b1-a4c5-2c2caf806615",
+        }
+        with patch.dict(os.environ, env, clear=False), patch.object(knowledge_service.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = knowledge_service.WatsonXOrchestrateClient().chat(
+                question="Was sagt das RAG?",
+                thread_id="thread-1",
+                user_id="default",
+            )
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["answer"], "Streaming Antwort")
+        self.assertEqual(result["thread_id"], "watson-thread-1")
+        self.assertEqual(
+            captured["url"],
+            "https://api.dl.watson-orchestrate.ibm.com/instances/test-instance/v1/orchestrate/c6e9fba5-bbb4-46b1-a4c5-2c2caf806615/chat/completions",
+        )
+        self.assertEqual(captured["body"]["messages"], [{"role": "user", "content": "Was sagt das RAG?"}])
+        self.assertEqual(captured["body"]["stream"], True)
 
     def test_watsonx_client_handles_missing_env_and_http_failure(self):
         missing = knowledge_service.WatsonXOrchestrateClient(base_url="", api_key="", agent_id="").chat(question="x")

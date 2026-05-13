@@ -177,6 +177,14 @@ def _extract_todos(text: str) -> list[str]:
 MCSP_TOKEN_URL = "https://iam.platform.saas.ibm.com/siusermgr/api/1.0/apikeys/token"
 
 
+def _first_env_value(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 class WatsonXOrchestrateClient:
     def __init__(
         self,
@@ -186,12 +194,20 @@ class WatsonXOrchestrateClient:
         agent_id: str | None = None,
         timeout_seconds: int = DEFAULT_WATSONX_TIMEOUT_SECONDS,
     ):
-        self.base_url = (base_url if base_url is not None else os.environ.get("WATSONX_ORCHESTRATE_BASE_URL", "")).strip().rstrip("/")
-        self.api_key = (api_key if api_key is not None else os.environ.get("WATSONX_ORCHESTRATE_API_KEY", "")).strip()
+        self.base_url = (
+            base_url
+            if base_url is not None
+            else _first_env_value("WATSONX_ORCHESTRATE_BASE_URL", "INSTANCE_URL")
+        ).strip().rstrip("/")
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else _first_env_value("WATSONX_ORCHESTRATE_API_KEY", "ORCHESTRATE_API_KEY")
+        ).strip()
         self.agent_id = (
             agent_id
             if agent_id is not None
-            else os.environ.get("WATSONX_ORCHESTRATE_IV_ASSISTANT_AGENT_ID", "")
+            else _first_env_value("WATSONX_ORCHESTRATE_IV_ASSISTANT_AGENT_ID", "RAG_AGENT_ID")
         ).strip()
         self.timeout_seconds = max(1, int(timeout_seconds or DEFAULT_WATSONX_TIMEOUT_SECONDS))
 
@@ -218,6 +234,12 @@ class WatsonXOrchestrateClient:
             raise ValueError(f"MCSP token exchange returned no token: {list(parsed.keys())}")
         return str(token)
 
+    def _chat_endpoint(self) -> str:
+        base_url = self.base_url.rstrip("/")
+        if base_url.endswith("/v1") or base_url.endswith("/api/v1"):
+            return f"{base_url}/orchestrate/{self.agent_id}/chat/completions"
+        return f"{base_url}/v1/orchestrate/{self.agent_id}/chat/completions"
+
     def chat(
         self,
         *,
@@ -243,40 +265,31 @@ class WatsonXOrchestrateClient:
         except Exception as exc:
             return {"available": False, "reason": f"WatsonX MCSP Token-Exchange fehlgeschlagen: {type(exc).__name__}: {exc}", "answer": "", "citations": []}
 
-        endpoint = f"{self.base_url}/api/v1/orchestrate/{self.agent_id}/chat/completions"
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Du bist ein IV Assistant. Antworte knapp auf Deutsch. "
-                    "Nutze bereitgestellten Kontext nur als Hintergrund und erfinde keine Akteninhalte."
-                ),
-            },
-            {
-                "role": "user",
-                "content": _bounded_text(
-                    f"Frage: {question}\n\nKontext aus der IV-Helper App:\n{context}",
-                    MAX_CONTEXT_CHARS,
-                ),
-            },
-        ]
+        endpoint = self._chat_endpoint()
+        user_content = str(question or "").strip()
+        if context:
+            user_content = _bounded_text(
+                f"Frage: {question}\n\nKontext aus der IV-Helper App:\n{context}",
+                MAX_CONTEXT_CHARS,
+            )
         body = json.dumps(
             {
-                "messages": messages,
-                "stream": False,
+                "messages": [{"role": "user", "content": user_content}],
+                "stream": True,
                 "metadata": {"source": "iv-helper", "user_id": normalize_user_id(user_id or "default")},
             }
         ).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
         if thread_id:
             headers["X-IBM-THREAD-ID"] = str(thread_id)[:120]
         request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                response_body = response.read()
+                response_body = self._read_response_body(response)
                 status = int(getattr(response, "status", 200) or 200)
         except (socket.timeout, TimeoutError):
             return {"available": False, "reason": "WatsonX Orchestrate hat nicht rechtzeitig geantwortet.", "answer": "", "citations": []}
@@ -299,7 +312,51 @@ class WatsonXOrchestrateClient:
             "reason": "",
             "answer": answer,
             "citations": self._extract_citations(parsed),
+            "thread_id": self._extract_thread_id(parsed),
         }
+
+    def _read_response_body(self, response: Any) -> bytes:
+        content_type = ""
+        try:
+            content_type = str(response.headers.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+        if "text/event-stream" not in content_type.lower():
+            return response.read()
+
+        events = []
+        full_response = ""
+        thread_id = ""
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data: "):
+                continue
+            data_line = line[6:].strip()
+            if data_line == "[DONE]":
+                break
+            try:
+                event = json.loads(data_line)
+            except json.JSONDecodeError:
+                continue
+            events.append(event)
+            thread_id = thread_id or str(event.get("thread_id") or event.get("threadId") or "")
+            event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if event.get("object") == "thread.message.completed":
+                message_text = self._extract_text(event_data.get("message", {}))
+                if message_text:
+                    full_response = message_text
+            elif not full_response:
+                delta_text = self._extract_text(event.get("delta") or event_data.get("delta"))
+                if delta_text:
+                    full_response += delta_text
+
+        return json.dumps(
+            {
+                "answer": full_response.strip(),
+                "thread_id": thread_id,
+                "events": events[-20:],
+            }
+        ).encode("utf-8")
 
     def _extract_text(self, payload: Any) -> str:
         if payload is None:
@@ -332,6 +389,22 @@ class WatsonXOrchestrateClient:
                     text = self._extract_text(payload.get(key))
                     if text:
                         return text
+        return ""
+
+    def _extract_thread_id(self, payload: Any) -> str:
+        if isinstance(payload, dict):
+            thread_id = payload.get("thread_id") or payload.get("threadId")
+            if thread_id:
+                return str(thread_id)
+            for value in payload.values():
+                nested = self._extract_thread_id(value)
+                if nested:
+                    return nested
+        if isinstance(payload, list):
+            for item in payload:
+                nested = self._extract_thread_id(item)
+                if nested:
+                    return nested
         return ""
 
     def _extract_citations(self, payload: Any) -> list[dict[str, Any]]:
