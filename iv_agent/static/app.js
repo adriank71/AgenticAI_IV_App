@@ -5345,7 +5345,7 @@ async function saveDocumentBucketChange(documentId, targetBucket, reason = "") {
   }
 }
 
-function renderDocumentBucketBoard() {
+function renderDocumentBucketBoardLegacyUnused() {
   const data = state.documentsBrowser || {};
   const buckets = Array.isArray(data.buckets) ? data.buckets : [];
   const bucketMap = new Map(buckets.map((bucket) => [bucket.id, bucket]));
@@ -5423,7 +5423,7 @@ function renderDocumentBucketBoard() {
   });
 }
 
-function renderDocumentBucketColumn(bucket) {
+function renderDocumentBucketColumnLegacyUnused(bucket) {
   const documents = Array.isArray(bucket.documents) ? bucket.documents : [];
   const cards = documents.length
     ? documents.map((document) => renderDocumentBucketCard(document)).join("")
@@ -5442,7 +5442,7 @@ function renderDocumentBucketColumn(bucket) {
   `;
 }
 
-function renderDocumentBucketCard(document) {
+function renderDocumentBucketCardLegacyUnused(document) {
   const fileUrl = document.signed_url || "#";
   const summary = document.summary || "No summary available.";
   const preview = document.previewable && fileUrl !== "#"
@@ -5582,24 +5582,28 @@ function renderDocumentBucketColumn(bucket) {
 }
 
 function renderDocumentBucketCard(document) {
-  const fileUrl = document.signed_url || "#";
-  const iconName = String(document.content_type || "").startsWith("application/pdf") ? "picture_as_pdf" : "draft";
+  const fileUrl = document.signed_url || document.download_url || "#";
+  const contentType = String(document.content_type || "");
+  const iconName = contentType.startsWith("image/") ? "image" : contentType.startsWith("application/pdf") ? "picture_as_pdf" : "draft";
   const recentClass = isRecentDocument(document) ? " is-recent" : "";
   const createdLabel = formatInvoiceCaptureTime(document.created_at);
   const title = document.file_name || "Dokument";
+  const canReassignBucket = !document.raw_storage_object && Boolean(document.document_id);
   const hintParts = [];
   if (document.document_type) {
     hintParts.push(String(document.document_type));
   }
   if (document.institution) {
     hintParts.push(String(document.institution));
+  } else if (document.storage_key) {
+    hintParts.push(String(document.storage_key));
   }
   const hintLabel = hintParts.join(" · ") || "Klicken zum Oeffnen";
-  const confirmControl = document.bucket_confirmed
+  const confirmControl = document.bucket_confirmed || !canReassignBucket
     ? `<span class="document-card-state is-confirmed" aria-label="Bucket bestaetigt" title="Bucket bestaetigt"><span class="material-symbols-outlined">check</span></span>`
     : `<button type="button" class="document-card-confirm" data-document-bucket-confirm="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" aria-label="Bucket bestaetigen" title="Bucket bestaetigen"><span class="material-symbols-outlined">check</span></button>`;
   return `
-    <article class="document-bucket-card${recentClass}" draggable="true" data-document-card data-document-id="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" title="${escapeHtml(document.bucket_reason || hintLabel)}">
+    <article class="document-bucket-card${recentClass}" draggable="${canReassignBucket ? "true" : "false"}" data-document-card data-document-id="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" title="${escapeHtml(document.bucket_reason || hintLabel)}">
       <a class="document-card-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">
         <span class="document-card-icon material-symbols-outlined">${iconName}</span>
         <span class="document-card-copy">

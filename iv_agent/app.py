@@ -33,7 +33,6 @@ try:
     )
     from .services.storage_service import (
         build_chat_document_artifact,
-        build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
         document_bucket_names,
@@ -97,7 +96,6 @@ except ImportError:
     )
     from services.storage_service import (
         build_chat_document_artifact,
-        build_document_browser,
         create_folder as create_document_folder,
         delete_document as delete_service_document,
         document_bucket_names,
@@ -1663,6 +1661,19 @@ def _storage_item_is_folder(item: dict) -> bool:
     return not item.get("id") and not item.get("metadata") and not item.get("created_at")
 
 
+DOCUMENT_STORAGE_BUCKETS = ("Stiftung", "TixiTaxi", "IV", "Versicherung")
+
+
+def _document_storage_bucket_names() -> list[str]:
+    buckets = []
+    configured = document_bucket_names()
+    for bucket_name in [*DOCUMENT_STORAGE_BUCKETS, *configured]:
+        candidate = str(bucket_name or "").strip()
+        if candidate and candidate not in buckets:
+            buckets.append(candidate)
+    return buckets
+
+
 def _format_storage_object(bucket_name: str, item: dict, parent_path: str) -> dict:
     name = str(item.get("name") or "").strip()
     object_path = "/".join(part for part in (parent_path.strip("/"), name) if part)
@@ -1679,6 +1690,28 @@ def _format_storage_object(bucket_name: str, item: dict, parent_path: str) -> di
         "updated_at": item.get("updated_at") or item.get("last_accessed_at"),
         "storage_url": None if is_folder else f"supabase://{bucket_name}/{object_path}",
     }
+
+
+def _storage_signed_url(client, bucket_name: str, object_path: str) -> str:
+    if not object_path:
+        return ""
+    try:
+        expires_in = max(30, int(os.environ.get("IV_AGENT_DOCUMENT_SIGNED_URL_TTL_SECONDS", "600") or "600"))
+    except ValueError:
+        expires_in = 600
+    try:
+        response = client.storage.from_(bucket_name).create_signed_url(object_path, expires_in)
+    except Exception:
+        return ""
+    if isinstance(response, dict):
+        data = response.get("data") if isinstance(response.get("data"), dict) else response
+        for key in ("signedURL", "signedUrl", "signed_url"):
+            if data.get(key):
+                return str(data[key])
+    for attr in ("signed_url", "signedURL", "signedUrl"):
+        if hasattr(response, attr):
+            return str(getattr(response, attr))
+    return ""
 
 
 def _list_supabase_bucket_objects(client, bucket_name: str, *, path: str = "", depth: int = 0, max_depth: int = 4) -> list[dict]:
@@ -1712,6 +1745,111 @@ def _list_supabase_bucket_objects(client, bucket_name: str, *, path: str = "", d
                 )
             )
     return objects
+
+
+def _storage_object_document_type(content_type: str, object_path: str) -> str:
+    normalized = str(content_type or "").lower()
+    if normalized.startswith("image/"):
+        return "image"
+    if normalized == "application/pdf" or object_path.lower().endswith(".pdf"):
+        return "pdf"
+    return "document"
+
+
+def _storage_object_to_document(client, bucket_name: str, item: dict) -> dict:
+    object_path = str(item.get("path") or "").strip()
+    file_name = os.path.basename(object_path) or str(item.get("name") or "Dokument")
+    content_type = str(item.get("content_type") or "").strip() or "application/octet-stream"
+    updated_at = item.get("updated_at") or item.get("created_at") or ""
+    signed_url = _storage_signed_url(client, bucket_name, object_path)
+    return {
+        "document_id": "",
+        "raw_storage_object": True,
+        "user_id": _document_browser_user_id(),
+        "file_name": file_name,
+        "title": file_name,
+        "safe_file_name": file_name,
+        "storage_bucket": bucket_name,
+        "storage_key": object_path,
+        "storage_url": item.get("storage_url") or f"supabase://{bucket_name}/{object_path}",
+        "signed_url": signed_url,
+        "download_url": signed_url,
+        "content_type": content_type,
+        "content_size": int(item.get("size") or 0),
+        "document_type": _storage_object_document_type(content_type, object_path),
+        "institution": "",
+        "document_date": None,
+        "tags": [],
+        "summary": object_path,
+        "extracted_text": "",
+        "extraction_status": "storage_object",
+        "extraction_error": "",
+        "metadata": {"source": "supabase_storage_browser"},
+        "bucket_confirmed": True,
+        "bucket_reason": "Direkt aus Supabase Storage geladen.",
+        "bucket_confidence": "high",
+        "previewable": content_type.startswith("image/"),
+        "created_at": item.get("created_at") or updated_at,
+        "updated_at": updated_at,
+    }
+
+
+def _build_supabase_document_browser() -> dict:
+    if not _supabase_storage_configured():
+        bucket_names = _document_storage_bucket_names()
+        return {
+            "configured": False,
+            "default_bucket": document_bucket_name(),
+            "document_buckets": bucket_names,
+            "total_count": 0,
+            "message": "Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+            "buckets": [
+                {
+                    "id": bucket_name,
+                    "name": bucket_name,
+                    "count": 0,
+                    "confirmed_count": 0,
+                    "unconfirmed_count": 0,
+                    "documents": [],
+                }
+                for bucket_name in bucket_names
+            ],
+        }
+
+    client = _create_supabase_client()
+    buckets = []
+    total_count = 0
+    for bucket_name in _document_storage_bucket_names():
+        bucket_error = ""
+        try:
+            objects = _list_supabase_bucket_objects(client, bucket_name)
+        except Exception as exc:
+            objects = []
+            bucket_error = str(exc)
+        documents = [
+            _storage_object_to_document(client, bucket_name, item)
+            for item in objects
+            if item.get("type") == "file"
+        ]
+        total_count += len(documents)
+        buckets.append(
+            {
+                "id": bucket_name,
+                "name": bucket_name,
+                "count": len(documents),
+                "confirmed_count": len(documents),
+                "unconfirmed_count": 0,
+                "documents": documents,
+                "error": bucket_error,
+            }
+        )
+    return {
+        "configured": True,
+        "default_bucket": document_bucket_name(),
+        "document_buckets": _document_storage_bucket_names(),
+        "total_count": total_count,
+        "buckets": buckets,
+    }
 
 
 @app.get("/api/storage/browser")
@@ -1768,7 +1906,7 @@ def _document_browser_user_id() -> str:
 @app.get("/api/documents/browser")
 def api_documents_browser():
     try:
-        payload = build_document_browser(user_id=_document_browser_user_id())
+        payload = _build_supabase_document_browser()
         return jsonify(make_json_safe(payload))
     except RuntimeError as exc:
         logger.error("Document browser configuration error: %s", exc)

@@ -811,27 +811,72 @@ class CalendarApiTests(unittest.TestCase):
 
     def test_documents_browser_returns_backend_bucket_configuration(self):
         client = app_module.app.test_client()
-        browser_payload = {
-            "configured": True,
-            "default_bucket": "IV",
-            "document_buckets": ["Stiftung", "TixiTaxi", "IV", "Versicherung"],
-            "total_count": 0,
-            "buckets": [
-                {"id": "Stiftung", "name": "Stiftung", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
-                {"id": "TixiTaxi", "name": "TixiTaxi", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
-                {"id": "IV", "name": "IV", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
-                {"id": "Versicherung", "name": "Versicherung", "count": 0, "confirmed_count": 0, "unconfirmed_count": 0, "documents": []},
+
+        class FakeSupabaseBucket:
+            def __init__(self, bucket_name, objects_by_bucket):
+                self.bucket_name = bucket_name
+                self.objects_by_bucket = objects_by_bucket
+
+            def list(self, path="", options=None):
+                return self.objects_by_bucket.get((self.bucket_name, path or ""), [])
+
+            def create_signed_url(self, path, expires_in):
+                return {"signedURL": f"https://signed.invalid/{self.bucket_name}/{path}?ttl={expires_in}"}
+
+        class FakeSupabaseStorage:
+            def __init__(self, objects_by_bucket):
+                self.objects_by_bucket = objects_by_bucket
+
+            def from_(self, bucket_name):
+                return FakeSupabaseBucket(bucket_name, self.objects_by_bucket)
+
+        class FakeSupabaseClient:
+            def __init__(self, objects_by_bucket):
+                self.storage = FakeSupabaseStorage(objects_by_bucket)
+
+        objects_by_bucket = {
+            (
+                "IV",
+                "",
+            ): [
+                {
+                    "id": "obj-iv-1",
+                    "name": "iv-brief.pdf",
+                    "metadata": {"size": 1234, "mimetype": "application/pdf"},
+                    "created_at": "2026-05-01T10:00:00+00:00",
+                    "updated_at": "2026-05-01T10:00:00+00:00",
+                }
+            ],
+            (
+                "Versicherung",
+                "",
+            ): [
+                {
+                    "id": "obj-v-1",
+                    "name": "police.jpg",
+                    "metadata": {"size": 4321, "mimetype": "image/jpeg"},
+                    "created_at": "2026-05-02T10:00:00+00:00",
+                    "updated_at": "2026-05-02T10:00:00+00:00",
+                }
             ],
         }
 
-        with patch.object(app_module, "build_document_browser", return_value=browser_payload) as browser_mock:
+        with patch.object(app_module, "_supabase_storage_configured", return_value=True), patch.object(
+            app_module, "_create_supabase_client", return_value=FakeSupabaseClient(objects_by_bucket)
+        ):
             response = client.get("/api/documents/browser?profile_id=default")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["document_buckets"], ["Stiftung", "TixiTaxi", "IV", "Versicherung"])
         self.assertEqual(len(payload["buckets"]), 4)
-        browser_mock.assert_called_once_with(user_id="default")
+        self.assertEqual(payload["total_count"], 2)
+        bucket_map = {bucket["id"]: bucket for bucket in payload["buckets"]}
+        self.assertEqual(bucket_map["IV"]["documents"][0]["file_name"], "iv-brief.pdf")
+        self.assertEqual(bucket_map["IV"]["documents"][0]["storage_bucket"], "IV")
+        self.assertTrue(bucket_map["IV"]["documents"][0]["raw_storage_object"])
+        self.assertIn("https://signed.invalid/IV/iv-brief.pdf", bucket_map["IV"]["documents"][0]["signed_url"])
+        self.assertTrue(bucket_map["Versicherung"]["documents"][0]["previewable"])
 
     def test_scan_url_uses_camera_route_and_scan_redirects(self):
         client = app_module.app.test_client()
