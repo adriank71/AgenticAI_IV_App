@@ -2645,9 +2645,9 @@ function buildPdfDocument(body, title, layout) {
 body{font-family:"Helvetica Neue",Arial,sans-serif;font-size:9pt;color:#1a1e2a;background:#fff;}
 .wb,.mb{page-break-after:always;margin-bottom:4mm;}
 .wb:last-child,.mb:last-child{page-break-after:auto;}
-.wh,.mh{font-size:12pt;font-weight:700;color:#8b0d0a;padding-bottom:3mm;border-bottom:2px solid #8b0d0a;margin-bottom:3mm;}
+.wh,.mh{font-size:12pt;font-weight:700;color:#2a3d37;padding-bottom:3mm;border-bottom:2px solid #2a3d37;margin-bottom:3mm;}
 table{width:100%;border-collapse:collapse;}
-thead tr{background:#8b0d0a;}
+thead tr{background:#2a3d37;}
 th{color:#fff;padding:5px 7px;font-size:7.5pt;font-weight:600;text-align:left;vertical-align:bottom;}
 .dname{display:block;font-size:7pt;opacity:.85;}
 .ddate{display:block;font-size:10pt;font-weight:700;margin-top:1px;}
