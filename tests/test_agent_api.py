@@ -14,6 +14,7 @@ from iv_agent import app as app_module
 import iv_agent as iv_agent_package
 from iv_agent import calendar_manager
 from iv_agent import voice_calendar_agent
+from iv_agent.agents import knowledge_agent as knowledge_agent_module
 from iv_agent.agents import orchestrator as agent_orchestrator
 from iv_agent.tools.calendar_tools import build_calendar_tools
 from iv_agent.tools.storage_tools import build_storage_tools
@@ -273,6 +274,7 @@ class AgentApiTests(unittest.TestCase):
                     lambda func: func,
                     context_user_id="default",
                     thread_id="thread-test",
+                    recent_history=[],
                     tool_events=tool_events,
                     make_json_safe=agent_orchestrator.make_json_safe,
                     tool_event_factory=agent_orchestrator._tool_event,
@@ -283,6 +285,87 @@ class AgentApiTests(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertIn("WatsonX", payload["reason"])
         self.assertTrue(any(event["name"] == "ask_watsonx_iv_assistant" and event["status"] == "completed" for event in tool_events))
+
+    def test_knowledge_agent_instructions_require_clarification_first(self):
+        created = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+        knowledge_agent_module.build_knowledge_agent(
+            FakeAgent,
+            lambda func: func,
+            model="gpt-test",
+            context_user_id="default",
+            now_value="2026-05-14T08:00:00+02:00",
+            thread_id="thread-test",
+            recent_history=[{"role": "user", "text": "Ich habe eine IV-Rente."}],
+            tool_events=[],
+            make_json_safe=agent_orchestrator.make_json_safe,
+            tool_event_factory=agent_orchestrator._tool_event,
+        )
+
+        self.assertIn("analyze_iv_knowledge_request", created["instructions"])
+        self.assertIn("needs_clarification=true", created["instructions"])
+        self.assertIn("sections A-G", created["instructions"])
+        self.assertIn("analyze_iv_knowledge_request", [tool.__name__ for tool in created["tools"]])
+
+    def test_orchestrator_passes_recent_history_to_knowledge_agent(self):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.name = kwargs.get("name")
+                self.handoffs = kwargs.get("handoffs", [])
+
+        class FakeRunner:
+            @staticmethod
+            def run_sync(agent, input_text, max_turns=0):
+                self = types.SimpleNamespace()
+                self.final_output = "SDK ok"
+                return self
+
+        class FakeTrace:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        def fake_build_knowledge_agent(*args, **kwargs):
+            captured["recent_history"] = kwargs.get("recent_history")
+            return FakeAgent(name="KnowledgeAgent", model=kwargs.get("model"), tools=[], instructions="")
+
+        fake_agents_module = types.ModuleType("agents")
+        fake_agents_module.Agent = FakeAgent
+        fake_agents_module.Runner = FakeRunner
+        fake_agents_module.function_tool = lambda func: func
+        fake_agents_module.set_tracing_disabled = lambda disabled: None
+        fake_agents_module.trace = lambda **kwargs: FakeTrace()
+
+        history = [{"role": "user", "text": f"Nachricht {index}"} for index in range(10)]
+        with isolated_pending_action_storage(), patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key"},
+            clear=False,
+        ), patch.dict(sys.modules, {"agents": fake_agents_module}), patch.object(
+            agent_orchestrator,
+            "_agents_sdk_available",
+            return_value=True,
+        ), patch("iv_agent.agents.knowledge_agent.build_knowledge_agent", side_effect=fake_build_knowledge_agent):
+            agent_orchestrator.run_agent_chat(
+                {
+                    "message": "Brauche IV Wissen",
+                    "thread_id": "thread-test",
+                    "attachments": [],
+                    "history": history,
+                    "client_context": {"profile_id": "default", "timezone": "Europe/Berlin"},
+                }
+            )
+
+        self.assertEqual(captured["recent_history"], history[-8:])
 
     def test_automations_agent_tool_drafts_pending_generate_report_action(self):
         tool_events = []

@@ -3,6 +3,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from iv_agent.services import knowledge_clarification
 from iv_agent.services import knowledge_service
 from iv_agent.tools.knowledge_tools import build_knowledge_tools
 
@@ -65,6 +66,7 @@ class KnowledgeServiceTests(unittest.TestCase):
             lambda func: func,
             context_user_id="default",
             thread_id="thread-1",
+            recent_history=[],
             tool_events=[],
             make_json_safe=lambda value: value,
             tool_event_factory=lambda name, status, message, **kwargs: {
@@ -77,6 +79,7 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertEqual(
             [tool.__name__ for tool in tools],
             [
+                "analyze_iv_knowledge_request",
                 "search_internal_knowledge",
                 "retrieve_relevant_documents",
                 "ask_watsonx_iv_assistant",
@@ -93,6 +96,7 @@ class KnowledgeServiceTests(unittest.TestCase):
             lambda func: func,
             context_user_id="profile_a",
             thread_id="thread-1",
+            recent_history=[],
             tool_events=tool_events,
             make_json_safe=lambda value: value,
             tool_event_factory=lambda name, status, message, **kwargs: {
@@ -118,6 +122,33 @@ class KnowledgeServiceTests(unittest.TestCase):
             user_id="profile_a",
         )
         self.assertEqual(tool_events[0]["name"], "ask_watsonx_iv_assistant")
+
+    def test_analyze_tool_reuses_recent_history_for_known_slots(self):
+        tools = build_knowledge_tools(
+            lambda func: func,
+            context_user_id="default",
+            thread_id="thread-1",
+            recent_history=[
+                {"role": "user", "text": "Ich habe eine IV-Rente und bekomme EL."},
+                {"role": "assistant", "text": "Verstanden."},
+            ],
+            tool_events=[],
+            make_json_safe=lambda value: value,
+            tool_event_factory=lambda name, status, message, **kwargs: {
+                "name": name,
+                "status": status,
+                "message": message,
+            },
+        )
+        analyze_tool = {tool.__name__: tool for tool in tools}["analyze_iv_knowledge_request"]
+
+        payload = json.loads(analyze_tool("Was kann ich sonst noch beantragen?"))
+
+        self.assertEqual(payload["topic"], "broad_entitlement")
+        self.assertEqual(payload["known_slots"]["iv_status"], "bezieht IV-Rente")
+        self.assertEqual(payload["known_slots"]["current_income_support"], "EL")
+        self.assertTrue(payload["needs_clarification"])
+        self.assertLessEqual(len(payload["clarifying_questions"]), 4)
 
     def test_internal_search_scopes_user_and_returns_bounded_document_fields(self):
         service = knowledge_service.KnowledgeService()
@@ -289,6 +320,72 @@ class KnowledgeServiceTests(unittest.TestCase):
 
         self.assertFalse(failed["available"])
         self.assertIn("HTTP-Fehler 500", failed["reason"])
+
+    def test_synthesize_answer_marks_weak_sources_and_no_definitive_guidance(self):
+        service = knowledge_service.KnowledgeService()
+
+        payload = service.synthesize_answer(
+            question="Uebernimmt die IV das sicher?",
+            internal_findings={},
+            watsonx_result={"available": False, "reason": "WatsonX nicht erreichbar.", "answer": "", "citations": []},
+        )
+
+        self.assertEqual(payload["source_confidence"], "weak")
+        self.assertTrue(any("Keine belastbaren Quellen" in item for item in payload["uncertainty_flags"]))
+        self.assertIn("keine definitive Zusage", payload["answer_guidance"])
+
+
+class KnowledgeClarificationTests(unittest.TestCase):
+    def test_vague_therapy_question_needs_clarification(self):
+        payload = knowledge_clarification.analyze_iv_knowledge_request("Welche Therapie kann ich mir finanzieren lassen?")
+
+        self.assertEqual(payload["topic"], "therapy_medical")
+        self.assertTrue(payload["needs_clarification"])
+        self.assertIn("therapy_type", payload["missing_slots"])
+        self.assertIn("iv_status", payload["missing_slots"])
+        self.assertLessEqual(len(payload["clarifying_questions"]), 4)
+
+    def test_vague_travel_question_gets_topic_specific_questions(self):
+        payload = knowledge_clarification.analyze_iv_knowledge_request("Uebernimmt die IV Reisekosten?")
+
+        self.assertEqual(payload["topic"], "travel_costs")
+        self.assertTrue(payload["needs_clarification"])
+        self.assertTrue(any("Taxi" in question or "OEV" in question for question in payload["clarifying_questions"]))
+        self.assertTrue(any("Therapie" in question or "IV-Massnahme" in question for question in payload["clarifying_questions"]))
+
+    def test_vague_cash_question_needs_benefit_clarification(self):
+        payload = knowledge_clarification.analyze_iv_knowledge_request("Wie bekomme ich mehr Geld von der IV?")
+
+        self.assertEqual(payload["topic"], "cash_benefits")
+        self.assertTrue(payload["needs_clarification"])
+        self.assertIn("benefit_type", payload["missing_slots"])
+        self.assertTrue(any("Rente" in question or "Taggeld" in question for question in payload["clarifying_questions"]))
+
+    def test_precise_question_skips_clarification(self):
+        payload = knowledge_clarification.analyze_iv_knowledge_request(
+            "Ich bin bei der IV angemeldet und brauche fuer meine Physiotherapie Taxifahrten."
+        )
+
+        self.assertEqual(payload["topic"], "travel_costs")
+        self.assertFalse(payload["needs_clarification"])
+        self.assertEqual(payload["known_slots"]["therapy_type"], "Physiotherapie, Therapie")
+        self.assertEqual(payload["known_slots"]["transport_type"], "Taxi")
+
+    def test_retrieval_query_contains_topic_terms_and_slots(self):
+        query = knowledge_clarification.build_retrieval_query(
+            "Zahlt die IV meine Fahrten?",
+            "travel_costs",
+            {
+                "purpose": "Therapie",
+                "transport_type": "Taxi",
+                "iv_status": "bei der IV angemeldet",
+            },
+        )
+
+        self.assertIn("IV Reisekosten", query)
+        self.assertIn("Therapie", query)
+        self.assertIn("Taxi", query)
+        self.assertLessEqual(len(query), knowledge_clarification.MAX_RETRIEVAL_QUERY_LENGTH)
 
 
 if __name__ == "__main__":

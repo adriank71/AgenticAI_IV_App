@@ -43,6 +43,7 @@ def build_knowledge_tools(
     *,
     context_user_id: str,
     thread_id: str,
+    recent_history: list[dict[str, Any]] | list[str] | None,
     tool_events: list[dict[str, Any]],
     make_json_safe: Any,
     tool_event_factory: Any,
@@ -58,6 +59,19 @@ def build_knowledge_tools(
             raise
         tool_events.append(tool_event_factory(tool_name, "completed", f"{tool_name} completed"))
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
+
+    @function_tool
+    def analyze_iv_knowledge_request(question: str) -> str:
+        """Analyze an IV knowledge question, reuse recent chat history, detect missing slots, and prepare a bounded retrieval query."""
+        return _knowledge_tool_result(
+            "analyze_iv_knowledge_request",
+            lambda: knowledge_service.analyze_iv_knowledge_request(
+                question=question,
+                recent_history=recent_history or [],
+            ),
+        )
+
+    tools.append(analyze_iv_knowledge_request)
 
     @function_tool
     def search_internal_knowledge(

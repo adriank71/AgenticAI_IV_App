@@ -8,10 +8,12 @@ from datetime import date, datetime
 from typing import Any
 
 try:
+    from . import knowledge_clarification
     from . import storage_service as document_storage
     from .calendar_service import normalize_user_id
     from .storage_service import extract_structured_facts
 except ImportError:
+    import services.knowledge_clarification as knowledge_clarification
     import services.storage_service as document_storage
     from services.calendar_service import normalize_user_id
     from services.storage_service import extract_structured_facts
@@ -430,6 +432,14 @@ class WatsonXOrchestrateClient:
 
 
 class KnowledgeService:
+    def analyze_iv_knowledge_request(
+        self,
+        *,
+        question: str,
+        recent_history: list[dict[str, Any]] | list[str] | None = None,
+    ) -> dict[str, Any]:
+        return knowledge_clarification.analyze_iv_knowledge_request(question, history=recent_history)
+
     def search_internal_knowledge(
         self,
         *,
@@ -703,6 +713,7 @@ class KnowledgeService:
         watsonx = watsonx_result or {}
         uncertainty_flags: list[str] = []
         sources = []
+        source_confidence = "weak"
         for document in findings.get("documents") or []:
             if document.get("document_id"):
                 sources.append(
@@ -715,10 +726,35 @@ class KnowledgeService:
                 )
             if not document.get("excerpt") and document.get("extraction_status") != "completed":
                 uncertainty_flags.append(f"Textauszug fehlt fuer {document.get('file_name') or document.get('document_id')}.")
+        if sources:
+            source_confidence = "medium"
+        if len(sources) >= 2:
+            source_confidence = "strong"
+        if watsonx.get("answer") and source_confidence == "weak":
+            source_confidence = "medium"
         if not sources and not watsonx.get("answer"):
             uncertainty_flags.append("Keine belastbaren Quellen gefunden.")
         if watsonx and not watsonx.get("available", True):
             uncertainty_flags.append(str(watsonx.get("reason") or "WatsonX Orchestrate nicht verfuegbar."))
+        answer_guidance_parts = [
+            "Antworte auf Deutsch und nutze die Struktur A-G.",
+            "A. Kurze Einschaetzung.",
+            "B. Moegliche zustaendige Stelle.",
+            "C. Welche Leistung grundsaetzlich in Frage kommt.",
+            "D. Voraussetzungen.",
+            "E. Benoetigte Unterlagen.",
+            "F. Naechste Schritte.",
+            "G. Was noch individuell geprueft werden muss.",
+            "Pruefe als moegliche Kostentraeger IV, Krankenkasse, Ergaenzungsleistungen, Sozialhilfe, Pensionskasse, Unfallversicherung sowie Arbeitgeber oder Taggeldversicherung.",
+        ]
+        if uncertainty_flags or source_confidence == "weak":
+            answer_guidance_parts.append(
+                "Die Quellenlage ist schwach oder unvollstaendig: markiere Unsicherheit ausdruecklich und gib keine definitive Zusage, sondern nur Pruefhinweise und naechste Schritte."
+            )
+        else:
+            answer_guidance_parts.append(
+                "Trenne klar zwischen dem, was aus lokalen Dokumenten hervorgeht, und allgemeinen IV-Hinweisen."
+            )
         return {
             "question": question,
             "internal_findings": findings,
@@ -726,12 +762,9 @@ class KnowledgeService:
             "action_items": action_items or {},
             "comparison": comparison or {},
             "sources": sources,
+            "source_confidence": source_confidence,
             "uncertainty_flags": uncertainty_flags,
-            "answer_guidance": (
-                "Antworte auf Deutsch, kurz und belegbezogen. Nenne zuerst, was aus lokalen Dokumenten hervorgeht. "
-                "Wenn WatsonX beigetragen hat, trenne allgemeine IV-Auskunft klar von Akteninhalt. "
-                "Bei Unsicherheit keine bindende medizinische, finanzielle oder rechtliche Empfehlung geben."
-            ),
+            "answer_guidance": " ".join(answer_guidance_parts),
         }
 
     def ask_watsonx_iv_assistant(
@@ -753,6 +786,10 @@ def get_knowledge_service() -> KnowledgeService:
 
 def search_internal_knowledge(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return get_knowledge_service().search_internal_knowledge(*args, **kwargs)
+
+
+def analyze_iv_knowledge_request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return get_knowledge_service().analyze_iv_knowledge_request(*args, **kwargs)
 
 
 def retrieve_relevant_documents(*args: Any, **kwargs: Any) -> dict[str, Any]:

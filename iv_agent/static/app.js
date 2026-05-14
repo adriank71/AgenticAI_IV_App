@@ -162,7 +162,8 @@ const state = {
 const elements = {
   layoutShell: document.querySelector(".layout-shell"),
   sidebarToggle: document.getElementById("toggle-sidebar"),
-  panelSwitchButtons: document.querySelectorAll("[data-workspace-panel]"),
+  adviserWorkspaceSwitcher: document.getElementById("adviser-workspace-switcher"),
+  panelSwitchButtons: document.querySelectorAll(".panel-toggle-button[data-workspace-panel]"),
   monthPicker: document.getElementById("month-picker"),
   heading: document.getElementById("calendar-heading"),
   hoursValue: document.getElementById("hours-value"),

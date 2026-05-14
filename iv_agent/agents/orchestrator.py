@@ -697,6 +697,7 @@ def _run_agents_sdk(
         context_user_id=context_user_id,
         now_value=now_value,
         thread_id=request_payload["thread_id"],
+        recent_history=request_payload.get("history", [])[-8:],
         tool_events=tool_events,
         make_json_safe=make_json_safe,
         tool_event_factory=_tool_event,
