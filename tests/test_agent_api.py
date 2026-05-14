@@ -442,6 +442,55 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(action["payload"]["timezone"], "Europe/Berlin")
         self.assertTrue(any(event["name"] == "draft_create_month_end_reminder" and event["status"] == "completed" for event in tool_events))
 
+    def test_automations_agent_tool_drafts_pending_report_reminder_email_action(self):
+        tool_events = []
+        drafted_actions = []
+        structured_actions = []
+
+        with isolated_pending_action_storage():
+            tools = {
+                tool.__name__: tool
+                for tool in build_automations_tools(
+                    lambda func: func,
+                    context_user_id="default",
+                    context_timezone="Europe/Berlin",
+                    thread_id="thread-test",
+                    tool_events=tool_events,
+                    drafted_actions=drafted_actions,
+                    structured_actions=structured_actions,
+                    register_pending_actions=agent_orchestrator.register_pending_actions,
+                    make_json_safe=agent_orchestrator.make_json_safe,
+                    tool_event_factory=agent_orchestrator._tool_event,
+                )
+            }
+            payload = json.loads(
+                tools["draft_report_reminder_email"](
+                    title="Report Link senden",
+                    to_email="iv@example.test",
+                    subject="Report vorbereiten",
+                    month="2026-05",
+                    report_types_json='["assistenzbeitrag", "transportkostenabrechnung"]',
+                    schedule="once",
+                    run_date="2026-05-14",
+                    run_time="18:00",
+                    note="Bitte Report erstellen.",
+                )
+            )
+
+        self.assertEqual(len(payload["pending_actions"]), 1)
+        action = payload["pending_actions"][0]
+        self.assertEqual(action["type"], "create_reminder")
+        self.assertEqual(action["payload"]["action"], "send_report_reminder_email")
+        self.assertEqual(action["payload"]["schedule"], "once")
+        self.assertEqual(action["payload"]["run_date"], "2026-05-14")
+        self.assertEqual(action["payload"]["payload"]["to_email"], "iv@example.test")
+        self.assertEqual(action["payload"]["payload"]["target_month"], "2026-05")
+        self.assertEqual(
+            action["payload"]["payload"]["report_types"],
+            ["assistenzbeitrag", "transportkostenabrechnung"],
+        )
+        self.assertTrue(any(event["name"] == "draft_report_reminder_email" and event["status"] == "completed" for event in tool_events))
+
     def test_agent_chat_uploads_attachments_before_model_input(self):
         client = app_module.app.test_client()
         uploaded_document = {

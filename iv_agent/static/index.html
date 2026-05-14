@@ -747,6 +747,41 @@
     </div>
   </div>
 
+  <div id="mail-report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mail-report-modal-title">
+    <div class="modal-backdrop" data-close-modal="mail-report-modal"></div>
+    <div class="modal-panel mail-report-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="mail-report-modal-title">Report senden</h2>
+          <p class="modal-subtitle">PDF aus dem verbundenen Postfach verschicken.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="mail-report-modal" aria-label="Close">&times;</button>
+      </div>
+      <div id="mail-report-status" class="report-status hidden" role="status"></div>
+      <div id="mail-connect-panel" class="mail-connect-panel hidden">
+        <p class="muted-copy">Kein Postfach verbunden.</p>
+        <div class="mail-connect-actions">
+          <a class="secondary-button" href="/api/mail/oauth/gmail/start">Gmail verbinden</a>
+          <a class="secondary-button" href="/api/mail/oauth/outlook/start">Outlook verbinden</a>
+        </div>
+      </div>
+      <form id="mail-report-form" class="modal-form">
+        <label>
+          <span>Mail-Adresse</span>
+          <input id="mail-report-to" name="to_email" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          <span>Betreff</span>
+          <input id="mail-report-subject" name="subject" type="text" required>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="mail-report-modal">Cancel</button>
+          <button id="submit-mail-report" class="primary-button" type="submit">Senden</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="automations-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="automations-modal-title">
     <div class="modal-backdrop" data-close-modal="automations-modal"></div>
     <div class="modal-panel automations-panel">

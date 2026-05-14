@@ -6,6 +6,7 @@ import base64
 import binascii
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from contextlib import ExitStack, contextmanager
@@ -46,6 +47,17 @@ try:
         process_chat_attachments,
         reassign_document_bucket,
         update_document_metadata,
+    )
+    from .services.mail_service import (
+        MailConfigurationError,
+        MailNotConnectedError,
+        MailServiceError,
+        build_oauth_start_url,
+        disconnect_mail,
+        exchange_oauth_code,
+        public_mail_status,
+        send_plain_mail,
+        send_report_mail,
     )
     from .form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
@@ -110,6 +122,17 @@ except ImportError:
         process_chat_attachments,
         reassign_document_bucket,
         update_document_metadata,
+    )
+    from services.mail_service import (
+        MailConfigurationError,
+        MailNotConnectedError,
+        MailServiceError,
+        build_oauth_start_url,
+        disconnect_mail,
+        exchange_oauth_code,
+        public_mail_status,
+        send_plain_mail,
+        send_report_mail,
     )
     from form_pilot import (
         DUAL_REPORT_HOURLY_RATE,
@@ -724,6 +747,90 @@ def send_report_via_webhook(month: str, report_record: dict) -> dict:
     }
 
 
+def _validate_email_address(value: Any) -> str:
+    email = str(value or "").strip()
+    if not email or "@" not in email or email.startswith("@") or email.endswith("@") or any(ch.isspace() for ch in email):
+        raise ValueError("A valid recipient email is required")
+    return email
+
+
+def _validate_mail_subject(value: Any) -> str:
+    subject = str(value or "").strip()
+    if not subject:
+        raise ValueError("subject is required")
+    if len(subject) > 240:
+        raise ValueError("subject is too long")
+    return subject
+
+
+def send_report_via_connected_mail(
+    month: str,
+    report_record: dict,
+    *,
+    to_email: str,
+    subject: str,
+    body: str = "",
+    provider: str | None = None,
+) -> dict:
+    report_store = get_report_store()
+    report_bytes, content_type = report_store.read_report_bytes(report_record)
+    if content_type and content_type != "application/pdf":
+        raise ValueError("Report attachment must be a PDF")
+    result = send_report_mail(
+        to_email=_validate_email_address(to_email),
+        subject=_validate_mail_subject(subject),
+        body=body or f"Im Anhang ist der IV Report fuer {month}.",
+        file_name=report_record["file_name"],
+        pdf_bytes=report_bytes,
+        provider=provider,
+    )
+    return {
+        **result,
+        "report_id": report_record["report_id"],
+        "file_name": report_record["file_name"],
+        "month": month,
+    }
+
+
+def build_report_reminder_deep_link(reminder: dict) -> str:
+    payload = reminder.get("payload") if isinstance(reminder.get("payload"), dict) else {}
+    report_types = payload.get("report_types") if isinstance(payload.get("report_types"), list) else ["assistenzbeitrag"]
+    target_month = str(payload.get("target_month") or "").strip()
+    if not target_month:
+        next_run_at = str(reminder.get("next_run_at") or "").strip()
+        target_month = next_run_at[:7] if len(next_run_at) >= 7 else utc_now().strftime("%Y-%m")
+    query = {
+        "panel": "automations",
+        "reportModal": "1",
+        "month": target_month,
+        "reportTypes": ",".join(str(item).strip() for item in report_types if str(item).strip()),
+    }
+    base_url = (os.environ.get("MAIL_OAUTH_REDIRECT_BASE_URL") or request.host_url).rstrip("/")
+    return f"{base_url}/?{urllib.parse.urlencode(query)}"
+
+
+def send_report_reminder_email(reminder: dict) -> dict:
+    payload = reminder.get("payload") if isinstance(reminder.get("payload"), dict) else {}
+    to_email = _validate_email_address(payload.get("to_email"))
+    subject = _validate_mail_subject(payload.get("subject") or reminder.get("title"))
+    deep_link = build_report_reminder_deep_link(reminder)
+    body = str(payload.get("body") or "").strip()
+    if not body:
+        body = (
+            "Der IV Report ist faellig.\n\n"
+            f"Report-Maske oeffnen: {deep_link}\n\n"
+            "Der Report wird erst nach dem Oeffnen der Maske manuell generiert."
+        )
+    elif deep_link not in body:
+        body = f"{body}\n\nReport-Maske oeffnen: {deep_link}"
+    result = send_plain_mail(to_email=to_email, subject=subject, body=body)
+    return {
+        **result,
+        "to_email": to_email,
+        "deep_link": deep_link,
+    }
+
+
 def generate_reports_payload(
     month: str,
     report_types: list[str],
@@ -1199,6 +1306,15 @@ def execute_pending_agent_action(action: dict) -> dict:
         report_record = resolve_report_record(report_id=report_id, file_name=file_name or None, month=month)
         if not report_record:
             raise FileNotFoundError("Report file not found")
+        if str(payload.get("to_email") or "").strip() or str(payload.get("subject") or "").strip():
+            return send_report_via_connected_mail(
+                month,
+                report_record,
+                to_email=payload.get("to_email"),
+                subject=payload.get("subject"),
+                body=str(payload.get("body") or "").strip(),
+                provider=str(payload.get("provider") or "").strip() or None,
+            )
         return send_report_via_webhook(month, report_record)
 
     raise ValueError(f"Unsupported pending action type: {action_type}")
@@ -1357,6 +1473,44 @@ def api_chat_voice_transcribe():
         )
 
 
+@app.get("/api/mail/oauth/<provider>/start")
+def api_mail_oauth_start(provider: str):
+    try:
+        return redirect(build_oauth_start_url(provider, request.host_url.rstrip("/")))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    except MailConfigurationError as exc:
+        return json_error(str(exc), 501)
+
+
+@app.get("/api/mail/oauth/<provider>/callback")
+def api_mail_oauth_callback(provider: str):
+    error = str(request.args.get("error") or "").strip()
+    if error:
+        return redirect(f"/?mailError={urllib.parse.quote(error)}")
+    try:
+        exchange_oauth_code(provider, str(request.args.get("code") or ""), request.host_url.rstrip("/"))
+        return redirect(f"/?mailConnected={urllib.parse.quote(provider)}")
+    except Exception as exc:
+        logger.error("Mail OAuth callback failed: %s", exc)
+        return redirect(f"/?mailError={urllib.parse.quote(str(exc))}")
+
+
+@app.get("/api/mail/status")
+def api_mail_status():
+    return jsonify(public_mail_status())
+
+
+@app.post("/api/mail/disconnect")
+def api_mail_disconnect():
+    try:
+        payload = get_json_payload(required=False)
+        provider = str(payload.get("provider") or "").strip() or None
+        return jsonify(disconnect_mail(provider))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+
+
 @app.post("/api/reports/generate")
 def api_generate_report():
     try:
@@ -1466,9 +1620,32 @@ def api_send_report():
         if not report_record:
             return json_error("Report file not found", 404)
 
+        has_mail_fields = any(
+            str(payload.get(field) or "").strip()
+            for field in ("to_email", "subject", "body", "provider")
+        )
+        if has_mail_fields:
+            return jsonify(
+                send_report_via_connected_mail(
+                    month,
+                    report_record,
+                    to_email=payload.get("to_email"),
+                    subject=payload.get("subject"),
+                    body=str(payload.get("body") or "").strip(),
+                    provider=str(payload.get("provider") or "").strip() or None,
+                )
+            )
+
         return jsonify(send_report_via_webhook(month, report_record))
     except ValueError as exc:
         return json_error(str(exc), 400)
+    except MailNotConnectedError as exc:
+        return json_error(str(exc), 409)
+    except MailConfigurationError as exc:
+        return json_error(str(exc), 501)
+    except MailServiceError as exc:
+        logger.error("mail provider request failed: %s", exc)
+        return json_error(str(exc), 502)
     except urllib.error.URLError as exc:
         logger.error("n8n webhook request failed: %s", exc)
         return json_error("Failed to reach n8n webhook", 502)
@@ -2308,6 +2485,14 @@ def _execute_reminder_action(reminder: dict) -> tuple[bool, str]:
             logger.exception("Reminder action failed")
             return False, f"Action failed: {exc}"
 
+    if action == "send_report_reminder_email":
+        try:
+            result = send_report_reminder_email(reminder)
+            return True, f"Report reminder email sent via {result.get('provider')}"
+        except Exception as exc:
+            logger.exception("Report reminder email failed")
+            return False, f"Action failed: {exc}"
+
     return False, f"Unsupported action: {action}"
 
 
@@ -2354,6 +2539,9 @@ def api_run_reminder(reminder_id: str):
 
 @app.route("/api/reminders/tick", methods=["GET", "POST"])
 def api_tick_reminders():
+    cron_secret = os.environ.get("CRON_SECRET", "").strip()
+    if cron_secret and request.headers.get("Authorization", "") != f"Bearer {cron_secret}":
+        return json_error("Unauthorized", 401)
     due_items = reminders_module.due_reminders()
     fired = []
     for reminder in due_items:

@@ -110,6 +110,8 @@ const state = {
   generatedReports: [],
   activeGeneratedReport: null,
   selectedReportTypes: ["assistenzbeitrag"],
+  mailStatus: null,
+  startupReportIntent: null,
   chatHistory: [],
   chatPending: false,
   chatAbortController: null,
@@ -173,6 +175,7 @@ const elements = {
   addModalTitle: document.getElementById("add-modal-title"),
   exportModal: document.getElementById("export-modal"),
   reportModal: document.getElementById("report-modal"),
+  mailReportModal: document.getElementById("mail-report-modal"),
   exportSummary: document.getElementById("export-summary"),
   reportForm: document.getElementById("report-form"),
   reportConfigPanel: document.getElementById("report-config-panel"),
@@ -187,6 +190,12 @@ const elements = {
   reportResultsActions: document.getElementById("report-results-actions"),
   generateNewReport: document.getElementById("generate-new-report"),
   sendReport: document.getElementById("send-report"),
+  mailReportForm: document.getElementById("mail-report-form"),
+  mailReportStatus: document.getElementById("mail-report-status"),
+  mailConnectPanel: document.getElementById("mail-connect-panel"),
+  mailReportTo: document.getElementById("mail-report-to"),
+  mailReportSubject: document.getElementById("mail-report-subject"),
+  submitMailReport: document.getElementById("submit-mail-report"),
   addForm: document.getElementById("add-event-form"),
   submitAddEventButton: document.getElementById("submit-add-event"),
   categoryField: document.getElementById("event-category"),
@@ -2098,6 +2107,23 @@ function setReportStatus(message = "", variant = "") {
   }
 }
 
+function setMailReportStatus(message = "", variant = "") {
+  if (!elements.mailReportStatus) return;
+  if (!message) {
+    elements.mailReportStatus.textContent = "";
+    elements.mailReportStatus.classList.add("hidden");
+    elements.mailReportStatus.classList.remove("is-success", "is-error");
+    return;
+  }
+  elements.mailReportStatus.textContent = message;
+  elements.mailReportStatus.classList.remove("hidden", "is-success", "is-error");
+  if (variant === "success") {
+    elements.mailReportStatus.classList.add("is-success");
+  } else if (variant === "error") {
+    elements.mailReportStatus.classList.add("is-error");
+  }
+}
+
 function setReportModalMode(mode = "setup") {
   const isResultsMode = mode === "results";
 
@@ -2138,6 +2164,19 @@ function resetReportWorkflow() {
   elements.reportResultsList.innerHTML = "";
   setReportStatus("");
   setReportModalMode("setup");
+}
+
+function applyReportModalSelection(options = {}) {
+  const month = String(options.month || "").trim();
+  if (month && /^\d{4}-\d{2}$/.test(month)) {
+    populateReportMonthOptions(month);
+    elements.reportMonthInput.value = month;
+  }
+  const reportTypes = Array.isArray(options.reportTypes) ? options.reportTypes : [];
+  const validTypes = reportTypes.filter((item) => reportTypeLabelMap[item]);
+  if (validTypes.length) {
+    setSelectedReportTypes(validTypes);
+  }
 }
 
 function renderGeneratedReports() {
@@ -2207,8 +2246,9 @@ function renderGeneratedReports() {
   elements.reportResultsWrap.classList.remove("hidden");
 }
 
-function openReportModal(triggerElement = elements.generateReport) {
+function openReportModal(triggerElement = elements.generateReport, options = {}) {
   resetReportWorkflow();
+  applyReportModalSelection(options);
   openModal("report-modal", triggerElement);
 }
 
@@ -2276,32 +2316,98 @@ async function sendGeneratedReport() {
     return;
   }
 
-  if (!elements.sendReport) {
+  await openMailReportModal(elements.sendReport);
+}
+
+function defaultMailSubject() {
+  if (!state.activeGeneratedReport) {
+    return "";
+  }
+  const label = state.activeGeneratedReport.label || reportTypeLabelMap[state.activeGeneratedReport.type] || "IV Report";
+  return `${label} ${state.activeGeneratedReport.month}`;
+}
+
+async function loadMailStatus() {
+  state.mailStatus = await apiFetch("/api/mail/status", { showLoading: false, suppressErrorBanner: true });
+  return state.mailStatus;
+}
+
+function renderMailConnectionState() {
+  const connected = Boolean(state.mailStatus && state.mailStatus.connected);
+  if (elements.mailConnectPanel) {
+    elements.mailConnectPanel.classList.toggle("hidden", connected);
+  }
+  if (elements.mailReportForm) {
+    elements.mailReportForm.classList.toggle("hidden", !connected);
+  }
+  if (!connected) {
+    setMailReportStatus("Bitte zuerst Gmail oder Outlook verbinden.", "");
+  } else {
+    const provider = state.mailStatus.default_provider === "outlook" ? "Outlook" : "Gmail";
+    setMailReportStatus(`${provider} ist verbunden.`, "success");
+  }
+}
+
+async function openMailReportModal(triggerElement) {
+  if (!state.activeGeneratedReport) {
+    setReportStatus("Generate a report first before sending.", "error");
     return;
   }
-
-  elements.sendReport.disabled = true;
-  elements.sendReport.textContent = "Sending...";
-  setReportStatus("Sending report trigger...", "");
+  if (elements.mailReportTo) {
+    elements.mailReportTo.value = "";
+  }
+  if (elements.mailReportSubject) {
+    elements.mailReportSubject.value = defaultMailSubject();
+  }
+  setMailReportStatus("Mail-Verbindung wird geprueft...", "");
+  openModal("mail-report-modal", triggerElement || elements.sendReport);
 
   try {
-    await apiFetch("/api/reports/send", {
+    await loadMailStatus();
+    renderMailConnectionState();
+  } catch (error) {
+    setMailReportStatus(error.message || "Mail status could not be loaded.", "error");
+  }
+}
+
+async function submitMailReportForm(event) {
+  event.preventDefault();
+  if (!state.activeGeneratedReport || (!state.activeGeneratedReport.fileName && !state.activeGeneratedReport.reportId)) {
+    setMailReportStatus("Generate a report first before sending.", "error");
+    return;
+  }
+  const toEmail = elements.mailReportTo ? elements.mailReportTo.value.trim() : "";
+  const subject = elements.mailReportSubject ? elements.mailReportSubject.value.trim() : "";
+  if (!toEmail || !subject) {
+    setMailReportStatus("Mail-Adresse und Betreff sind erforderlich.", "error");
+    return;
+  }
+  if (elements.submitMailReport) {
+    elements.submitMailReport.disabled = true;
+    elements.submitMailReport.textContent = "Sendet...";
+  }
+  setMailReportStatus("Report wird per Mail gesendet...", "");
+  try {
+    const result = await apiFetch("/api/reports/send", {
       method: "POST",
       body: JSON.stringify({
         month: state.activeGeneratedReport.month,
         report_id: state.activeGeneratedReport.reportId || undefined,
         file_name: state.activeGeneratedReport.fileName,
+        to_email: toEmail,
+        subject,
       }),
     });
-    setReportStatus(
-      "Send trigger submitted. You can connect this endpoint to n8n webhook for email workflows.",
-      "success"
-    );
+    const provider = result.provider === "outlook" ? "Outlook" : "Gmail";
+    setMailReportStatus(`Report wurde per ${provider} gesendet.`, "success");
+    setReportStatus(`Report wurde an ${toEmail} gesendet.`, "success");
   } catch (error) {
-    setReportStatus(error.message || "Failed to send report trigger.", "error");
+    setMailReportStatus(error.message || "Report konnte nicht gesendet werden.", "error");
   } finally {
-    elements.sendReport.disabled = false;
-    elements.sendReport.textContent = "Send Report";
+    if (elements.submitMailReport) {
+      elements.submitMailReport.disabled = false;
+      elements.submitMailReport.textContent = "Senden";
+    }
   }
 }
 
@@ -4971,6 +5077,9 @@ function bindEvents() {
   if (elements.sendReport) {
     elements.sendReport.addEventListener("click", sendGeneratedReport);
   }
+  if (elements.mailReportForm) {
+    elements.mailReportForm.addEventListener("submit", submitMailReportForm);
+  }
   if (elements.generateNewReport) {
     elements.generateNewReport.addEventListener("click", resetReportWorkflow);
   }
@@ -5051,7 +5160,40 @@ function bindEvents() {
   wireModalClosers();
 }
 
+function readStartupQueryParams() {
+  const params = new URLSearchParams(window.location.search || "");
+  const panel = params.get("panel") || "";
+  const month = params.get("month") || "";
+  const reportModal = params.get("reportModal") === "1";
+  const reportTypes = (params.get("reportTypes") || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => reportTypeLabelMap[item]);
+
+  if (["calendar", "reports", "automations", "adviser", "dashboard", "community", "settings"].includes(panel)) {
+    state.activeAppView = panel;
+  }
+  if (/^\d{4}-\d{2}$/.test(month)) {
+    state.currentMonth = month;
+  }
+  if (reportModal) {
+    state.startupReportIntent = {
+      month,
+      reportTypes: reportTypes.length ? reportTypes : ["assistenzbeitrag"],
+    };
+  }
+}
+
+function applyStartupReportIntent() {
+  if (!state.startupReportIntent) {
+    return;
+  }
+  openReportModal(elements.panelGenerateReportButton || elements.generateReport, state.startupReportIntent);
+  state.startupReportIntent = null;
+}
+
 async function initialize() {
+  readStartupQueryParams();
   syncMonthUi();
   updateViewButtons();
   seedFormDefaults();
@@ -5068,6 +5210,7 @@ async function initialize() {
   initInvoices();
   await refreshAiStatus();
   await switchAppView(state.activeAppView);
+  applyStartupReportIntent();
   tickAutomationsLazy();
   refreshAutomations().catch(() => {});
 }

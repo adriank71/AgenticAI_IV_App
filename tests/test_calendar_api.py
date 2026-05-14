@@ -360,6 +360,50 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["assistant_breakdown"]["koerperpflege"], 1.0)
         self.assertEqual(payload["reminders"][0]["id"], "rem-1")
 
+    def test_tick_executes_report_reminder_email_with_deep_link(self):
+        client = app_module.app.test_client()
+        reminder = {
+            "id": "rem-mail",
+            "title": "Report vorbereiten",
+            "action": "send_report_reminder_email",
+            "schedule": "once",
+            "next_run_at": "2026-05-14T18:00:00+02:00",
+            "payload": {
+                "to_email": "iv@example.test",
+                "subject": "Report vorbereiten",
+                "target_month": "2026-05",
+                "report_types": ["assistenzbeitrag", "transportkostenabrechnung"],
+            },
+        }
+
+        with patch.object(app_module.reminders_module, "due_reminders", return_value=[reminder]), patch.object(
+            app_module.reminders_module,
+            "mark_run",
+            return_value={**reminder, "last_run_status": "ok"},
+        ), patch.object(
+            app_module,
+            "send_plain_mail",
+            return_value={"sent": True, "provider": "gmail", "provider_response": {}},
+        ) as send_mock, patch.dict(os.environ, {"CRON_SECRET": ""}, clear=False):
+            response = client.post("/api/reminders/tick")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["fired_count"], 1)
+        self.assertTrue(payload["fired"][0]["ok"])
+        self.assertEqual(send_mock.call_args.kwargs["to_email"], "iv@example.test")
+        body = send_mock.call_args.kwargs["body"]
+        self.assertIn("reportModal=1", body)
+        self.assertIn("month=2026-05", body)
+        self.assertIn("reportTypes=assistenzbeitrag%2Ctransportkostenabrechnung", body)
+
+    def test_tick_requires_bearer_secret_when_cron_secret_is_set(self):
+        client = app_module.app.test_client()
+        with patch.dict(os.environ, {"CRON_SECRET": "secret"}, clear=False):
+            response = client.post("/api/reminders/tick")
+
+        self.assertEqual(response.status_code, 401)
+
     def test_post_transport_event_persists_transport_fields(self):
         with isolated_calendar_storage():
             client = app_module.app.test_client()
@@ -764,6 +808,91 @@ class CalendarApiTests(unittest.TestCase):
         self.assertEqual(payload["report_id"], saved_report["report_id"])
         self.assertNotIn("file_path", captured_payload)
         self.assertEqual(captured_payload["report_id"], saved_report["report_id"])
+
+    def test_send_report_validates_mail_fields_and_sends_pdf_attachment(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+        saved_report = fake_report_store.save_report(
+            month="2026-04",
+            report_type="assistenzbeitrag",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-1.4\n",
+        )
+
+        with patch.object(app_module, "get_report_store", return_value=fake_report_store), patch.object(
+            app_module,
+            "send_report_mail",
+            return_value={"sent": True, "provider": "gmail", "provider_response": {"id": "msg-1"}},
+        ) as send_mock:
+            response = client.post(
+                "/api/reports/send",
+                json={
+                    "month": "2026-04",
+                    "report_id": saved_report["report_id"],
+                    "to_email": "iv@example.test",
+                    "subject": "IV Report April",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["sent"])
+        self.assertEqual(payload["provider"], "gmail")
+        self.assertEqual(send_mock.call_args.kwargs["to_email"], "iv@example.test")
+        self.assertEqual(send_mock.call_args.kwargs["subject"], "IV Report April")
+        self.assertEqual(send_mock.call_args.kwargs["file_name"], "Assistenzbeitrag_2026-04.pdf")
+        self.assertEqual(send_mock.call_args.kwargs["pdf_bytes"], b"%PDF-1.4\n")
+
+    def test_send_report_requires_subject_for_mail_flow(self):
+        client = app_module.app.test_client()
+        fake_report_store = FakeReportStore()
+        saved_report = fake_report_store.save_report(
+            month="2026-04",
+            report_type="assistenzbeitrag",
+            file_name="Assistenzbeitrag_2026-04.pdf",
+            content=b"%PDF-1.4\n",
+        )
+
+        with patch.object(app_module, "get_report_store", return_value=fake_report_store):
+            response = client.post(
+                "/api/reports/send",
+                json={
+                    "month": "2026-04",
+                    "report_id": saved_report["report_id"],
+                    "to_email": "iv@example.test",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "subject is required")
+
+    def test_mail_status_does_not_expose_secrets(self):
+        client = app_module.app.test_client()
+
+        with patch.object(
+            app_module,
+            "public_mail_status",
+            return_value={
+                "connected": True,
+                "default_provider": "gmail",
+                "providers": {
+                    "gmail": {
+                        "connected": True,
+                        "account_email": "",
+                        "connected_at": "2026-05-14T12:00:00Z",
+                        "updated_at": "2026-05-14T12:00:00Z",
+                    },
+                    "outlook": {"connected": False, "account_email": "", "connected_at": "", "updated_at": ""},
+                },
+            },
+        ):
+            response = client.get("/api/mail/status")
+
+        self.assertEqual(response.status_code, 200)
+        serialized = json.dumps(response.get_json())
+        self.assertIn("gmail", serialized)
+        self.assertNotIn("access_token", serialized)
+        self.assertNotIn("refresh_token", serialized)
 
     def test_download_report_streams_from_store_lookup(self):
         client = app_module.app.test_client()

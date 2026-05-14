@@ -42,18 +42,22 @@ def build_automations_agent(
         f"Current visible month: {current_month or 'unknown'}. "
         "Use list_automations for reads. "
         "For report generation requests, call draft_generate_report; this only creates a pending action for confirmation. "
+        "For report reminder email requests, call draft_report_reminder_email; it creates a pending action that saves a reminder after confirmation. "
         "Resolve German month phrases like 'Mai 2026' to YYYY-MM before calling tools. "
-        "Map Assistenzbeitrag, Assistenzbeitraege, Assistenzbeiträge, Stundenblatt, and Rechnung to report type assistenzbeitrag. "
+        "Map Assistenzbeitrag, Assistenzbeitraege, Stundenblatt, and Rechnung to report type assistenzbeitrag. "
         "Map Transportkosten, Transportkostenabrechnung, Fahrkosten, and TixiTaxi report requests to report type transportkostenabrechnung. "
         "If the user asks for both reports, use report_types_json with both report types. "
-        "For monthly reminder requests, call draft_create_month_end_reminder with action notify; reminders are in-app for this MVP. "
-        "Do not promise email delivery. Say that the reminder is saved as an in-app reminder after confirmation. "
+        "Convert relative reminder times before calling tools: 'in 2 Stunden' becomes schedule once with the computed local run_date and run_time; "
+        "'heute Abend' becomes once at about 19:00 local time; 'Ende des Monats' becomes schedule month_end. "
+        "Reminder email actions must not generate PDFs automatically; they send only a link to the report mask. "
+        "For monthly in-app reminder requests without email, call draft_create_month_end_reminder with action notify. "
         "Never claim a report or reminder is complete before user confirmation."
     )
     return Agent(
         name="AutomationsAgent",
-        handoff_description="Handles automation reads, report-generation drafts, and month-end reminder drafts.",
+        handoff_description="Handles automation reads, report-generation drafts, and report reminder email drafts.",
         instructions=instructions,
         model=model,
         tools=automations_tools,
     )
+

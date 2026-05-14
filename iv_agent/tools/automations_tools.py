@@ -3,11 +3,10 @@ from typing import Any, Callable
 
 try:
     from .. import reminders as reminders_module
+    from ..services import automations_service
 except ImportError:
     import reminders as reminders_module
-
-
-VALID_REPORT_TYPES = {"assistenzbeitrag", "transportkostenabrechnung"}
+    from services import automations_service
 
 
 def _json_list(value: str) -> list[str]:
@@ -83,25 +82,63 @@ def build_automations_tools(
         """Draft report PDF generation for user confirmation. month must be YYYY-MM."""
 
         def draft() -> dict[str, Any]:
-            report_types = _json_list(report_types_json) or ["assistenzbeitrag"]
-            unsupported = [item for item in report_types if item not in VALID_REPORT_TYPES]
-            if unsupported:
-                raise ValueError(f"Unsupported report type: {unsupported[0]}")
+            action_payload = automations_service.build_generate_report_action_payload(
+                month=month,
+                report_types=_json_list(report_types_json) or ["assistenzbeitrag"],
+                user_id=context_user_id,
+                timezone=context_timezone,
+            )
             action_title = title.strip() or (
-                "Reports erstellen" if len(report_types) > 1 else "Assistenzbeitrag Report erstellen"
+                "Reports erstellen" if len(action_payload["report_types"]) > 1 else "Assistenzbeitrag Report erstellen"
             )
             return _register_automation_pending_action(
                 "generate_report",
                 action_title,
-                {
-                    "month": month,
-                    "report_types": report_types,
-                },
+                action_payload,
             )
 
         return _automation_tool_result("draft_generate_report", draft)
 
     tools.append(draft_generate_report)
+
+    @function_tool
+    def draft_report_reminder_email(
+        title: str,
+        to_email: str,
+        subject: str,
+        month: str,
+        report_types_json: str = '["assistenzbeitrag"]',
+        schedule: str = "once",
+        run_date: str = "",
+        run_time: str = "09:00",
+        note: str = "",
+        body: str = "",
+    ) -> str:
+        """Draft a pending action that creates an email reminder with a report deep-link."""
+
+        def draft() -> dict[str, Any]:
+            reminder_payload = automations_service.build_report_reminder_payload(
+                title=title,
+                to_email=to_email,
+                subject=subject,
+                month=month,
+                report_types=_json_list(report_types_json) or ["assistenzbeitrag"],
+                schedule=schedule,
+                run_date=run_date,
+                run_time=run_time,
+                timezone=context_timezone,
+                note=note,
+                body=body,
+            )
+            return _register_automation_pending_action(
+                "create_reminder",
+                reminder_payload["title"],
+                reminder_payload,
+            )
+
+        return _automation_tool_result("draft_report_reminder_email", draft)
+
+    tools.append(draft_report_reminder_email)
 
     @function_tool
     def draft_create_month_end_reminder(

@@ -1516,6 +1516,25 @@ textarea:focus-visible,
   width: min(100%, 640px);
 }
 
+.mail-report-panel {
+  width: min(100%, 520px);
+}
+
+.mail-connect-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.mail-connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 #report-modal.report-modal-results .report-panel {
   width: min(96vw, 1280px);
 }

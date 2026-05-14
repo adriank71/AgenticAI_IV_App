@@ -21,7 +21,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 REMINDERS_PATH = os.path.join(DATA_DIR, "reminders.json")
 
-VALID_ACTIONS = {"notify", "generate_assistenzbeitrag"}
+VALID_ACTIONS = {"notify", "generate_assistenzbeitrag", "send_report_reminder_email"}
 VALID_SCHEDULES = {"month_end", "weekly_sun", "weekly_mon", "daily", "once"}
 DEFAULT_TIMEZONE = "Europe/Berlin"
 _REMINDER_STORE_CACHE: dict[tuple[str, str, str, str], Any] = {}
@@ -111,11 +111,13 @@ class PostgresReminderStore:
                         next_run_at TIMESTAMPTZ,
                         last_run_status TEXT,
                         last_run_message TEXT,
+                        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                     """
                 )
+                cursor.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb")
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS reminders_next_run_idx ON reminders (status, next_run_at)"
                 )
@@ -143,6 +145,7 @@ class PostgresReminderStore:
             "timezone": row.get("timezone") or DEFAULT_TIMEZONE,
             "last_run_status": row.get("last_run_status"),
             "last_run_message": row.get("last_run_message"),
+            "payload": row.get("payload") if isinstance(row.get("payload"), dict) else {},
         }
 
     def _upsert_reminder(self, cursor, item: Dict[str, Any]) -> None:
@@ -162,6 +165,7 @@ class PostgresReminderStore:
                 next_run_at,
                 last_run_status,
                 last_run_message,
+                payload,
                 created_at,
                 updated_at
             )
@@ -170,6 +174,7 @@ class PostgresReminderStore:
                 %s::timestamptz,
                 %s::timestamptz,
                 %s, %s,
+                %s::jsonb,
                 %s::timestamptz,
                 NOW()
             )
@@ -187,6 +192,7 @@ class PostgresReminderStore:
                 next_run_at = EXCLUDED.next_run_at,
                 last_run_status = EXCLUDED.last_run_status,
                 last_run_message = EXCLUDED.last_run_message,
+                payload = EXCLUDED.payload,
                 updated_at = NOW()
             """,
             (
@@ -203,6 +209,7 @@ class PostgresReminderStore:
                 item.get("next_run_at"),
                 item.get("last_run_status"),
                 item.get("last_run_message"),
+                json.dumps(item.get("payload") if isinstance(item.get("payload"), dict) else {}),
                 item.get("created_at") or _now(item.get("timezone")).isoformat(),
             ),
         )
@@ -226,6 +233,7 @@ class PostgresReminderStore:
                         next_run_at,
                         last_run_status,
                         last_run_message,
+                        payload,
                         created_at,
                         updated_at
                     FROM reminders
@@ -346,6 +354,7 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if schedule not in VALID_SCHEDULES:
         raise ValueError(f"Unsupported schedule: {schedule}")
     note = str(payload.get("note") or "").strip()
+    action_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     run_time = str(payload.get("run_time") or "09:00").strip() or "09:00"
     run_date = str(payload.get("run_date") or "").strip()
     if schedule == "once" and not run_date:
@@ -356,6 +365,7 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "action": action,
         "schedule": schedule,
         "note": note,
+        "payload": action_payload,
         "run_time": run_time,
         "run_date": run_date,
         "timezone": timezone_name,

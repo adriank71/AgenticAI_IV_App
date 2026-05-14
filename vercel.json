@@ -15,7 +15,7 @@
   "crons": [
     {
       "path": "/api/reminders/tick",
-      "schedule": "0 8 * * *"
+      "schedule": "*/15 * * * *"
     }
   ]
 }
