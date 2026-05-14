@@ -55,6 +55,23 @@
     </aside>
 
     <div class="layout-main">
+      <header class="workspace-topbar" aria-label="Workspace navigation">
+        <div class="workspace-topbar-group" role="group" aria-label="Workspace panels">
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
+            <span class="material-symbols-outlined">calendar_today</span>
+            <span class="workspace-panel-button-label">Calendar</span>
+          </button>
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
+            <span class="material-symbols-outlined">folder</span>
+            <span class="workspace-panel-button-label">Storage</span>
+          </button>
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations &amp; Reminder">
+            <span class="material-symbols-outlined">automation</span>
+            <span class="workspace-panel-button-label">Automations &amp; Reminder</span>
+          </button>
+        </div>
+      </header>
+
       <main class="app-views">
         <section id="view-dashboard" class="app-view" data-view="dashboard">
           <div class="dashboard-shell">
@@ -188,17 +205,6 @@
 
         <section id="view-adviser" class="app-view is-active" data-view="adviser">
           <div id="adviser-shell" class="adviser-shell is-welcome">
-            <div id="adviser-workspace-switcher" class="adviser-workspace-switcher" role="group" aria-label="Workspace panels">
-              <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
-                <span class="material-symbols-outlined">calendar_today</span>
-              </button>
-              <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
-                <span class="material-symbols-outlined">folder</span>
-              </button>
-              <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations">
-                <span class="material-symbols-outlined">automation</span>
-              </button>
-            </div>
             <div id="chat-welcome" class="chat-welcome">
               <h2>How can I help you?</h2>
             </div>

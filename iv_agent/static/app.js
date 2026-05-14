@@ -162,7 +162,6 @@ const state = {
 const elements = {
   layoutShell: document.querySelector(".layout-shell"),
   sidebarToggle: document.getElementById("toggle-sidebar"),
-  adviserWorkspaceSwitcher: document.getElementById("adviser-workspace-switcher"),
   panelSwitchButtons: document.querySelectorAll(".panel-toggle-button[data-workspace-panel]"),
   monthPicker: document.getElementById("month-picker"),
   heading: document.getElementById("calendar-heading"),
@@ -217,7 +216,7 @@ const elements = {
   confirmDelete: document.getElementById("confirm-delete"),
   cancelDelete: document.getElementById("cancel-delete"),
   editEvent: document.getElementById("edit-event"),
-  viewButtons: document.querySelectorAll("[data-view]"),
+  viewButtons: document.querySelectorAll(".view-button[data-view]"),
   focusList: document.getElementById("focus-list"),
   focusCountPill: document.getElementById("focus-count-pill"),
   generateReport: document.getElementById("generate-report"),
@@ -1254,9 +1253,26 @@ function changeCalendarView(viewName) {
   if (!state.calendar) {
     return;
   }
+  if (!["dayGridMonth", "timeGridWeek", "timeGridDay"].includes(viewName)) {
+    return;
+  }
   state.currentView = viewName;
   state.calendar.changeView(viewName);
+  syncMonthUi();
+  state.calendar.updateSize();
   refreshSidebarData().catch(() => {});
+}
+
+function updateCalendarSizeDeferred() {
+  if (!state.calendar) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      state.calendar.updateSize();
+      resolve();
+    });
+  });
 }
 
 async function switchAppView(viewName) {
@@ -1296,7 +1312,7 @@ async function switchAppView(viewName) {
 
   if (viewName === "calendar") {
     ensureCalendarInitialized();
-    state.calendar.updateSize();
+    await updateCalendarSizeDeferred();
     await refreshCalendarData();
     return;
   }
