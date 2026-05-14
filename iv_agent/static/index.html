@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stützli | Agent Workspace</title>
+  <title>Stutzli | Agent Workspace</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
@@ -20,7 +20,7 @@
     <aside class="app-nav">
       <div class="app-nav-brand">
         <div class="brand-copy">
-          <h1 class="brand">Stützli</h1>
+          <h1 class="brand">Stutzli</h1>
           <p class="brand-kicker">Agent Workspace</p>
         </div>
         <button id="toggle-sidebar" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
@@ -55,24 +55,6 @@
     </aside>
 
     <div class="layout-main">
-      <header class="topbar glass-panel">
-        <div class="topbar-brand-row">
-          <span id="active-view-title" class="topbar-brand">Stützli</span>
-        </div>
-
-        <div id="default-toolbar" class="topbar-utility">
-          <button id="toggle-inspector" class="icon-button panel-toggle-button" type="button" aria-label="Toggle calendar" title="Calendar">
-            <span class="material-symbols-outlined">calendar_today</span>
-          </button>
-          <button id="toggle-storage" class="icon-button panel-toggle-button" type="button" aria-label="Toggle storage" title="Storage">
-            <span class="material-symbols-outlined">folder</span>
-          </button>
-          <button id="toggle-automations" class="icon-button panel-toggle-button" type="button" aria-label="Toggle automations" title="Automations">
-            <span class="material-symbols-outlined">automation</span>
-          </button>
-        </div>
-      </header>
-
       <main class="app-views">
         <section id="view-dashboard" class="app-view" data-view="dashboard">
           <div class="dashboard-shell">
@@ -95,7 +77,7 @@
               <p class="section-title">Next Steps</p>
               <ul class="dashboard-list">
                 <li><span class="material-symbols-outlined">description</span><span id="dashboard-report-label">Generate monthly report for --</span></li>
-                <li><span class="material-symbols-outlined">forum</span><span>Ask Stützli about policy updates</span></li>
+                <li><span class="material-symbols-outlined">forum</span><span>Ask Stutzli about policy updates</span></li>
                 <li><span class="material-symbols-outlined">event_upcoming</span><span>Review today's focus blocks</span></li>
               </ul>
               <div class="dashboard-actions">
@@ -110,6 +92,20 @@
           <div class="app-shell">
             <main class="main-content">
               <section class="calendar-shell glass-panel">
+                <div class="workspace-panel-header">
+                  <h2 class="workspace-panel-title">Calendar</h2>
+                  <div class="workspace-panel-switches" role="group" aria-label="Workspace panels">
+                    <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
+                      <span class="material-symbols-outlined">calendar_today</span>
+                    </button>
+                    <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
+                      <span class="material-symbols-outlined">folder</span>
+                    </button>
+                    <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations">
+                      <span class="material-symbols-outlined">automation</span>
+                    </button>
+                  </div>
+                </div>
                 <div id="calendar-toolbar" class="calendar-panel-toolbar">
                   <div class="view-switch" role="group" aria-label="Calendar view">
                     <button id="view-month" class="view-button" type="button" data-view="dayGridMonth">Month</button>
@@ -194,7 +190,7 @@
                 <ul class="legend-list">
                   <li><span class="legend-chip assistant"></span><span>Assistant</span></li>
                   <li><span class="legend-chip transport"></span><span>Transport</span></li>
-                  <li><span class="legend-chip other"></span><span>Therapie</span></li>
+                  <li><span class="legend-chip other"></span><span>Therapy</span></li>
                 </ul>
               </section>
             </aside>
@@ -204,27 +200,27 @@
         <section id="view-adviser" class="app-view is-active" data-view="adviser">
           <div id="adviser-shell" class="adviser-shell is-welcome">
             <div id="chat-welcome" class="chat-welcome">
-              <h2>Wie kann ich dir helfen?</h2>
+              <h2>How can I help you?</h2>
             </div>
             <section id="chat-thread" class="chat-thread glass-panel" aria-live="polite">
             </section>
 
             <div class="chat-chips">
-              <button class="chat-chip" type="button" data-chat-prompt="Termin im Kalendar eintragen">Termin im Kalendar eintragen</button>
-              <button class="chat-chip" type="button" data-chat-prompt="Lade ein dokuemnt hoch">Lade ein dokuemnt hoch</button>
-              <button class="chat-chip" type="button" data-chat-prompt="Erstelle ein Automatisierung">Erstelle ein Automatisierung</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Add an appointment to the calendar">Add an appointment to the calendar</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Upload a document">Upload a document</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Create an automation">Create an automation</button>
             </div>
 
             <form id="adviser-form" class="chat-input-wrap glass-panel">
               <div class="chat-composer-row">
-                <button id="chat-attach-button" class="chat-icon-button" type="button" aria-label="Dateien und mehr hinzuf&#252;gen" title="Dateien und mehr hinzuf&#252;gen">
+                <button id="chat-attach-button" class="chat-icon-button" type="button" aria-label="Add files and more" title="Add files and more">
                   <span class="material-symbols-outlined">attach_file</span>
                 </button>
-                <button id="chat-qr-button" class="chat-icon-button" type="button" aria-label="Dateien einscannen und hochladen" title="Dateien einscannen und hochladen">
+                <button id="chat-qr-button" class="chat-icon-button" type="button" aria-label="Scan and upload files" title="Scan and upload files">
                   <span class="material-symbols-outlined">qr_code_2</span>
                 </button>
                 <input id="chat-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,.docx" multiple />
-                <input id="adviser-input" type="text" maxlength="500" placeholder="Ask Stützli anything about your case..." />
+                <input id="adviser-input" type="text" maxlength="500" placeholder="Ask Stutzli anything about your case..." />
                 <div class="chat-voice-waveform" aria-hidden="true">
                   <span></span><span></span><span></span><span></span><span></span><span></span>
                   <span></span><span></span><span></span><span></span><span></span><span></span>
@@ -248,7 +244,7 @@
                 <p id="chat-attachment-status" class="chat-attachment-status" role="status"></p>
               </div>
             </form>
-            <p class="adviser-footnote">Stützli AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
+            <p class="adviser-footnote">Stutzli AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
           </div>
         </section>
 
@@ -312,15 +308,29 @@
 
         <section id="view-reports" class="app-view" data-view="reports">
           <div class="reports-shell">
+            <div class="workspace-panel-header">
+              <h2 class="workspace-panel-title">Storage</h2>
+              <div class="workspace-panel-switches" role="group" aria-label="Workspace panels">
+                <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
+                  <span class="material-symbols-outlined">calendar_today</span>
+                </button>
+                <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
+                  <span class="material-symbols-outlined">folder</span>
+                </button>
+                <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations">
+                  <span class="material-symbols-outlined">automation</span>
+                </button>
+              </div>
+            </div>
             <article class="reports-card glass-panel invoices-card">
               <details class="reports-section" open>
                 <summary class="reports-section-summary">
                   <div class="reports-section-copy">
-                    <p class="section-title">Datei hochladen</p>
-                    <p class="muted-copy">Option 1 fuer Drag-and-Drop, Option 2 fuer Upload per Handy-Scan.</p>
+                    <p class="section-title">Upload files</p>
+                    <p class="muted-copy">Option 1 for drag and drop, option 2 for upload by phone scan.</p>
                   </div>
                   <div class="reports-section-meta">
-                    <span class="reports-section-pill">2 Optionen</span>
+                    <span class="reports-section-pill">2 options</span>
                     <span class="material-symbols-outlined reports-section-chevron" aria-hidden="true">expand_more</span>
                   </div>
                 </summary>
@@ -357,7 +367,7 @@
                 <summary class="reports-section-summary">
                   <div class="reports-section-copy">
                     <p class="section-title">Document Database</p>
-                    <p class="muted-copy">Neue Uploads werden direkt zugeordnet, orange markiert und koennen per Haken bestaetigt oder per Drag-and-drop verschoben werden.</p>
+                    <p class="muted-copy">New uploads are assigned immediately, highlighted in orange, and can be confirmed with a checkmark or moved by drag and drop.</p>
                   </div>
                   <div class="reports-section-meta">
                     <span class="document-count"><span id="documents-total-count">0</span><span id="documents-total-label">documents</span></span>
@@ -375,12 +385,25 @@
 
         <section id="view-automations" class="app-view" data-view="automations">
           <div class="panel-shell automations-panel-shell">
-            <div class="panel-header">
+            <div class="workspace-panel-header">
               <div>
                 <p class="eyebrow">Automations</p>
                 <h2 class="panel-title">Reminders & Drafts</h2>
               </div>
-              <span id="automation-panel-count" class="status-pill">0</span>
+              <div class="workspace-panel-header-meta">
+                <span id="automation-panel-count" class="status-pill">0</span>
+                <div class="workspace-panel-switches" role="group" aria-label="Workspace panels">
+                  <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
+                    <span class="material-symbols-outlined">calendar_today</span>
+                  </button>
+                  <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
+                    <span class="material-symbols-outlined">folder</span>
+                  </button>
+                  <button class="icon-button panel-toggle-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations">
+                    <span class="material-symbols-outlined">automation</span>
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="panel-actions">
               <button id="panel-new-automation" class="primary-button" type="button">
@@ -499,15 +522,15 @@
     <div class="modal-panel chat-qr-panel">
       <div class="modal-header">
         <div>
-          <h2 id="chat-qr-modal-title">Dateien einscannen</h2>
-          <p class="modal-subtitle">Scanne den QR-Code mit deinem Handy und lade Fotos ueber die Kamera-App hoch.</p>
+          <h2 id="chat-qr-modal-title">Scan files</h2>
+          <p class="modal-subtitle">Scan the QR code with your phone and upload photos through the camera app.</p>
         </div>
         <button class="modal-close" type="button" data-close-modal="chat-qr-modal" aria-label="Close">&times;</button>
       </div>
       <div class="chat-qr-content">
         <img id="chat-invoices-qr" class="invoices-qr chat-invoices-qr" alt="Scan QR to add documents" />
         <a id="chat-invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
-        <p id="chat-qr-status" class="upload-status" role="status">QR-Code wird geladen...</p>
+        <p id="chat-qr-status" class="upload-status" role="status">Loading QR code...</p>
       </div>
     </div>
   </div>
@@ -526,7 +549,7 @@
           <span class="voice-composer-icon material-symbols-outlined">mic</span>
         </button>
         <div class="voice-composer-body">
-          <p id="voice-composer-status" class="voice-composer-status">Tap to dictate — e.g. "Tomorrow 9 to 12 Körperpflege"</p>
+          <p id="voice-composer-status" class="voice-composer-status">Tap to dictate - e.g. "Tomorrow 9 to 12 personal care"</p>
           <div id="voice-composer-bars" class="voice-composer-bars" aria-hidden="true">
             <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
@@ -566,7 +589,7 @@
           <select id="event-category" name="category" required>
             <option value="assistant">Assistant</option>
             <option value="transport">Transport</option>
-            <option value="other">Therapie</option>
+            <option value="other">Therapy</option>
           </select>
         </label>
         <label id="event-title-field">
@@ -579,11 +602,11 @@
             <div class="transport-mode-grid">
               <button class="transport-mode-button is-active" type="button" data-transport-mode="bus_bahn">
                 <span class="transport-mode-icon material-symbols-outlined">directions_bus</span>
-                <span>Bus / Bahn</span>
+                <span>Bus / Train</span>
               </button>
               <button class="transport-mode-button" type="button" data-transport-mode="privatauto">
                 <span class="transport-mode-icon material-symbols-outlined">directions_car</span>
-                <span>Privatauto</span>
+                <span>Private car</span>
               </button>
               <button class="transport-mode-button" type="button" data-transport-mode="taxi">
                 <span class="transport-mode-icon material-symbols-outlined">local_taxi</span>
@@ -591,7 +614,7 @@
               </button>
               <button class="transport-mode-button" type="button" data-transport-mode="fahrdienst">
                 <span class="transport-mode-icon material-symbols-outlined">medical_services</span>
-                <span>Fahrdienst</span>
+                <span>Ride service</span>
               </button>
             </div>
           </div>
@@ -613,19 +636,19 @@
         </label>
         <div id="assistant-hours-fields" class="assistant-hours-fields">
           <label>
-            <span>Körperpflege</span>
+            <span>Personal care</span>
             <input data-assistant-hours="koerperpflege" type="number" min="0" step="0.1" value="0.0" />
           </label>
           <label>
-            <span>Mahlzeiten eingeben</span>
+            <span>Meal assistance</span>
             <input data-assistant-hours="mahlzeiten_eingeben" type="number" min="0" step="0.1" value="0.0" />
           </label>
           <label>
-            <span>Mahlzeiten zubereiten</span>
+            <span>Meal preparation</span>
             <input data-assistant-hours="mahlzeiten_zubereiten" type="number" min="0" step="0.1" value="0.0" />
           </label>
           <label>
-            <span>Begleitung Therapie</span>
+            <span>Therapy accompaniment</span>
             <input data-assistant-hours="begleitung_therapie" type="number" min="0" step="0.1" value="0.0" />
           </label>
         </div>
@@ -671,15 +694,15 @@
           </label>
         </div>
         <label>
-          <span>Layout pro Seite</span>
+          <span>Layout per page</span>
           <div class="pdf-layout-switch view-switch" role="group" aria-label="PDF layout">
-            <button class="view-button is-active" type="button" data-pdf-layout="weekly">Wochenansicht</button>
-            <button class="view-button" type="button" data-pdf-layout="monthly">Monatsübersicht</button>
+            <button class="view-button is-active" type="button" data-pdf-layout="weekly" aria-pressed="true">Weekly view</button>
+            <button class="view-button" type="button" data-pdf-layout="monthly" aria-pressed="false">Monthly overview</button>
           </div>
         </label>
         <div class="modal-actions">
-          <button class="secondary-button" type="button" data-close-modal="pdf-export-modal">Abbrechen</button>
-          <button id="generate-pdf-btn" class="primary-button" type="submit">PDF generieren</button>
+          <button class="secondary-button" type="button" data-close-modal="pdf-export-modal">Cancel</button>
+          <button id="generate-pdf-btn" class="primary-button" type="submit">Generate PDF</button>
         </div>
       </form>
     </div>
@@ -711,14 +734,14 @@
       <form id="report-form" class="modal-form">
         <div id="report-config-panel" class="report-config-panel">
           <div class="report-type-picker">
-          <button class="report-type-button is-active" type="button" data-report-type="assistenzbeitrag" aria-pressed="true">Assistenzbeiträge report</button>
-          <button class="report-type-button" type="button" data-report-type="transportkostenabrechnung" aria-pressed="false">Transportkostenabrechnung report</button>
+          <button class="report-type-button is-active" type="button" data-report-type="assistenzbeitrag" aria-pressed="true">Assistance contribution report</button>
+          <button class="report-type-button" type="button" data-report-type="transportkostenabrechnung" aria-pressed="false">Transport cost report</button>
         </div>
         <label>
           <span>Reporting month</span>
           <select id="report-month" name="month" required></select>
         </label>
-        <p class="muted-copy">Select one or both report types. Assistenzbeiträge uses saved profile data and assistant hours from calendar entries for the selected month.</p>
+        <p class="muted-copy">Select one or both report types. The assistance contribution report uses saved profile data and assistant hours from calendar entries for the selected month.</p>
         <div class="modal-actions">
           <button class="secondary-button" type="button" data-close-modal="report-modal">Cancel</button>
           <button id="submit-report" class="primary-button" type="submit">Generate PDF</button>
@@ -756,7 +779,7 @@
           <span class="material-symbols-outlined">event_repeat</span>
           <span class="automation-preset-text">
             <strong>Month-end report</strong>
-            <span>Auto-generate Assistenzbeitrag on the last day</span>
+            <span>Auto-generate the assistance contribution report on the last day</span>
           </span>
         </button>
         <button class="automation-preset" type="button" data-preset="weekly_review">
@@ -785,7 +808,7 @@
             <span>Action</span>
             <select id="automation-action" name="action">
               <option value="notify">Notify only</option>
-              <option value="generate_assistenzbeitrag">Generate Assistenzbeitrag report</option>
+              <option value="generate_assistenzbeitrag">Generate assistance contribution report</option>
             </select>
           </label>
           <label>

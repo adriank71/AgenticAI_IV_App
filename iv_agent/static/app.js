@@ -7,7 +7,7 @@ const categoryClassMap = {
 const categoryLabelMap = {
   assistant: "Assistant",
   transport: "Transport",
-  other: "Therapie",
+  other: "Therapy",
 };
 
 const categorySubtitleMap = {
@@ -17,22 +17,22 @@ const categorySubtitleMap = {
 };
 
 const assistantHourFieldLabels = {
-  koerperpflege: "Koerperpflege",
-  mahlzeiten_eingeben: "Mahlzeiten eingeben",
-  mahlzeiten_zubereiten: "Mahlzeiten zubereiten",
-  begleitung_therapie: "Begleitung Therapie",
+  koerperpflege: "Personal care",
+  mahlzeiten_eingeben: "Meal assistance",
+  mahlzeiten_zubereiten: "Meal preparation",
+  begleitung_therapie: "Therapy accompaniment",
 };
 
 const reportTypeLabelMap = {
-  assistenzbeitrag: "Assistenzbeitraege report",
-  transportkostenabrechnung: "Transportkostenabrechnung report",
+  assistenzbeitrag: "Assistance contribution report",
+  transportkostenabrechnung: "Transport cost report",
 };
 const documentBucketOrder = ["Stiftung", "TixiTaxi", "IV", "Versicherung"];
 
 const appViewTitleMap = {
   dashboard: "Dashboard",
   calendar: "Calendar",
-  adviser: "Stützli",
+  adviser: "Adviser",
   community: "Community",
   reports: "Storage",
   automations: "Automations",
@@ -162,9 +162,7 @@ const state = {
 const elements = {
   layoutShell: document.querySelector(".layout-shell"),
   sidebarToggle: document.getElementById("toggle-sidebar"),
-  inspectorToggle: document.getElementById("toggle-inspector"),
-  storageToggle: document.getElementById("toggle-storage"),
-  automationsToggle: document.getElementById("toggle-automations"),
+  panelSwitchButtons: document.querySelectorAll("[data-workspace-panel]"),
   monthPicker: document.getElementById("month-picker"),
   heading: document.getElementById("calendar-heading"),
   hoursValue: document.getElementById("hours-value"),
@@ -218,15 +216,13 @@ const elements = {
   confirmDelete: document.getElementById("confirm-delete"),
   cancelDelete: document.getElementById("cancel-delete"),
   editEvent: document.getElementById("edit-event"),
-  viewButtons: document.querySelectorAll(".view-button"),
+  viewButtons: document.querySelectorAll("[data-view]"),
   focusList: document.getElementById("focus-list"),
   focusCountPill: document.getElementById("focus-count-pill"),
   generateReport: document.getElementById("generate-report"),
   navLinks: document.querySelectorAll(".nav-link"),
   viewSections: document.querySelectorAll(".app-view"),
-  activeViewTitle: document.getElementById("active-view-title"),
   calendarToolbar: document.getElementById("calendar-toolbar"),
-  defaultToolbar: document.getElementById("default-toolbar"),
   dashboardHoursValue: document.getElementById("dashboard-hours-value"),
   dashboardEventsValue: document.getElementById("dashboard-events-value"),
   dashboardAssistantValue: document.getElementById("dashboard-assistant-value"),
@@ -485,10 +481,10 @@ function formatEventSubtitle(event) {
     if (event.transport_mode) {
       parts.push(
         {
-          bus_bahn: "Bus / Bahn",
-          privatauto: "Privatauto",
+          bus_bahn: "Bus / Train",
+          privatauto: "Private car",
           taxi: "Taxi",
-          fahrdienst: "Fahrdienst",
+          fahrdienst: "Ride service",
         }[event.transport_mode] || event.transport_mode
       );
     }
@@ -1078,29 +1074,15 @@ function syncWorkspaceLayout() {
     }
   }
 
-  if (elements.inspectorToggle) {
-    const calendarOpen = panelOpen && state.activeAppView === "calendar";
-    elements.inspectorToggle.setAttribute("aria-expanded", String(calendarOpen));
-    elements.inspectorToggle.classList.toggle("is-active", calendarOpen);
-  }
-
-  if (elements.storageToggle) {
-    const storageOpen = panelOpen && state.activeAppView === "reports";
-    elements.storageToggle.setAttribute("aria-expanded", String(storageOpen));
-    elements.storageToggle.classList.toggle("is-active", storageOpen);
-  }
-
-  if (elements.automationsToggle) {
-    const automationsOpen = panelOpen && state.activeAppView === "automations";
-    elements.automationsToggle.setAttribute("aria-expanded", String(automationsOpen));
-    elements.automationsToggle.classList.toggle("is-active", automationsOpen);
-  }
+  elements.panelSwitchButtons.forEach((button) => {
+    const panelName = button.dataset.workspacePanel || "";
+    const isActive = panelOpen && state.activeAppView === panelName;
+    button.setAttribute("aria-expanded", String(isActive));
+    button.classList.toggle("is-active", isActive);
+  });
 
   if (elements.calendarToolbar) {
     elements.calendarToolbar.classList.toggle("hidden", state.activeAppView !== "calendar" || !panelOpen);
-  }
-  if (elements.defaultToolbar) {
-    elements.defaultToolbar.classList.remove("hidden");
   }
 }
 
@@ -1307,14 +1289,8 @@ async function switchAppView(viewName) {
   });
   syncWorkspaceLayout();
 
-  if (elements.activeViewTitle) {
-    elements.activeViewTitle.textContent = appViewTitleMap[viewName] || "Stützli";
-  }
   if (elements.calendarToolbar) {
     elements.calendarToolbar.classList.toggle("hidden", viewName !== "calendar" || state.inspectorCollapsed);
-  }
-  if (elements.defaultToolbar) {
-    elements.defaultToolbar.classList.remove("hidden");
   }
 
   if (viewName === "calendar") {
@@ -1664,7 +1640,7 @@ function getVoiceContext(target) {
     button: elements.voiceComposerButton,
     statusEl: elements.voiceComposerStatus,
     transcriptEl: elements.voiceComposerTranscript,
-    idleStatus: 'Tap to dictate — e.g. "Tomorrow 9 to 12 Körperpflege"',
+    idleStatus: 'Tap to dictate - e.g. "Tomorrow 9 to 12 personal care"',
     recordingStatus: "Listening… tap mic again to stop",
     processingStatus: "Transcribing & extracting fields…",
   };
@@ -2444,11 +2420,24 @@ function initCalendar() {
 
 let pdfExportLayout = "weekly";
 
+function setPdfExportLayout(layout, root = document) {
+  const normalizedLayout = layout === "monthly" ? "monthly" : "weekly";
+  const buttons = root.querySelectorAll("[data-pdf-layout]");
+  pdfExportLayout = normalizedLayout;
+
+  buttons.forEach((button) => {
+    const isActive = button.dataset.pdfLayout === normalizedLayout;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
 function openPdfExportModal() {
   const fromInput = document.getElementById("pdf-export-from");
   const toInput = document.getElementById("pdf-export-to");
   if (fromInput && !fromInput.value) fromInput.value = state.currentMonth;
   if (toInput && !toInput.value) toInput.value = state.currentMonth;
+  setPdfExportLayout(pdfExportLayout);
   openModal("pdf-export-modal", document.getElementById("export-calendar-pdf"));
 }
 
@@ -2456,11 +2445,10 @@ function initPdfExportModal() {
   const form = document.getElementById("pdf-export-form");
   if (!form) return;
 
+  setPdfExportLayout(pdfExportLayout, form);
   form.querySelectorAll("[data-pdf-layout]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      form.querySelectorAll("[data-pdf-layout]").forEach((b) => b.classList.remove("is-active"));
-      btn.classList.add("is-active");
-      pdfExportLayout = btn.dataset.pdfLayout;
+      setPdfExportLayout(btn.dataset.pdfLayout, form);
     });
   });
 
@@ -2598,11 +2586,11 @@ function buildMonthlyPdfBody(eventsByDate, fromMonth, toMonth) {
 
   return months.map((month) => {
     const [y, m] = month.split("-").map(Number);
-    const heading = new Date(y, m - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+    const heading = new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
     const days = Object.keys(eventsByDate).filter((d) => d.startsWith(month)).sort();
     if (!days.length) {
-      return `<div class="mb"><div class="mh">${heading}</div><p class="none">Keine Termine.</p></div>`;
+      return `<div class="mb"><div class="mh">${heading}</div><p class="none">No appointments.</p></div>`;
     }
 
     const rows = days.flatMap((date) => {
@@ -2628,7 +2616,7 @@ function buildMonthlyPdfBody(eventsByDate, fromMonth, toMonth) {
     return `<div class="mb">
       <div class="mh">${heading}</div>
       <table>
-        <thead><tr><th>Datum</th><th>Tag</th><th>Kategorie</th><th>Zeit</th><th>Titel</th><th>Details</th></tr></thead>
+        <thead><tr><th>Date</th><th>Day</th><th>Category</th><th>Time</th><th>Title</th><th>Details</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
@@ -2637,7 +2625,7 @@ function buildMonthlyPdfBody(eventsByDate, fromMonth, toMonth) {
 
 function buildPdfDocument(body, title, layout) {
   const pageSize = layout === "weekly" ? "A4 landscape" : "A4 portrait";
-  return `<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <title>${escapeHtml(title)}</title>
 <style>
 @page { size: ${pageSize}; margin: 12mm 14mm; }
@@ -2690,9 +2678,9 @@ async function generateAndPrintCalendarPdf(fromMonth, toMonth, layout) {
 
   const [fy, fm] = fromMonth.split("-").map(Number);
   const [ty, tm] = toMonth.split("-").map(Number);
-  const fromLabel = new Date(fy, fm - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" });
-  const toLabel = fromMonth === toMonth ? "" : ` – ${new Date(ty, tm - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" })}`;
-  const title = `Kalender ${fromLabel}${toLabel}`;
+  const fromLabel = new Date(fy, fm - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const toLabel = fromMonth === toMonth ? "" : ` – ${new Date(ty, tm - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" })}`;
+  const title = `Calendar ${fromLabel}${toLabel}`;
 
   const body = layout === "weekly"
     ? buildWeeklyPdfBody(eventsByDate, fromMonth, toMonth)
@@ -2700,7 +2688,7 @@ async function generateAndPrintCalendarPdf(fromMonth, toMonth, layout) {
 
   const html = buildPdfDocument(body, title, layout);
   const win = window.open("", "_blank");
-  if (!win) { alert("Bitte erlaube Pop-ups für diese Seite."); return; }
+  if (!win) { alert("Please allow pop-ups for this page."); return; }
   win.document.write(html);
   win.document.close();
 }
@@ -3048,7 +3036,7 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
 
   const meta = document.createElement("span");
   meta.className = "chat-meta";
-  meta.textContent = role === "user" ? "You" : "Stützli";
+  meta.textContent = role === "user" ? "You" : "Stutzli";
   bubble.appendChild(meta);
 
   row.appendChild(avatar);
@@ -3107,8 +3095,8 @@ function buildChatArtifactList(artifacts) {
   const hasDocuments = files.some((artifact) => artifact.type === "document");
   const hasBundles = files.some((artifact) => artifact.type === "document_bundle");
   title.textContent = hasReports && hasDocuments
-    ? "Dateien"
-    : (hasBundles ? (files.length === 1 ? "Download-Paket" : "Dateien") : (hasReports ? (files.length === 1 ? "Report" : "Reports") : (files.length === 1 ? "Dokument" : "Dokumente")));
+    ? "Files"
+    : (hasBundles ? (files.length === 1 ? "Download bundle" : "Files") : (hasReports ? (files.length === 1 ? "Report" : "Reports") : (files.length === 1 ? "Document" : "Documents")));
   card.appendChild(title);
 
   files.slice(0, 8).forEach((artifact) => {
@@ -3124,12 +3112,12 @@ function buildChatArtifactList(artifacts) {
     const body = document.createElement("div");
     body.className = "chat-document-body";
     const name = document.createElement("strong");
-    name.textContent = artifact.title || artifact.file_name || "Dokument";
+    name.textContent = artifact.title || artifact.file_name || "Document";
     body.appendChild(name);
 
     const metaParts = [
       artifact.type === "document_bundle" ? "ZIP" : "",
-      artifact.document_ids && artifact.document_ids.length ? `${artifact.document_ids.length} Dokumente` : "",
+      artifact.document_ids && artifact.document_ids.length ? `${artifact.document_ids.length} documents` : "",
       artifact.type === "report" ? artifact.month : "",
       artifact.report_type,
       artifact.storage_bucket,
@@ -3179,7 +3167,7 @@ function buildChatArtifactList(artifacts) {
   if (files.length > 8) {
     const more = document.createElement("span");
     more.className = "chat-tool-meta";
-    more.textContent = `+${files.length - 8} weitere Dateien`;
+    more.textContent = `+${files.length - 8} more files`;
     card.appendChild(more);
   }
 
@@ -3220,7 +3208,7 @@ function buildPendingActionsCard(actions) {
   card.className = "chat-action-card";
   const title = document.createElement("p");
   title.className = "chat-policy-title";
-  title.textContent = "Bestaetigung ausstehend";
+  title.textContent = "Confirmation pending";
   card.appendChild(title);
 
   actions.forEach((action) => {
@@ -3239,7 +3227,7 @@ function buildPendingActionsCard(actions) {
     const button = document.createElement("button");
     button.className = "secondary-button";
     button.type = "button";
-    button.textContent = "Bestaetigen";
+    button.textContent = "Confirm";
     button.addEventListener("click", () => confirmPendingAgentAction(action.action_id, button));
 
     row.appendChild(copy);
@@ -3375,7 +3363,7 @@ async function addChatAttachmentFiles(fileList) {
   }
 
   setChatAttachmentStatus(
-    filesToRead.length === 1 ? "Datei wird vorbereitet..." : "Dateien werden vorbereitet..."
+    filesToRead.length === 1 ? "Preparing file..." : "Preparing files..."
   );
 
   try {
@@ -3392,7 +3380,7 @@ async function addChatAttachmentFiles(fileList) {
       });
     }
     setChatAttachmentStatus(
-      rejected.length ? rejected.join(" ") : `${state.chatAttachments.length} Datei${state.chatAttachments.length === 1 ? "" : "en"} angehaengt. Upload startet beim Senden.`,
+      rejected.length ? rejected.join(" ") : `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached. Upload starts when you send.`,
       rejected.length ? "error" : "success"
     );
   } catch (error) {
@@ -3407,7 +3395,7 @@ async function addChatAttachmentFiles(fileList) {
 function removeChatAttachment(attachmentId) {
   state.chatAttachments = state.chatAttachments.filter((attachment) => attachment.id !== attachmentId);
   setChatAttachmentStatus(
-    state.chatAttachments.length ? `${state.chatAttachments.length} Datei${state.chatAttachments.length === 1 ? "" : "en"} angehaengt. Upload startet beim Senden.` : ""
+    state.chatAttachments.length ? `${state.chatAttachments.length} file${state.chatAttachments.length === 1 ? "" : "s"} attached. Upload starts when you send.` : ""
   );
 }
 
@@ -3496,7 +3484,7 @@ async function openChatQrModal(triggerElement) {
 
   const sid = getInvoicesSessionId();
   if (elements.chatQrStatus) {
-    elements.chatQrStatus.textContent = "QR-Code wird geladen...";
+    elements.chatQrStatus.textContent = "Loading QR code...";
     elements.chatQrStatus.dataset.variant = "";
   }
   if (elements.chatQrImage) {
@@ -3509,11 +3497,11 @@ async function openChatQrModal(triggerElement) {
     const response = await fetch(`/api/invoices/${encodeURIComponent(sid)}/scan-url`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(data.error || "QR-Code konnte nicht geladen werden.");
+      throw new Error(data.error || "Could not load QR code.");
     }
     const url = data.camera_url || data.scan_url;
     if (!url) {
-      throw new Error("QR-Code konnte nicht geladen werden.");
+      throw new Error("Could not load QR code.");
     }
     if (elements.chatQrImage) {
       elements.chatQrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=420x420&margin=8&data=${encodeURIComponent(url)}`;
@@ -3524,12 +3512,12 @@ async function openChatQrModal(triggerElement) {
       elements.chatCameraLink.title = url;
     }
     if (elements.chatQrStatus) {
-      elements.chatQrStatus.textContent = "Bereit zum Scannen.";
+      elements.chatQrStatus.textContent = "Ready to scan.";
       elements.chatQrStatus.dataset.variant = "success";
     }
   } catch (error) {
     if (elements.chatQrStatus) {
-      elements.chatQrStatus.textContent = error.message || "QR-Code konnte nicht geladen werden.";
+      elements.chatQrStatus.textContent = error.message || "Could not load QR code.";
       elements.chatQrStatus.dataset.variant = "error";
     }
   } finally {
@@ -3539,7 +3527,7 @@ async function openChatQrModal(triggerElement) {
 
 function normalizeChatSession(rawChat, index = 0) {
   const now = new Date().toISOString();
-  const fallbackTitle = index === 0 ? "Stützli planning" : `Chat ${index + 1}`;
+  const fallbackTitle = index === 0 ? "Stutzli planning" : `Chat ${index + 1}`;
   const messages = Array.isArray(rawChat && rawChat.messages)
     ? rawChat.messages
       .map((message) => ({
@@ -3567,8 +3555,8 @@ function normalizeChatSession(rawChat, index = 0) {
 function seedChatSessions() {
   const now = new Date().toISOString();
   return [
-    "Stützli planning",
-    "Assistenzbeitrag report",
+    "Stutzli planning",
+    "Assistance contribution report",
     "Transport receipts",
     "Calendar cleanup",
   ].map((title, index) => normalizeChatSession({
@@ -3794,9 +3782,6 @@ function renameChatSession(chatId) {
   state.openThreadMenuId = "";
   saveChatSessions();
   renderChatList();
-  if (chat.id === state.activeChatId && elements.activeViewTitle) {
-    elements.activeViewTitle.textContent = chat.title;
-  }
 }
 
 function deleteChatSession(chatId) {
@@ -3832,10 +3817,6 @@ function switchChatSession(chatId) {
   }
   setActiveChatSession(chatId);
   switchAppView("adviser").catch(() => {});
-  if (elements.activeViewTitle) {
-    const activeChat = getActiveChatSession();
-    elements.activeViewTitle.textContent = activeChat ? activeChat.title : appViewTitleMap.adviser;
-  }
   if (elements.adviserInput) {
     elements.adviserInput.focus();
   }
@@ -4092,7 +4073,7 @@ async function confirmPendingAgentAction(actionId, button) {
   }
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = "Bestaetige";
+  button.textContent = "Confirm";
   try {
     const payload = await apiFetch(`/api/agent/actions/${encodeURIComponent(actionId)}/confirm`, {
       method: "POST",
@@ -4107,13 +4088,13 @@ async function confirmPendingAgentAction(actionId, button) {
         },
       }),
     });
-    button.textContent = "Bestaetigt";
+    button.textContent = "Confirmed";
     const confirmedPanelIntent = detectPanelIntentFromConfirmedAction(payload);
     const artifacts = Array.isArray(payload && payload.artifacts) ? payload.artifacts : [];
     if (payload && payload.result) {
       const messageText = payload.reports_generated
-        ? "Bericht erstellt. Der Download ist unten angehaengt."
-        : "Bestaetigt. Ich habe die Aktion ausgefuehrt.";
+        ? "Report generated. The download is attached below."
+        : "Confirmed. I completed the action.";
       const extras = artifacts.length ? { artifacts } : {};
       appendChatMessage("bot", messageText, null, extras);
       pushChatHistory("assistant", messageText, extras);
@@ -4153,7 +4134,7 @@ async function submitAdviserPrompt(rawPrompt) {
   state.chatAbortController = chatAbortController;
   setChatPending(true);
   if (attachmentPayload.length) {
-    setChatAttachmentStatus("Datei wird hochgeladen...");
+    setChatAttachmentStatus("Uploading file...");
   }
 
   try {
@@ -4201,7 +4182,7 @@ async function submitAdviserPrompt(rawPrompt) {
     }
 
     if (attachmentPayload.length) {
-      setChatAttachmentStatus("Dokument wird analysiert...");
+      setChatAttachmentStatus("Analyzing document...");
       clearChatAttachments("Zusammenfassung fertig.");
     }
     if (Array.isArray(data.uploaded_documents) && data.uploaded_documents.length) {
@@ -4401,10 +4382,10 @@ function handleCommunitySubmit(event) {
 
 const AUTOMATION_PRESETS = {
   month_end_report: {
-    title: "Generate Assistenzbeitrag at month-end",
+    title: "Generate assistance contribution report at month-end",
     schedule: "month_end",
     action: "generate_assistenzbeitrag",
-    note: "Auto-generate the Assistenzbeitrag PDF on the last day of every month.",
+    note: "Auto-generate the assistance contribution PDF on the last day of every month.",
   },
   weekly_review: {
     title: "Weekly entry review",
@@ -4430,7 +4411,7 @@ const AUTOMATION_SCHEDULE_LABELS = {
 
 const AUTOMATION_ACTION_LABELS = {
   notify: "Reminder",
-  generate_assistenzbeitrag: "Generate Assistenzbeitrag",
+  generate_assistenzbeitrag: "Generate assistance contribution report",
 };
 
 function applyAutomationPreset(presetKey) {
@@ -4827,15 +4808,9 @@ function bindEvents() {
   if (elements.sidebarToggle) {
     elements.sidebarToggle.addEventListener("click", toggleSidebar);
   }
-  if (elements.inspectorToggle) {
-    elements.inspectorToggle.addEventListener("click", toggleInspector);
-  }
-  if (elements.storageToggle) {
-    elements.storageToggle.addEventListener("click", () => toggleWorkspacePanel("reports"));
-  }
-  if (elements.automationsToggle) {
-    elements.automationsToggle.addEventListener("click", () => toggleWorkspacePanel("automations"));
-  }
+  elements.panelSwitchButtons.forEach((button) => {
+    button.addEventListener("click", () => toggleWorkspacePanel(button.dataset.workspacePanel || ""));
+  });
   if (elements.refreshStorageBrowserButton) {
     elements.refreshStorageBrowserButton.addEventListener("click", () => refreshStorageBrowser({ force: true }));
   }
@@ -4898,9 +4873,6 @@ function bindEvents() {
     elements.newThreadButton.addEventListener("click", () => {
       createNewChatSession();
       switchAppView("adviser").catch(() => {});
-      if (elements.activeViewTitle) {
-        elements.activeViewTitle.textContent = appViewTitleMap.adviser;
-      }
       if (elements.adviserInput) {
         elements.adviserInput.focus();
       }
@@ -5226,7 +5198,7 @@ async function refreshDocumentBucketBoard(options = {}) {
     renderDocumentBucketBoard();
     return;
   }
-  elements.documentBrowserStatus.textContent = "Document buckets werden geladen...";
+  elements.documentBrowserStatus.textContent = "Loading document buckets...";
   elements.documentBrowserStatus.dataset.variant = "";
   try {
     state.documentsBrowser = await apiFetch(`/api/documents/browser?profile_id=${encodeURIComponent(getActiveProfileId())}`, {
@@ -5236,7 +5208,7 @@ async function refreshDocumentBucketBoard(options = {}) {
     state.documentsBrowserFetchedAt = Date.now();
     renderDocumentBucketBoard();
   } catch (error) {
-    elements.documentBrowserStatus.textContent = error.message || "Document buckets konnten nicht geladen werden.";
+    elements.documentBrowserStatus.textContent = error.message || "Could not load document buckets.";
     elements.documentBrowserStatus.dataset.variant = "error";
   }
 }
@@ -5342,7 +5314,7 @@ function applyDocumentBucketOptimistic(documentId, targetBucket) {
   movedDocument.suggested_bucket = targetBucket;
   movedDocument.bucket_confirmed = true;
   movedDocument.bucket_confirmed_at = new Date().toISOString();
-  movedDocument.bucket_reason = movedDocument.bucket_reason || `Bucket ${targetBucket} wurde manuell bestaetigt.`;
+  movedDocument.bucket_reason = movedDocument.bucket_reason || `Bucket ${targetBucket} was confirmed manually.`;
   if (sourceBucket === targetBucket) {
     clearRecentDocument(documentId);
   }
@@ -5392,8 +5364,8 @@ function renderDocumentBucketBoardLegacyUnused() {
   }
   if (elements.documentBrowserStatus) {
     elements.documentBrowserStatus.textContent = totalUnconfirmed
-      ? `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} noch nicht bestaetigt.`
-      : `${buckets.length} Buckets, ${totalCount} Dokumente.`;
+      ? `${buckets.length} buckets, ${totalCount} documents, ${totalUnconfirmed} not yet confirmed.`
+      : `${buckets.length} buckets, ${totalCount} documents.`;
     elements.documentBrowserStatus.dataset.variant = "";
   }
 
@@ -5417,9 +5389,9 @@ function renderDocumentBucketBoardLegacyUnused() {
         return;
       }
       try {
-        await saveDocumentBucketChange(documentId, targetBucket, `Per Drag-and-drop nach ${targetBucket} verschoben.`);
+        await saveDocumentBucketChange(documentId, targetBucket, `Moved to ${targetBucket} by drag and drop.`);
       } catch (error) {
-        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+        showError(error.message || "Bucket change failed.");
       }
     });
   });
@@ -5444,10 +5416,10 @@ function renderDocumentBucketBoardLegacyUnused() {
         await saveDocumentBucketChange(
           documentId,
           targetBucket,
-          `Bucket ${targetBucket} wurde bestaetigt.`
+          `Bucket ${targetBucket} was confirmed.`
         );
       } catch (error) {
-        showError(error.message || "Bestaetigung fehlgeschlagen.");
+        showError(error.message || "Confirmation failed.");
       } finally {
         button.disabled = false;
       }
@@ -5459,13 +5431,13 @@ function renderDocumentBucketColumnLegacyUnused(bucket) {
   const documents = Array.isArray(bucket.documents) ? bucket.documents : [];
   const cards = documents.length
     ? documents.map((document) => renderDocumentBucketCard(document)).join("")
-    : `<div class="document-bucket-empty">Noch keine Dokumente in diesem Bucket.</div>`;
+    : `<div class="document-bucket-empty">No documents in this bucket yet.</div>`;
   return `
     <section class="document-bucket-column" data-document-bucket-column="${escapeHtml(bucket.id || bucket.name || "")}">
       <div class="document-bucket-head">
         <div>
           <h3>${escapeHtml(bucket.name || bucket.id || "Bucket")}</h3>
-          <p>${Number(bucket.confirmed_count || 0)} bestaetigt · ${Number(bucket.unconfirmed_count || 0)} offen</p>
+          <p>${Number(bucket.confirmed_count || 0)} confirmed · ${Number(bucket.unconfirmed_count || 0)} open</p>
         </div>
         <span class="document-count">${Number(bucket.count || 0)}</span>
       </div>
@@ -5481,7 +5453,7 @@ function renderDocumentBucketCardLegacyUnused(document) {
     ? `<img class="document-thumb" src="${escapeHtml(fileUrl)}" alt="${escapeHtml(document.file_name || "Document")}" loading="lazy" />`
     : `<span class="document-file-icon material-symbols-outlined">${String(document.content_type || "").startsWith("application/pdf") ? "picture_as_pdf" : "draft"}</span>`;
   const statusClass = document.bucket_confirmed ? "is-confirmed" : "is-pending";
-  const statusLabel = document.bucket_confirmed ? "Bestaetigt" : "Pruefen";
+  const statusLabel = document.bucket_confirmed ? "Confirmed" : "Review";
   const bucketOptions = getDocumentBucketColumns()
     .map((bucketName) => `<option value="${escapeHtml(bucketName)}"${bucketName === document.storage_bucket ? " selected" : ""}>${escapeHtml(bucketName)}</option>`)
     .join("");
@@ -5498,7 +5470,7 @@ function renderDocumentBucketCardLegacyUnused(document) {
         <div class="document-copy">
           <span class="invoice-title">${escapeHtml(document.file_name || "Document")}</span>
           <div class="invoice-summary">${escapeHtml(summary)}</div>
-          <div class="invoice-note">${escapeHtml(document.bucket_reason || "Bucket-Vorschlag wartet auf Bestaetigung.")}</div>
+          <div class="invoice-note">${escapeHtml(document.bucket_reason || "Bucket suggestion is waiting for confirmation.")}</div>
         </div>
       </div>
       <div class="document-card-stats">
@@ -5533,8 +5505,8 @@ function renderDocumentBucketBoard() {
   }
   if (elements.documentBrowserStatus) {
     elements.documentBrowserStatus.textContent = totalUnconfirmed
-      ? `${buckets.length} Buckets, ${totalCount} Dokumente, ${totalUnconfirmed} noch nicht bestaetigt.`
-      : `${buckets.length} Buckets, ${totalCount} Dokumente.`;
+      ? `${buckets.length} buckets, ${totalCount} documents, ${totalUnconfirmed} not yet confirmed.`
+      : `${buckets.length} buckets, ${totalCount} documents.`;
     elements.documentBrowserStatus.dataset.variant = "";
   }
 
@@ -5558,9 +5530,9 @@ function renderDocumentBucketBoard() {
         return;
       }
       try {
-        await saveDocumentBucketChange(documentId, targetBucket, `Per Drag-and-drop nach ${targetBucket} verschoben.`);
+        await saveDocumentBucketChange(documentId, targetBucket, `Moved to ${targetBucket} by drag and drop.`);
       } catch (error) {
-        showError(error.message || "Bucket-Wechsel fehlgeschlagen.");
+        showError(error.message || "Bucket change failed.");
       }
     });
   });
@@ -5584,9 +5556,9 @@ function renderDocumentBucketBoard() {
       }
       button.disabled = true;
       try {
-        await saveDocumentBucketChange(documentId, targetBucket, `Bucket ${targetBucket} wurde bestaetigt.`);
+        await saveDocumentBucketChange(documentId, targetBucket, `Bucket ${targetBucket} was confirmed.`);
       } catch (error) {
-        showError(error.message || "Bestaetigung fehlgeschlagen.");
+        showError(error.message || "Confirmation failed.");
       } finally {
         button.disabled = false;
       }
@@ -5598,13 +5570,13 @@ function renderDocumentBucketColumn(bucket) {
   const documents = Array.isArray(bucket.documents) ? bucket.documents : [];
   const cards = documents.length
     ? documents.map((document) => renderDocumentBucketCard(document)).join("")
-    : `<div class="document-bucket-empty">Noch keine Dokumente in diesem Bucket.</div>`;
+    : `<div class="document-bucket-empty">No documents in this bucket yet.</div>`;
   return `
     <section class="document-bucket-column" data-document-bucket-column="${escapeHtml(bucket.id || bucket.name || "")}">
       <div class="document-bucket-head">
         <div>
           <h3>${escapeHtml(bucket.name || bucket.id || "Bucket")}</h3>
-          <p>${Number(bucket.count || 0)} Dokumente</p>
+          <p>${Number(bucket.count || 0)} documents</p>
         </div>
         <span class="document-count">${Number(bucket.count || 0)}</span>
       </div>
@@ -5619,7 +5591,7 @@ function renderDocumentBucketCard(document) {
   const iconName = contentType.startsWith("image/") ? "image" : contentType.startsWith("application/pdf") ? "picture_as_pdf" : "draft";
   const recentClass = isRecentDocument(document) ? " is-recent" : "";
   const createdLabel = formatInvoiceCaptureTime(document.created_at);
-  const title = document.file_name || "Dokument";
+  const title = document.file_name || "Document";
   const canReassignBucket = !document.raw_storage_object && Boolean(document.document_id);
   const hintParts = [];
   if (document.document_type) {
@@ -5632,8 +5604,8 @@ function renderDocumentBucketCard(document) {
   }
   const hintLabel = hintParts.join(" · ") || "Klicken zum Oeffnen";
   const confirmControl = document.bucket_confirmed || !canReassignBucket
-    ? `<span class="document-card-state is-confirmed" aria-label="Bucket bestaetigt" title="Bucket bestaetigt"><span class="material-symbols-outlined">check</span></span>`
-    : `<button type="button" class="document-card-confirm" data-document-bucket-confirm="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" aria-label="Bucket bestaetigen" title="Bucket bestaetigen"><span class="material-symbols-outlined">check</span></button>`;
+    ? `<span class="document-card-state is-confirmed" aria-label="Bucket confirmed" title="Bucket confirmed"><span class="material-symbols-outlined">check</span></span>`
+    : `<button type="button" class="document-card-confirm" data-document-bucket-confirm="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" aria-label="Confirm bucket" title="Confirm bucket"><span class="material-symbols-outlined">check</span></button>`;
   return `
     <article class="document-bucket-card${recentClass}" draggable="${canReassignBucket ? "true" : "false"}" data-document-card data-document-id="${escapeHtml(document.document_id || "")}" data-document-bucket="${escapeHtml(document.storage_bucket || "")}" title="${escapeHtml(document.bucket_reason || hintLabel)}">
       <a class="document-card-link" href="${escapeHtml(fileUrl)}" target="_blank" rel="noreferrer">

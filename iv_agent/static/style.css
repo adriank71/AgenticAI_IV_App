@@ -6099,3 +6099,193 @@ body {
   }
 }
 
+/* === Final adviser/panel layout overrides =============================== */
+
+.layout-main {
+  min-height: 100dvh;
+}
+
+.app-views {
+  height: 100dvh;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(390px, 40vw);
+  gap: 0;
+  padding: 12px 16px 16px;
+  overflow: hidden;
+}
+
+.workspace-panel-closed .app-views {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+
+#view-adviser.app-view.is-active {
+  display: block;
+  grid-column: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+#view-dashboard.app-view.is-active,
+#view-community.app-view.is-active,
+#view-settings.app-view.is-active {
+  display: block;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+.adviser-shell {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 min(7vw, 92px) 12px;
+  background: #fbfbfc;
+}
+
+.adviser-shell.is-welcome {
+  justify-content: center;
+  align-items: center;
+  padding-bottom: 14vh;
+}
+
+.adviser-shell.is-welcome .chat-welcome {
+  width: min(100%, 960px);
+}
+
+.chat-thread {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 18px 8px 10px 0;
+}
+
+.chat-row {
+  max-width: min(100%, 920px);
+}
+
+.chat-row.user {
+  width: min(78%, 760px);
+}
+
+.chat-chips,
+.chat-input-wrap {
+  width: min(100%, 960px);
+  margin: 0 auto;
+}
+
+.chat-chips {
+  justify-content: center;
+}
+
+.chat-input-wrap {
+  border-radius: 18px;
+}
+
+.app-view.is-panel-active {
+  display: block;
+  grid-column: 2;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  border-left: 1px solid #e5e7ee;
+  padding-left: 16px;
+}
+
+.workspace-panel-closed .app-view.is-panel-active {
+  display: none;
+}
+
+.workspace-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #dfe3ea;
+}
+
+.workspace-panel-title {
+  margin: 0;
+  color: #11151c;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.workspace-panel-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.workspace-panel-switches {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-panel-switches .icon-button {
+  width: 36px;
+  min-height: 36px;
+}
+
+#view-calendar .calendar-shell,
+.reports-card,
+.panel-shell,
+#view-settings .settings-panel {
+  border-radius: 8px;
+}
+
+#view-calendar .calendar-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 14px 14px 16px;
+}
+
+#view-calendar #calendar {
+  flex: 1 1 auto;
+  min-height: 520px;
+}
+
+.reports-shell {
+  min-height: 100%;
+  padding: 0 0 16px;
+}
+
+.panel-shell {
+  min-height: 100%;
+}
+
+@media (max-width: 920px) {
+  .app-views,
+  .workspace-panel-closed .app-views {
+    height: auto;
+    min-height: 100dvh;
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+
+  .app-view.is-panel-active {
+    grid-column: 1;
+    height: auto;
+    border-left: 0;
+    padding-left: 0;
+    margin-top: 16px;
+  }
+
+  .adviser-shell {
+    padding-inline: 16px;
+  }
+
+  .workspace-panel-header,
+  .workspace-panel-header-meta {
+    flex-wrap: wrap;
+  }
+}
+

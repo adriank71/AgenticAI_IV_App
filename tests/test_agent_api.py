@@ -545,7 +545,7 @@ class AgentApiTests(unittest.TestCase):
 
         self.assertIn('artifact.type === "document_bundle"', source)
         self.assertIn('artifact.type === "document_bundle" ? "folder_zip"', source)
-        self.assertIn("Download-Paket", source)
+        self.assertIn("Download bundle", source)
 
     def test_camera_capture_stores_document_when_vision_fails(self):
         uploaded_document = {
