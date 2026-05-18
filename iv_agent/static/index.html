@@ -51,6 +51,10 @@
         <button id="open-settings-view" class="profile-nav-button" type="button" aria-label="Open profile" title="Profile">
           <span class="material-symbols-outlined">account_circle</span>
         </button>
+        <a id="gmail-connect-nav" class="gmail-connect-nav-button" href="/api/mail/oauth/gmail/start" title="Gmail verbinden">
+          <span class="material-symbols-outlined">mail</span>
+          <span class="gmail-connect-nav-label">Gmail verbinden</span>
+        </a>
       </div>
     </aside>
 
@@ -173,6 +177,10 @@
               <section class="sidebar-card actions-card glass-panel">
                 <button id="open-export-modal" class="secondary-button" type="button">Export Month Plan</button>
                 <button id="generate-report" class="primary-button" type="button">Generate Report</button>
+                <button id="send-uli-reminder" class="secondary-button" type="button">
+                  <span class="material-symbols-outlined">notification_important</span>
+                  <span>Erinnerung senden</span>
+                </button>
               </section>
 
               <section class="sidebar-card automations-card glass-panel">
@@ -758,13 +766,6 @@
         <button class="modal-close" type="button" data-close-modal="mail-report-modal" aria-label="Close">&times;</button>
       </div>
       <div id="mail-report-status" class="report-status hidden" role="status"></div>
-      <div id="mail-connect-panel" class="mail-connect-panel hidden">
-        <p class="muted-copy">Kein Postfach verbunden.</p>
-        <div class="mail-connect-actions">
-          <a class="secondary-button" href="/api/mail/oauth/gmail/start">Gmail verbinden</a>
-          <a class="secondary-button" href="/api/mail/oauth/outlook/start">Outlook verbinden</a>
-        </div>
-      </div>
       <form id="mail-report-form" class="modal-form">
         <label>
           <span>Mail-Adresse</span>

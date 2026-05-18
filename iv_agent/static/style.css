@@ -5876,6 +5876,54 @@ body {
   color: #111111;
 }
 
+.gmail-connect-nav-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: #ececef;
+  color: #24292f;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.gmail-connect-nav-button .material-symbols-outlined {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.gmail-connect-nav-button:hover {
+  background: #e1e2e7;
+  color: #111111;
+}
+
+.gmail-connect-nav-button.is-connected {
+  background: #d4edda;
+  color: #1a7a3a;
+  cursor: default;
+}
+
+.gmail-connect-nav-button.is-connected:hover {
+  background: #d4edda;
+}
+
+.sidebar-collapsed .gmail-connect-nav-button {
+  width: 48px;
+  height: 48px;
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-collapsed .gmail-connect-nav-label {
+  display: none;
+}
+
 .brand {
   margin: 0;
   color: #171717;

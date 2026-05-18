@@ -192,7 +192,8 @@ const elements = {
   sendReport: document.getElementById("send-report"),
   mailReportForm: document.getElementById("mail-report-form"),
   mailReportStatus: document.getElementById("mail-report-status"),
-  mailConnectPanel: document.getElementById("mail-connect-panel"),
+  gmailConnectNav: document.getElementById("gmail-connect-nav"),
+  uliReminderButton: document.getElementById("send-uli-reminder"),
   mailReportTo: document.getElementById("mail-report-to"),
   mailReportSubject: document.getElementById("mail-report-subject"),
   submitMailReport: document.getElementById("submit-mail-report"),
@@ -2253,17 +2254,26 @@ async function loadMailStatus() {
 
 function renderMailConnectionState() {
   const connected = Boolean(state.mailStatus && state.mailStatus.connected);
-  if (elements.mailConnectPanel) {
-    elements.mailConnectPanel.classList.toggle("hidden", connected);
-  }
   if (elements.mailReportForm) {
     elements.mailReportForm.classList.toggle("hidden", !connected);
   }
   if (!connected) {
-    setMailReportStatus("Bitte zuerst Gmail oder Outlook verbinden.", "");
+    setMailReportStatus("Kein Mail-Account verbunden. Bitte zuerst Gmail verbinden (unten links im Menü).", "");
   } else {
     const provider = state.mailStatus.default_provider === "outlook" ? "Outlook" : "Gmail";
     setMailReportStatus(`${provider} ist verbunden.`, "success");
+  }
+  if (elements.gmailConnectNav) {
+    const label = elements.gmailConnectNav.querySelector(".gmail-connect-nav-label");
+    if (connected) {
+      elements.gmailConnectNav.classList.add("is-connected");
+      elements.gmailConnectNav.removeAttribute("href");
+      if (label) label.textContent = "Gmail verbunden";
+    } else {
+      elements.gmailConnectNav.classList.remove("is-connected");
+      elements.gmailConnectNav.setAttribute("href", "/api/mail/oauth/gmail/start");
+      if (label) label.textContent = "Gmail verbinden";
+    }
   }
 }
 
@@ -4993,6 +5003,9 @@ function bindEvents() {
   if (elements.mailReportForm) {
     elements.mailReportForm.addEventListener("submit", submitMailReportForm);
   }
+  if (elements.uliReminderButton) {
+    elements.uliReminderButton.addEventListener("click", sendUliReminder);
+  }
   if (elements.generateNewReport) {
     elements.generateNewReport.addEventListener("click", resetReportWorkflow);
   }
@@ -5073,6 +5086,27 @@ function bindEvents() {
   wireModalClosers();
 }
 
+async function sendUliReminder() {
+  if (!elements.uliReminderButton) return;
+  const btn = elements.uliReminderButton;
+  const originalText = btn.querySelector("span:last-child")?.textContent || "Erinnerung senden";
+  btn.disabled = true;
+  const label = btn.querySelector("span:last-child");
+  if (label) label.textContent = "Wird gesendet…";
+  try {
+    await apiFetch("/api/send-uli-reminder", { method: "POST", showLoading: false });
+    if (label) label.textContent = "Gesendet ✓";
+    setTimeout(() => {
+      btn.disabled = false;
+      if (label) label.textContent = originalText;
+    }, 3000);
+  } catch (error) {
+    showBanner(error.message || "Erinnerung konnte nicht gesendet werden.", "error");
+    btn.disabled = false;
+    if (label) label.textContent = originalText;
+  }
+}
+
 function readStartupQueryParams() {
   const params = new URLSearchParams(window.location.search || "");
   const panel = params.get("panel") || "";
@@ -5126,6 +5160,7 @@ async function initialize() {
   applyStartupReportIntent();
   tickAutomationsLazy();
   refreshAutomations().catch(() => {});
+  loadMailStatus().then(renderMailConnectionState).catch(() => {});
 }
 
 function initInvoices() {

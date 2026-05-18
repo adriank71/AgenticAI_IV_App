@@ -1453,6 +1453,34 @@ def api_mail_status():
     return jsonify(public_mail_status())
 
 
+@app.post("/api/send-uli-reminder")
+def api_send_uli_reminder():
+    current_month = utc_now().strftime("%Y-%m")
+    base_url = (os.environ.get("MAIL_OAUTH_REDIRECT_BASE_URL") or request.host_url).rstrip("/")
+    deep_link = (
+        f"{base_url}/?panel=calendar&reportModal=1"
+        f"&month={current_month}&reportTypes=assistenzbeitrag"
+    )
+    body = (
+        f"Hey Uli,\n\n"
+        f"ich sende dir nur einen kurzen Reminder, dass du den Report noch absenden musst.\n\n"
+        f"Hier ist der Link: {deep_link}\n\n"
+        f"Agentische Grüsse\n"
+        f"Stützli"
+    )
+    try:
+        result = send_plain_mail(
+            to_email="adriankoernig@gmail.com",
+            subject="Stützli Agent: Erinnerung Report ausfüllen",
+            body=body,
+        )
+        return jsonify({"ok": True, "provider": result.get("provider")})
+    except MailNotConnectedError:
+        return json_error("Kein Mail-Account verbunden. Bitte zuerst Gmail verbinden.", 400)
+    except MailServiceError as exc:
+        return json_error(str(exc), 500)
+
+
 @app.post("/api/mail/disconnect")
 def api_mail_disconnect():
     try:
