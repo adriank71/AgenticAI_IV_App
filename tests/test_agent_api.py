@@ -103,14 +103,12 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertIn("invalid file format", response.get_json()["error"])
 
-    def test_agent_chat_ignores_legacy_chat_env_when_sdk_unavailable(self):
+    def test_agent_chat_uses_orchestrator_fallback_when_sdk_unavailable(self):
         client = app_module.app.test_client()
         with isolated_pending_action_storage(), patch.dict(
             os.environ,
             {
-                "IV_AGENT_CHAT_WEBHOOK_URL": "https://example.invalid/legacy",
                 "IV_AGENT_ENABLE_EXTERNAL_KNOWLEDGE": "true",
-                "IV_AGENT_ENABLE_LEGACY_N8N_RAG": "true",
             },
             clear=False,
         ), patch.object(agent_orchestrator, "_agents_sdk_available", return_value=False):
@@ -128,7 +126,6 @@ class AgentApiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["thread_id"], "thread-test")
         self.assertIn("Orchestrator", payload["answer"])
-        self.assertNotIn("n8n", payload["answer"].lower())
         self.assertEqual(payload["pending_actions"], [])
         self.assertTrue(any(event["name"] == "calendar_snapshot" for event in payload["tool_events"]))
 
@@ -894,6 +891,44 @@ class AgentApiTests(unittest.TestCase):
             profile_id="default",
         )
 
+    def test_confirm_pending_send_report_requires_mail_fields(self):
+        client = app_module.app.test_client()
+        with isolated_pending_action_storage():
+            pending_actions = agent_orchestrator.register_pending_actions(
+                [
+                    {
+                        "type": "send_report",
+                        "title": "Report senden",
+                        "payload": {
+                            "month": "2026-05",
+                            "report_id": "rpt-1",
+                        },
+                    }
+                ],
+                thread_id="thread-test",
+                user_id="default",
+            )
+
+            with patch.object(
+                app_module,
+                "resolve_report_record",
+                return_value={
+                    "report_id": "rpt-1",
+                    "type": "assistenzbeitrag",
+                    "file_name": "Assistenzbeitrag_2026-05.pdf",
+                },
+            ):
+                response = client.post(
+                    f"/api/agent/actions/{pending_actions[0]['action_id']}/confirm",
+                    json={"thread_id": "thread-test", "profile_id": "default"},
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["error"],
+            "Empfaenger-Mailadresse und Betreff sind erforderlich.",
+        )
+
     def test_confirm_pending_storage_folder_create_executes_after_confirmation(self):
         client = app_module.app.test_client()
         with isolated_pending_action_storage():
@@ -978,20 +1013,14 @@ class AgentApiTests(unittest.TestCase):
             review_source="agent_confirmation",
         )
 
-    def test_basic_chat_route_uses_orchestrator_without_legacy_webhook(self):
+    def test_basic_chat_route_uses_orchestrator_fallback(self):
         client = app_module.app.test_client()
-        with isolated_pending_action_storage(), patch.dict(
-            os.environ,
-            {"IV_AGENT_CHAT_WEBHOOK_URL": "https://example.invalid/legacy"},
-            clear=False,
-        ), patch.object(agent_orchestrator, "_agents_sdk_available", return_value=False):
+        with isolated_pending_action_storage(), patch.object(agent_orchestrator, "_agents_sdk_available", return_value=False):
             response = client.post("/api/chat", json={"message": "hello", "history": []})
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertIn("answer", payload)
-        self.assertNotIn("webhook_response", payload)
-        self.assertNotIn("n8n", payload["answer"].lower())
 
     def test_confirm_pending_calendar_create_executes_after_confirmation(self):
         client = app_module.app.test_client()

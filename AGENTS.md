@@ -73,7 +73,7 @@
 | POST | `/api/chat/voice/transcribe` | Transcribe audio for adviser |
 | POST | `/api/reports/generate` | Generate Assistenzbeitrag / Transportkosten PDFs |
 | GET | `/api/reports/download/...` | Download generated report |
-| POST | `/api/reports/send` | Send report via n8n webhook |
+| POST | `/api/reports/send` | Send generated report via connected mail provider |
 | GET | `/api/storage/browser` | Raw Supabase storage browser |
 | GET | `/api/documents/browser` | Structured document browser with buckets |
 | GET | `/api/documents/<id>/file` | Serve a stored document |
@@ -106,7 +106,6 @@ IV_AGENT_STORAGE_BACKEND          # local | postgres | supabase | auto
 # App behaviour
 IV_AGENT_CALENDAR_DEFAULT_TIMEZONE
 IV_AGENT_ENABLE_EXTERNAL_KNOWLEDGE
-IV_AGENT_CHAT_WEBHOOK_URL         # n8n or similar webhook for report sending
 IV_AGENT_DISABLE_OPENAI_AGENTS    # Set to "1" to disable SDK and use fallback
 IV_AGENT_ENABLE_OPENAI_TRACING    # Set to "1" to enable OpenAI tracing
 ```
@@ -146,7 +145,7 @@ Never commit any of these values. Copy from `.env.example` into a local ignored 
 
 ## When Stuck
 - If an external service is required, check whether the code has a local fake, patch point, or unavailable-state path first.
-- If a live OpenAI / Supabase / Postgres / n8n / Vercel call is required, explain the required env/config and ask before using credentials or making deployment changes.
+- If a live OpenAI / Supabase / Postgres / Vercel call is required, explain the required env/config and ask before using credentials or making deployment changes.
 - If a failing behavior cannot be reproduced locally in two focused attempts, report the exact command, error, likely cause, and the smallest next diagnostic step.
 
 ## Response Style

@@ -776,7 +776,7 @@ class CalendarApiTests(unittest.TestCase):
         )
         self.assertEqual(transportkosten_template, f"{app_module.POSTGRES_TEMPLATE_PREFIX}transportkosten")
 
-    def test_send_report_accepts_report_id_and_omits_file_path(self):
+    def test_send_report_requires_mail_recipient_and_subject(self):
         client = app_module.app.test_client()
         fake_report_store = FakeReportStore()
         saved_report = fake_report_store.save_report(
@@ -786,14 +786,7 @@ class CalendarApiTests(unittest.TestCase):
             content=b"%PDF-1.4\n",
         )
 
-        captured_payload = {}
-
-        def fake_trigger(payload):
-            captured_payload.update(payload)
-
-        with patch.object(app_module, "get_report_store", return_value=fake_report_store), patch.object(
-            app_module, "trigger_n8n_webhook", side_effect=fake_trigger
-        ):
+        with patch.object(app_module, "get_report_store", return_value=fake_report_store):
             response = client.post(
                 "/api/reports/send",
                 json={
@@ -802,12 +795,11 @@ class CalendarApiTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload["sent"])
-        self.assertEqual(payload["report_id"], saved_report["report_id"])
-        self.assertNotIn("file_path", captured_payload)
-        self.assertEqual(captured_payload["report_id"], saved_report["report_id"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["error"],
+            "Empfaenger-Mailadresse und Betreff sind erforderlich.",
+        )
 
     def test_send_report_validates_mail_fields_and_sends_pdf_attachment(self):
         client = app_module.app.test_client()
@@ -861,10 +853,13 @@ class CalendarApiTests(unittest.TestCase):
                     "report_id": saved_report["report_id"],
                     "to_email": "iv@example.test",
                 },
-            )
+        )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()["error"], "subject is required")
+        self.assertEqual(
+            response.get_json()["error"],
+            "Empfaenger-Mailadresse und Betreff sind erforderlich.",
+        )
 
     def test_mail_status_does_not_expose_secrets(self):
         client = app_module.app.test_client()

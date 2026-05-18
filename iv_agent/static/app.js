@@ -4050,7 +4050,7 @@ function normalizePolicyCard(rawPolicy) {
   return { title, rows: normalizedRows };
 }
 
-function extractWebhookReplyText(payload) {
+function extractAgentReplyText(payload) {
   if (!payload) {
     return "";
   }
@@ -4061,7 +4061,7 @@ function extractWebhookReplyText(payload) {
 
   if (Array.isArray(payload)) {
     for (const item of payload) {
-      const text = extractWebhookReplyText(item);
+      const text = extractAgentReplyText(item);
       if (text) {
         return text;
       }
@@ -4073,7 +4073,7 @@ function extractWebhookReplyText(payload) {
     const keys = ["reply", "response", "message", "text", "output", "answer", "content"];
     for (const key of keys) {
       if (Object.prototype.hasOwnProperty.call(payload, key)) {
-        const text = extractWebhookReplyText(payload[key]);
+        const text = extractAgentReplyText(payload[key]);
         if (text) {
           return text;
         }
@@ -4081,7 +4081,7 @@ function extractWebhookReplyText(payload) {
     }
 
     if (payload.data) {
-      const nestedText = extractWebhookReplyText(payload.data);
+      const nestedText = extractAgentReplyText(payload.data);
       if (nestedText) {
         return nestedText;
       }
@@ -4091,7 +4091,7 @@ function extractWebhookReplyText(payload) {
   return "";
 }
 
-function stringifyWebhookPayload(payload) {
+function stringifyAgentPayload(payload) {
   if (!payload) {
     return "";
   }
@@ -4107,7 +4107,7 @@ function stringifyWebhookPayload(payload) {
   }
 }
 
-function extractWebhookPolicyCard(payload) {
+function extractAgentPolicyCard(payload) {
   if (!payload || typeof payload !== "object") {
     return null;
   }
@@ -4294,11 +4294,11 @@ async function submitAdviserPrompt(rawPrompt) {
       localStorage.setItem("iv_agent_thread_id", state.threadId);
     }
 
-    const webhookPayload = data.webhook_response || data;
-    const webhookText = data.answer || extractWebhookReplyText(webhookPayload);
-    const webhookPolicy = extractWebhookPolicyCard(webhookPayload);
-    const replyText = webhookText || stringifyWebhookPayload(webhookPayload);
-    const replyPolicy = webhookPolicy || null;
+    const agentPayload = data.agent_response || data.response || data;
+    const agentText = data.answer || extractAgentReplyText(agentPayload);
+    const agentPolicy = extractAgentPolicyCard(agentPayload);
+    const replyText = agentText || stringifyAgentPayload(agentPayload);
+    const replyPolicy = agentPolicy || null;
 
     if (!replyText) {
       throw new Error("The agent returned an empty response.");

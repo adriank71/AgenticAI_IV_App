@@ -5,9 +5,7 @@ import os
 import base64
 import binascii
 import tempfile
-import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -198,10 +196,6 @@ DEFAULT_TEMPLATE_CANDIDATES = (
 )
 TEMPLATE_STORE_PREFIX = "template-store:"
 POSTGRES_TEMPLATE_PREFIX = TEMPLATE_STORE_PREFIX
-N8N_WEBHOOK_URL = os.environ.get(
-    "IV_AGENT_N8N_WEBHOOK_URL",
-    "https://adrx.app.n8n.cloud/webhook/da1ab6f3-73d4-4eaa-9063-ebf8d0e6226f",
-).strip()
 
 
 def json_error(message: str, status_code: int):
@@ -432,22 +426,6 @@ def serve_report_response(report_record: dict, *, as_attachment: bool):
         as_attachment=as_attachment,
         download_name=report_record["file_name"],
     )
-
-
-def trigger_n8n_webhook(payload: dict) -> None:
-    if not N8N_WEBHOOK_URL:
-        raise RuntimeError("n8n webhook is not configured. Set IV_AGENT_N8N_WEBHOOK_URL.")
-
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        N8N_WEBHOOK_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as response:
-        if response.status < 200 or response.status >= 300:
-            raise RuntimeError(f"n8n webhook failed with status {response.status}")
 
 
 def parse_event_payload(payload: dict) -> dict:
@@ -718,32 +696,6 @@ def generate_transportkosten_report(
         "transport_entries_available": len(transport_events),
         "transport_kilometers": f"{total_kilometers:.2f}",
         "gross_amount_chf": f"{total_amount:.2f}",
-    }
-
-
-def build_report_webhook_payload(month: str, report_record: dict) -> dict:
-    base_url = request.host_url.rstrip("/")
-    return {
-        "month": month,
-        "report_id": report_record["report_id"],
-        "report_type": report_record["type"],
-        "file_name": report_record["file_name"],
-        "download_url": f"{base_url}{build_report_download_path(report_record)}",
-        "preview_url": f"{base_url}{build_report_preview_path(report_record)}",
-        "storage_backend": report_record.get("storage_backend"),
-    }
-
-
-def send_report_via_webhook(month: str, report_record: dict) -> dict:
-    if not N8N_WEBHOOK_URL:
-        raise RuntimeError("Send endpoint not configured (missing IV_AGENT_N8N_WEBHOOK_URL)")
-
-    trigger_n8n_webhook(build_report_webhook_payload(month, report_record))
-    return {
-        "sent": True,
-        "report_id": report_record["report_id"],
-        "file_name": report_record["file_name"],
-        "month": month,
     }
 
 
@@ -1306,16 +1258,16 @@ def execute_pending_agent_action(action: dict) -> dict:
         report_record = resolve_report_record(report_id=report_id, file_name=file_name or None, month=month)
         if not report_record:
             raise FileNotFoundError("Report file not found")
-        if str(payload.get("to_email") or "").strip() or str(payload.get("subject") or "").strip():
-            return send_report_via_connected_mail(
-                month,
-                report_record,
-                to_email=payload.get("to_email"),
-                subject=payload.get("subject"),
-                body=str(payload.get("body") or "").strip(),
-                provider=str(payload.get("provider") or "").strip() or None,
-            )
-        return send_report_via_webhook(month, report_record)
+        if not str(payload.get("to_email") or "").strip() or not str(payload.get("subject") or "").strip():
+            raise ValueError("Empfaenger-Mailadresse und Betreff sind erforderlich.")
+        return send_report_via_connected_mail(
+            month,
+            report_record,
+            to_email=payload.get("to_email"),
+            subject=payload.get("subject"),
+            body=str(payload.get("body") or "").strip(),
+            provider=str(payload.get("provider") or "").strip() or None,
+        )
 
     raise ValueError(f"Unsupported pending action type: {action_type}")
 
@@ -1620,23 +1572,19 @@ def api_send_report():
         if not report_record:
             return json_error("Report file not found", 404)
 
-        has_mail_fields = any(
-            str(payload.get(field) or "").strip()
-            for field in ("to_email", "subject", "body", "provider")
-        )
-        if has_mail_fields:
-            return jsonify(
-                send_report_via_connected_mail(
-                    month,
-                    report_record,
-                    to_email=payload.get("to_email"),
-                    subject=payload.get("subject"),
-                    body=str(payload.get("body") or "").strip(),
-                    provider=str(payload.get("provider") or "").strip() or None,
-                )
-            )
+        if not str(payload.get("to_email") or "").strip() or not str(payload.get("subject") or "").strip():
+            return json_error("Empfaenger-Mailadresse und Betreff sind erforderlich.", 400)
 
-        return jsonify(send_report_via_webhook(month, report_record))
+        return jsonify(
+            send_report_via_connected_mail(
+                month,
+                report_record,
+                to_email=payload.get("to_email"),
+                subject=payload.get("subject"),
+                body=str(payload.get("body") or "").strip(),
+                provider=str(payload.get("provider") or "").strip() or None,
+            )
+        )
     except ValueError as exc:
         return json_error(str(exc), 400)
     except MailNotConnectedError as exc:
@@ -1646,13 +1594,9 @@ def api_send_report():
     except MailServiceError as exc:
         logger.error("mail provider request failed: %s", exc)
         return json_error(str(exc), 502)
-    except urllib.error.URLError as exc:
-        logger.error("n8n webhook request failed: %s", exc)
-        return json_error("Failed to reach n8n webhook", 502)
     except RuntimeError as exc:
-        logger.error("n8n webhook runtime error: %s", exc)
-        status_code = 501 if "Send endpoint not configured" in str(exc) else 502
-        return json_error(str(exc), status_code)
+        logger.error("report mail runtime error: %s", exc)
+        return json_error(str(exc), 502)
     except Exception as exc:
         logger.exception("Unexpected report send error: %s", exc)
         return json_error("Failed to send report", 500)
