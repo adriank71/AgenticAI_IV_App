@@ -763,6 +763,52 @@ def build_chat_document_artifact(document: dict[str, Any], *, include_preview_ur
     return artifact
 
 
+DOCUMENT_BUNDLE_MAX_FILES = 20
+
+
+def build_document_bundle_artifact(
+    documents: list[dict[str, Any]],
+    *,
+    user_id: str,
+    title: str = "Dokumentenpaket.zip",
+    file_name: str = "documents_bundle.zip",
+) -> dict[str, Any] | None:
+    """Build a ZIP download artifact for the chat from a list of document dicts.
+
+    Returns None when no usable document_ids are present so callers can render a clear
+    "keine Dokumente zum Bündeln" message instead of a broken download link.
+    """
+    seen_ids: list[str] = []
+    for document in documents or []:
+        if not isinstance(document, dict):
+            continue
+        document_id = str(document.get("document_id") or document.get("id") or "").strip()
+        if not document_id or document_id in seen_ids:
+            continue
+        seen_ids.append(document_id)
+        if len(seen_ids) >= DOCUMENT_BUNDLE_MAX_FILES:
+            break
+    if not seen_ids:
+        return None
+    profile_id = normalize_user_id(user_id or "default")
+    query_params = urllib.parse.urlencode(
+        {
+            "profile_id": profile_id,
+            "document_ids": ",".join(seen_ids),
+        }
+    )
+    return {
+        "id": f"document-bundle-{seen_ids[0]}-{len(seen_ids)}",
+        "type": "document_bundle",
+        "title": title,
+        "file_name": file_name,
+        "content_type": "application/zip",
+        "document_ids": seen_ids,
+        "download_url": f"/api/documents/bundle?{query_params}",
+        "icon": "folder_zip",
+    }
+
+
 class NoopDocumentEmbeddingService:
     def index_document(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"enabled": False, "reason": "pgvector is not enabled for document_embeddings in v1"}

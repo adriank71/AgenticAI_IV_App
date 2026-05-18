@@ -632,7 +632,10 @@ def _run_agents_sdk(
             normalize_user_id,
         )
         from ..services.storage_service import (
+            DOCUMENT_BUNDLE_MAX_FILES,
             build_chat_document_artifact as service_build_chat_document_artifact,
+            build_document_bundle_artifact as service_build_document_bundle_artifact,
+            get_document as service_get_document,
             infer_document_bucket_from_text,
             list_documents as service_list_documents,
             search_documents as service_search_documents,
@@ -649,7 +652,10 @@ def _run_agents_sdk(
             normalize_user_id,
         )
         from services.storage_service import (
+            DOCUMENT_BUNDLE_MAX_FILES,
             build_chat_document_artifact as service_build_chat_document_artifact,
+            build_document_bundle_artifact as service_build_document_bundle_artifact,
+            get_document as service_get_document,
             infer_document_bucket_from_text,
             list_documents as service_list_documents,
             search_documents as service_search_documents,
@@ -851,6 +857,96 @@ def _run_agents_sdk(
 
     orchestrator_tools.append(sum_user_invoice_amounts)
 
+    @function_tool
+    def bundle_user_documents(
+        document_ids_json: str = "[]",
+        query: str = "",
+        storage_bucket: str = "",
+        document_type: str = "",
+        institution: str = "",
+        tags_json: str = "[]",
+        year: int = 0,
+        month: int = 0,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 20,
+        bundle_name: str = "",
+    ) -> str:
+        """Bundle stored documents into a downloadable ZIP artifact (read-only, no pending action)."""
+        tool_events.append(_tool_event("bundle_user_documents", "started", "Building ZIP bundle"))
+        document_ids = _json_list(document_ids_json)
+        documents: list[dict[str, Any]] = []
+        if document_ids:
+            for document_id in document_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
+                document = service_get_document(user_id=context_user_id, document_id=document_id)
+                if document:
+                    documents.append(document)
+        else:
+            bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+            bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
+            documents = service_search_documents(
+                user_id=context_user_id,
+                query=query,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                document_type=document_type,
+                institution=institution,
+                tags=_json_list(tags_json),
+                storage_bucket=bucket_filter,
+                limit=bounded_limit,
+            )
+            if not documents:
+                fallback_ids: list[str] = []
+                for item in collected_artifacts:
+                    if not isinstance(item, dict) or item.get("type") != "document":
+                        continue
+                    candidate = str(item.get("document_id") or item.get("id") or "").strip()
+                    if candidate and candidate not in fallback_ids:
+                        fallback_ids.append(candidate)
+                for document_id in fallback_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
+                    document = service_get_document(user_id=context_user_id, document_id=document_id)
+                    if document:
+                        documents.append(document)
+        _collect_document_artifacts(documents)
+        bundle_title = (bundle_name or "Dokumentenpaket.zip").strip() or "Dokumentenpaket.zip"
+        bundle = service_build_document_bundle_artifact(
+            documents,
+            user_id=context_user_id,
+            title=bundle_title,
+            file_name=bundle_title if bundle_title.lower().endswith(".zip") else "documents_bundle.zip",
+        )
+        if not bundle:
+            tool_events.append(_tool_event("bundle_user_documents", "completed", "No documents to bundle"))
+            return json.dumps(
+                make_json_safe(
+                    {
+                        "bundle": None,
+                        "documents": [],
+                        "count": 0,
+                        "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
+                    }
+                ),
+                ensure_ascii=True,
+            )
+        collected_artifacts.append(bundle)
+        tool_events.append(_tool_event("bundle_user_documents", "completed", f"Bundle with {len(bundle['document_ids'])} files"))
+        return json.dumps(
+            make_json_safe(
+                {
+                    "bundle": bundle,
+                    "documents": documents,
+                    "count": len(bundle["document_ids"]),
+                    "download_url": bundle["download_url"],
+                    "max_files": DOCUMENT_BUNDLE_MAX_FILES,
+                }
+            ),
+            ensure_ascii=True,
+        )
+
+    orchestrator_tools.append(bundle_user_documents)
+
     now_value = str(client_context.get("now") or request_payload.get("timestamp") or utc_timestamp())
     current_month = str(client_context.get("current_month") or "").strip()
     calendar_view = str(client_context.get("calendar_view") or "").strip()
@@ -935,6 +1031,8 @@ def _run_agents_sdk(
         "For every calendar, appointment, Termin, Therapie, scheduling, counting, or availability request, hand off to CalendarAgent. "
         "For upload, delete, move, metadata, folder, Datei speichern, Dokument loeschen, or document organization requests, hand off to StorageAgent. "
         "For document retrieval requests ('gib mir alle Dokumente', 'zeige Rechnungen', 'download Datei') always read storage first and ensure document artifacts are produced. "
+        "For any request to bundle/zip/pack/download multiple files together ('bündeln', 'als ZIP', 'als Ordner herunterladen', 'Paket', 'zusammen herunterladen'), "
+        "use the bundle_user_documents tool directly or hand off to StorageAgent — never draft a pending action and never claim that bundling is read-only or blocked. "
         "For invoice total or sum requests, use sum_user_invoice_amounts or hand off to StorageAgent so the sum is based on filtered storage documents and checksum duplicate removal. "
         "When the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, use it as the storage_bucket filter for storage reads. "
         "For report generation, Assistenzbeitrag report, Transportkosten report, automation, reminder, Monatsende, or recurring reminder requests, hand off to AutomationsAgent. "

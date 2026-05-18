@@ -1,11 +1,12 @@
 import json
 import re
-import urllib.parse
 from typing import Any
 
 try:
     from ..services.storage_service import (
+        DOCUMENT_BUNDLE_MAX_FILES,
         build_chat_document_artifact as service_build_chat_document_artifact,
+        build_document_bundle_artifact as service_build_document_bundle_artifact,
         classify_document as service_classify_document,
         count_documents as service_count_documents,
         get_document as service_get_document,
@@ -20,7 +21,9 @@ try:
     )
 except ImportError:
     from services.storage_service import (
+        DOCUMENT_BUNDLE_MAX_FILES,
         build_chat_document_artifact as service_build_chat_document_artifact,
+        build_document_bundle_artifact as service_build_document_bundle_artifact,
         classify_document as service_classify_document,
         count_documents as service_count_documents,
         get_document as service_get_document,
@@ -450,60 +453,100 @@ def build_storage_tools(
         month: int = 0,
         start_date: str = "",
         end_date: str = "",
-        limit: int = 10,
+        limit: int = 20,
+        bundle_name: str = "",
     ) -> str:
-        """Create a downloadable ZIP artifact URL for selected or searched documents without changing storage."""
+        """Create a downloadable ZIP artifact URL for selected or searched documents without changing storage.
+
+        Read-only operation - never drafts a pending action. If document_ids_json is empty
+        and no filters match, it falls back to documents already collected in this turn so
+        the user always gets a usable ZIP link or a clear "nichts zu bündeln" message.
+        """
+
+        def _fallback_documents_from_collected() -> list[dict[str, Any]]:
+            if collected_artifacts is None:
+                return []
+            fallback_ids: list[str] = []
+            for item in collected_artifacts:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "document":
+                    continue
+                document_id = str(item.get("document_id") or item.get("id") or "").strip()
+                if document_id and document_id not in fallback_ids:
+                    fallback_ids.append(document_id)
+            recovered: list[dict[str, Any]] = []
+            for document_id in fallback_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
+                document = service_get_document(user_id=context_user_id, document_id=document_id)
+                if document:
+                    recovered.append(document)
+            return recovered
 
         def read() -> dict[str, Any]:
             document_ids = _json_list(document_ids_json)
             documents: list[dict[str, Any]] = []
             if document_ids:
-                for document_id in document_ids[:20]:
+                for document_id in document_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
                     document = service_get_document(user_id=context_user_id, document_id=document_id)
                     if document:
                         documents.append(document)
             else:
                 bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
                 query_filter = _structured_storage_query(query, storage_bucket=bucket_filter, institution=institution)
-                documents = service_search_documents(
-                    user_id=context_user_id,
-                    query=query_filter,
-                    year=_optional_int(year),
-                    month=_optional_int(month),
-                    start_date=start_date or None,
-                    end_date=end_date or None,
-                    document_type=document_type,
-                    institution=institution,
-                    tags=_json_list(tags_json),
-                    storage_bucket=bucket_filter,
-                    limit=min(max(1, int(limit or 10)), 20),
+                bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
+                has_filter = any(
+                    [
+                        query_filter,
+                        bucket_filter,
+                        document_type,
+                        institution,
+                        _json_list(tags_json),
+                        _optional_int(year),
+                        _optional_int(month),
+                        start_date,
+                        end_date,
+                    ]
                 )
-            selected_ids = [
-                str(document.get("document_id") or "").strip()
-                for document in documents
-                if isinstance(document, dict) and str(document.get("document_id") or "").strip()
-            ][:20]
+                if has_filter:
+                    documents = service_search_documents(
+                        user_id=context_user_id,
+                        query=query_filter,
+                        year=_optional_int(year),
+                        month=_optional_int(month),
+                        start_date=start_date or None,
+                        end_date=end_date or None,
+                        document_type=document_type,
+                        institution=institution,
+                        tags=_json_list(tags_json),
+                        storage_bucket=bucket_filter,
+                        limit=bounded_limit,
+                    )
+                if not documents:
+                    documents = _fallback_documents_from_collected()
             _collect_document_artifacts(documents)
-            if not selected_ids:
-                return {"bundle": None, "documents": [], "count": 0}
-            query_params = urllib.parse.urlencode(
-                {
-                    "profile_id": context_user_id,
-                    "document_ids": ",".join(selected_ids),
-                }
+            bundle_title = (bundle_name or "Dokumentenpaket.zip").strip() or "Dokumentenpaket.zip"
+            bundle = service_build_document_bundle_artifact(
+                documents,
+                user_id=context_user_id,
+                title=bundle_title,
+                file_name=bundle_title if bundle_title.lower().endswith(".zip") else "documents_bundle.zip",
             )
-            bundle = {
-                "id": f"document-bundle-{selected_ids[0]}-{len(selected_ids)}",
-                "type": "document_bundle",
-                "title": "Dokumentenpaket.zip",
-                "file_name": "documents_bundle.zip",
-                "content_type": "application/zip",
-                "document_ids": selected_ids,
-                "download_url": f"/api/documents/bundle?{query_params}",
-            }
+            if not bundle:
+                return {
+                    "bundle": None,
+                    "documents": [],
+                    "count": 0,
+                    "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
+                }
             if collected_artifacts is not None:
                 collected_artifacts.append(bundle)
-            return {"bundle": bundle, "documents": documents, "count": len(selected_ids)}
+            return {
+                "bundle": bundle,
+                "documents": documents,
+                "count": len(bundle.get("document_ids") or []),
+                "download_url": bundle["download_url"],
+                "max_files": DOCUMENT_BUNDLE_MAX_FILES,
+            }
 
         return _storage_tool_result("bundle_documents", read)
 

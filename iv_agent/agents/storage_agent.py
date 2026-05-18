@@ -56,7 +56,12 @@ def build_storage_agent(
         "Never claim a delete, move, bucket change, folder creation, or metadata update is complete before user confirmation. "
         "If an image-only document has no extracted text, state that text could not be extracted instead of inventing details. "
         "When listing documents, include filename, document type if known, institution if known, and document_id only when needed for a follow-up action. "
-        "For requests to download several files together, call bundle_documents and return its ZIP artifact/download URL."
+        "For any request to bundle, zip, package, batch-download, or 'als eine Datei/ZIP/Ordner herunterladen', "
+        "call bundle_documents immediately. bundle_documents is READ-ONLY: it only generates a download URL, it never modifies storage and must NEVER be drafted as a pending action. "
+        "Prefer passing concrete document_ids_json when the user references a previous list; otherwise pass query/storage_bucket/year/month/institution filters and bundle_documents will collect them. "
+        "If bundle_documents already ran in this turn and produced a bundle, do not call it again — reuse the existing download_url. "
+        "After bundle_documents succeeds, answer with the ZIP file name and the download URL from the tool result and stop. "
+        "Never tell the user that bundling failed because of read-only, write-protection, or report generation — those errors do not apply to bundle_documents."
     )
     return Agent(
         name="StorageAgent",
