@@ -1383,6 +1383,22 @@ def api_agent_chat():
                     return jsonify(make_json_safe(response_payload))
                 except (KeyError, PermissionError, ValueError, RuntimeError, FileNotFoundError) as exc:
                     logger.info("Auto-confirm failed, falling back to agent: %s", exc)
+            else:
+                return jsonify(make_json_safe({
+                    "answer": (
+                        "Ich finde keinen offenen Termin-Vorschlag in diesem Chat, den ich bestaetigen koennte. "
+                        "Bitte beschreibe den Termin in einer Nachricht: Datum, Start-/Endzeit, Art (Transport, Therapie, Assistenz) "
+                        "und ggf. Strecke oder Kilometer. Ich lege ihn dann als Entwurf an."
+                    ),
+                    "citations": [],
+                    "tool_events": [
+                        {"type": "agent", "name": "auto_confirm", "status": "no_pending", "message": "No pending action to confirm"},
+                    ],
+                    "artifacts": [],
+                    "pending_actions": [],
+                    "structured_actions": [],
+                    "thread_id": agent_payload.get("thread_id"),
+                }))
 
         response_payload = run_agent_chat(
             agent_payload,

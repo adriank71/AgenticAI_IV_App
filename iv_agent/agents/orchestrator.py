@@ -786,7 +786,7 @@ def _run_agents_sdk(
         ensure_ascii=True,
     )
     with trace(workflow_name="IV-Helper Agent Chat", group_id=request_payload["thread_id"]):
-        result = Runner.run_sync(agent, input_text, max_turns=6)
+        result = Runner.run_sync(agent, input_text, max_turns=12)
 
     tool_events.append(_tool_event("orchestrator", "completed", "OpenAI Agents SDK run completed", event_type="agent"))
     return {
