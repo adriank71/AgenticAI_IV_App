@@ -3292,18 +3292,56 @@ function buildPendingActionsCard(actions) {
 function formatPendingActionSummary(action) {
   const payload = action && action.payload && typeof action.payload === "object" ? action.payload : {};
   const type = String((action && action.type) || "").trim();
-  const title = payload.title || (payload.matched_event && payload.matched_event.title) || "";
-  const date = payload.date || (payload.matched_event && payload.matched_event.date) || "";
-  const time = payload.time || (payload.matched_event && payload.matched_event.time) || "";
+  const matched = (payload.matched_event && typeof payload.matched_event === "object") ? payload.matched_event : {};
+  const title = payload.title || matched.title || "";
+  const date = payload.date || matched.date || "";
+  const time = payload.time || matched.time || "";
+  const endTime = payload.end_time || matched.end_time || "";
   const startAt = payload.start_at || "";
+  const endAt = payload.end_at || "";
+  const category = String(payload.category || matched.category || "").trim().toLowerCase();
+  const transportMode = String(payload.transport_mode || matched.transport_mode || "").trim();
+  const transportKm = Number(payload.transport_kilometers || matched.transport_kilometers || 0);
+  const transportAddress = String(payload.transport_address || payload.location || matched.transport_address || "").trim();
+  const assistantHours = (payload.assistant_hours && typeof payload.assistant_hours === "object")
+    ? payload.assistant_hours
+    : (matched.assistant_hours && typeof matched.assistant_hours === "object" ? matched.assistant_hours : null);
+
   const parts = [type];
-  if (title) {
-    parts.push(String(title));
-  }
+  if (title) parts.push(String(title));
   if (date || time) {
-    parts.push(`${date}${time ? ` ${time}` : ""}`.trim());
+    const when = `${date}${time ? ` ${time}` : ""}${endTime ? `-${endTime}` : ""}`.trim();
+    if (when) parts.push(when);
   } else if (startAt) {
-    parts.push(String(startAt));
+    const when = endAt ? `${startAt} - ${endAt}` : String(startAt);
+    parts.push(when);
+  }
+  if (category) parts.push(`Kategorie: ${category}`);
+
+  if (category === "transport") {
+    const transportLabel = {
+      bus_bahn: "Bus / Bahn",
+      privatauto: "Privatauto",
+      taxi: "Taxi",
+      fahrdienst: "Fahrdienst",
+    }[transportMode] || transportMode;
+    if (transportLabel) parts.push(transportLabel);
+    if (transportKm > 0) parts.push(`${transportKm} km`);
+    if (transportAddress) parts.push(transportAddress);
+  } else if (category === "assistant" && assistantHours) {
+    const hourLabels = {
+      koerperpflege: "Pflege",
+      mahlzeiten_eingeben: "Mahlz. eingeben",
+      mahlzeiten_zubereiten: "Mahlz. zubereiten",
+      begleitung_therapie: "Therapie-Begl.",
+    };
+    const items = Object.entries(hourLabels)
+      .map(([key, label]) => {
+        const value = Number(assistantHours[key] || 0);
+        return value > 0 ? `${label}: ${value}h` : "";
+      })
+      .filter(Boolean);
+    if (items.length) parts.push(items.join(", "));
   }
   return parts.filter(Boolean).join(" - ");
 }

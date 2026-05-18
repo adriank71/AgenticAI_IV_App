@@ -114,19 +114,45 @@ def build_calendar_tools(
         description: str = "",
         location: str = "",
         color: str = "",
-        metadata_json: str = "{}",
+        transport_mode: str = "",
+        transport_kilometers: float = 0.0,
+        transport_address: str = "",
+        notes: str = "",
+        assistant_hours_json: str = "",
+        recurrence: str = "none",
+        repeat_count: int = 0,
+        metadata_json: str = "",
     ) -> str:
-        """Draft a calendar event creation for user confirmation. This does not write to the calendar."""
+        """Draft a calendar event creation for user confirmation. Does not write to the calendar.
+
+        category must be one of: transport, assistant, other (use other for therapy/general).
+        For category=transport, set transport_mode (bus_bahn, privatauto, taxi, fahrdienst), transport_kilometers, transport_address.
+        For category=assistant, pass assistant_hours_json like {"koerperpflege": 1.5, "mahlzeiten_eingeben": 0, "mahlzeiten_zubereiten": 0, "begleitung_therapie": 0}.
+        """
 
         def draft() -> dict[str, Any]:
-            metadata = json.loads(metadata_json or "{}")
+            try:
+                metadata = json.loads(metadata_json) if metadata_json else {}
+            except json.JSONDecodeError:
+                metadata = {}
             if not isinstance(metadata, dict):
                 metadata = {}
-            payload = {
+            try:
+                assistant_hours = json.loads(assistant_hours_json) if assistant_hours_json else None
+            except json.JSONDecodeError:
+                assistant_hours = None
+            if assistant_hours is not None and not isinstance(assistant_hours, dict):
+                assistant_hours = None
+
+            normalized_category = str(category or "other").strip().lower()
+            if normalized_category in {"therapy", "therapie"}:
+                normalized_category = "other"
+
+            payload: dict[str, Any] = {
                 "title": title,
                 "start_at": start_at,
                 "all_day": all_day,
-                "category": category,
+                "category": normalized_category,
                 "description": description,
                 "location": location,
                 "color": color,
@@ -134,6 +160,23 @@ def build_calendar_tools(
             }
             if end_at:
                 payload["end_at"] = end_at
+            if notes:
+                payload["notes"] = notes
+            if normalized_category == "transport":
+                if transport_mode:
+                    payload["transport_mode"] = transport_mode.strip().lower()
+                if transport_kilometers:
+                    payload["transport_kilometers"] = float(transport_kilometers)
+                if transport_address:
+                    payload["transport_address"] = transport_address
+                    if not payload.get("location"):
+                        payload["location"] = transport_address
+            if normalized_category == "assistant" and assistant_hours is not None:
+                payload["assistant_hours"] = assistant_hours
+            normalized_recurrence = str(recurrence or "none").strip().lower()
+            if normalized_recurrence and normalized_recurrence != "none":
+                payload["recurrence"] = normalized_recurrence
+                payload["repeat_count"] = max(0, int(repeat_count or 0))
             return _register_calendar_pending_action("create_event", f"Termin erstellen: {title}", payload)
 
         return _calendar_tool_result("create_calendar_event", draft)
@@ -147,13 +190,61 @@ def build_calendar_tools(
         search_start_at: str = "",
         search_end_at: str = "",
         query: str = "",
+        title: str = "",
+        start_at: str = "",
+        end_at: str = "",
+        category: str = "",
+        description: str = "",
+        location: str = "",
+        transport_mode: str = "",
+        transport_kilometers: float = -1.0,
+        transport_address: str = "",
+        notes: str = "",
+        assistant_hours_json: str = "",
     ) -> str:
-        """Draft a calendar event update for user confirmation. If event_id is missing, search by range and query first."""
+        """Draft a calendar event update for user confirmation. If event_id is missing, search by range and query first.
+
+        Prefer the explicit fields over updates_json. Same value semantics as create_calendar_event.
+        Pass transport_kilometers=-1 (default) to leave it unchanged.
+        """
 
         def draft() -> dict[str, Any]:
-            updates = json.loads(updates_json or "{}")
+            try:
+                updates = json.loads(updates_json) if updates_json else {}
+            except json.JSONDecodeError:
+                updates = {}
             if not isinstance(updates, dict):
                 raise ValueError("updates_json must be a JSON object")
+            if title:
+                updates["title"] = title
+            if start_at:
+                updates["start_at"] = start_at
+            if end_at:
+                updates["end_at"] = end_at
+            if category:
+                normalized_category = category.strip().lower()
+                if normalized_category in {"therapy", "therapie"}:
+                    normalized_category = "other"
+                updates["category"] = normalized_category
+            if description:
+                updates["description"] = description
+            if location:
+                updates["location"] = location
+            if notes:
+                updates["notes"] = notes
+            if transport_mode:
+                updates["transport_mode"] = transport_mode.strip().lower()
+            if transport_kilometers is not None and transport_kilometers >= 0:
+                updates["transport_kilometers"] = float(transport_kilometers)
+            if transport_address:
+                updates["transport_address"] = transport_address
+            if assistant_hours_json:
+                try:
+                    parsed_hours = json.loads(assistant_hours_json)
+                    if isinstance(parsed_hours, dict):
+                        updates["assistant_hours"] = parsed_hours
+                except json.JSONDecodeError:
+                    pass
             resolved_event_id = str(event_id or "").strip()
             matches: list[dict[str, Any]] = []
             if not resolved_event_id:

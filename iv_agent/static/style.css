@@ -5876,6 +5876,23 @@ body {
   color: #111111;
 }
 
+.automations-demo-footer {
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.automations-demo-reminder-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.automations-demo-reminder-btn .material-symbols-outlined {
+  font-size: 18px;
+}
+
 .gmail-connect-nav-button {
   display: flex;
   align-items: center;
