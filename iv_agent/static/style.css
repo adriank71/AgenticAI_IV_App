@@ -6472,7 +6472,19 @@ body {
   }
 }
 
-/* Final authoritative adviser layout so the thread remains the scroll owner. */
+/* Final authoritative adviser layout so the thread remains the scroll owner.
+   Height cascade must be definite all the way down or chat-thread's
+   overflow-y:auto never engages (max-height:100% resolves to auto). */
+.layout-main {
+  height: 100dvh;
+  min-height: 0;
+}
+
+.app-views {
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
 #view-adviser.app-view.is-active {
   display: flex;
   flex-direction: column;
@@ -6504,6 +6516,15 @@ body {
 }
 
 @media (max-width: 920px) {
+  .layout-main {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .app-views {
+    grid-template-rows: auto;
+  }
+
   #view-adviser.app-view.is-active {
     height: auto;
     overflow: visible;
