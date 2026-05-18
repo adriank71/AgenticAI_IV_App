@@ -1565,7 +1565,7 @@ def api_send_uli_reminder():
     )
     body = (
         f"Hey Uli,\n\n"
-        f"ich sende dir nur einen kurzen Reminder, dass du den Report noch absenden musst.\n\n"
+        f"ich sende dir nur einen kurzen Reminder, dass du den Report am Ende des Monats einreichen musst.\n\n"
         f"Hier ist der Link: {deep_link}\n\n"
         f"Agentische Grüsse\n"
         f"Stützli"

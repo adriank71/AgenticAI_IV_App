@@ -147,24 +147,221 @@ def _normalize_action_type(value: Any) -> str:
     return ACTION_TYPE_ALIASES.get(action_type, action_type)
 
 
-def _read_pending_action_state() -> dict[str, Any]:
-    if not os.path.exists(PENDING_ACTIONS_PATH):
-        return {"actions": []}
-    try:
-        with open(PENDING_ACTIONS_PATH, "r", encoding="utf-8") as file:
-            payload = json.load(file)
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Could not read pending action store; starting empty")
-        return {"actions": []}
-    if not isinstance(payload, dict) or not isinstance(payload.get("actions"), list):
-        return {"actions": []}
-    return payload
+_PENDING_ACTION_STORE: Any = None
 
 
-def _write_pending_action_state(payload: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(PENDING_ACTIONS_PATH), exist_ok=True)
-    with open(PENDING_ACTIONS_PATH, "w", encoding="utf-8") as file:
-        json.dump(make_json_safe(payload), file, indent=2)
+def _coerce_action_row(row: dict[str, Any]) -> dict[str, Any]:
+    def _iso(value: Any) -> str:
+        if not value:
+            return ""
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return str(value)
+
+    return {
+        "action_id": str(row.get("action_id") or ""),
+        "type": str(row.get("type") or ""),
+        "title": str(row.get("title") or ""),
+        "payload": row.get("payload") if isinstance(row.get("payload"), dict) else {},
+        "status": str(row.get("status") or "pending"),
+        "thread_id": str(row.get("thread_id") or ""),
+        "user_id": str(row.get("user_id") or "default"),
+        "created_at": _iso(row.get("created_at")),
+        "confirmed_at": _iso(row.get("confirmed_at")) if row.get("confirmed_at") else None,
+        "failed_at": _iso(row.get("failed_at")) if row.get("failed_at") else None,
+        "result": row.get("result") if isinstance(row.get("result"), dict) else None,
+        "error": str(row.get("error")) if row.get("error") else None,
+    }
+
+
+class _FilePendingActionStore:
+    """Local filesystem store. Suitable for dev. Not safe on serverless platforms."""
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _read(self) -> list[dict[str, Any]]:
+        if not os.path.exists(self._path):
+            return []
+        try:
+            with open(self._path, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Could not read pending action store; starting empty")
+            return []
+        if not isinstance(payload, dict) or not isinstance(payload.get("actions"), list):
+            return []
+        return [item for item in payload["actions"] if isinstance(item, dict)]
+
+    def _write(self, actions: list[dict[str, Any]]) -> None:
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        with open(self._path, "w", encoding="utf-8") as file:
+            json.dump(make_json_safe({"actions": actions}), file, indent=2)
+
+    def add(self, action: dict[str, Any]) -> None:
+        actions = self._read()
+        actions.append(action)
+        self._write(actions)
+
+    def get(self, action_id: str) -> dict[str, Any] | None:
+        for action in self._read():
+            if action.get("action_id") == action_id:
+                return action
+        return None
+
+    def latest_pending(self, thread_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        candidates = [
+            action for action in self._read()
+            if action.get("status") == "pending"
+            and action.get("thread_id") == thread_id
+            and (not user_id or not action.get("user_id") or action.get("user_id") == user_id)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return candidates[0]
+
+    def update(self, action_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        actions = self._read()
+        target = None
+        for action in actions:
+            if action.get("action_id") == action_id:
+                action.update(fields)
+                target = action
+                break
+        if target is None:
+            return None
+        self._write(actions)
+        return target
+
+
+class _PostgresPendingActionStore:
+    """Persistent pending action store backed by Supabase Postgres."""
+
+    def __init__(self, database_url: str):
+        try:
+            from ..storage import _connect_postgres
+        except ImportError:
+            from storage import _connect_postgres
+        self._connect = lambda: _connect_postgres(database_url)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_pending_actions (
+                        action_id TEXT PRIMARY KEY,
+                        type TEXT NOT NULL,
+                        title TEXT NOT NULL DEFAULT '',
+                        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        thread_id TEXT NOT NULL DEFAULT '',
+                        user_id TEXT NOT NULL DEFAULT 'default',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        confirmed_at TIMESTAMPTZ,
+                        failed_at TIMESTAMPTZ,
+                        result JSONB,
+                        error TEXT
+                    )
+                    """
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS agent_pending_actions_thread_idx ON agent_pending_actions (thread_id, status, created_at DESC)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS agent_pending_actions_user_status_idx ON agent_pending_actions (user_id, status, created_at DESC)")
+
+    def add(self, action: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO agent_pending_actions (
+                        action_id, type, title, payload, status, thread_id, user_id, created_at
+                    ) VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, NOW())
+                    ON CONFLICT (action_id) DO NOTHING
+                    """,
+                    (
+                        action["action_id"],
+                        action["type"],
+                        action.get("title") or "",
+                        json.dumps(make_json_safe(action.get("payload") or {})),
+                        action.get("status") or "pending",
+                        action.get("thread_id") or "",
+                        action.get("user_id") or "default",
+                    ),
+                )
+
+    def get(self, action_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM agent_pending_actions WHERE action_id = %s LIMIT 1",
+                    (action_id,),
+                )
+                row = cursor.fetchone()
+        return _coerce_action_row(row) if row else None
+
+    def latest_pending(self, thread_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        sql = "SELECT * FROM agent_pending_actions WHERE thread_id = %s AND status = 'pending'"
+        params: list[Any] = [thread_id]
+        if user_id:
+            sql += " AND user_id = %s"
+            params.append(user_id)
+        sql += " ORDER BY created_at DESC LIMIT 1"
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, tuple(params))
+                row = cursor.fetchone()
+        return _coerce_action_row(row) if row else None
+
+    def update(self, action_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        if not fields:
+            return self.get(action_id)
+        column_map = {
+            "status": ("status", lambda v: str(v)),
+            "confirmed_at": ("confirmed_at", lambda v: v),
+            "failed_at": ("failed_at", lambda v: v),
+            "result": ("result", lambda v: json.dumps(make_json_safe(v)) if v is not None else None),
+            "error": ("error", lambda v: str(v) if v is not None else None),
+        }
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        for key, value in fields.items():
+            if key not in column_map:
+                continue
+            column, transform = column_map[key]
+            if column == "result":
+                set_clauses.append(f"{column} = %s::jsonb")
+            else:
+                set_clauses.append(f"{column} = %s")
+            params.append(transform(value))
+        if not set_clauses:
+            return self.get(action_id)
+        params.append(action_id)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE agent_pending_actions SET {', '.join(set_clauses)} WHERE action_id = %s RETURNING *",
+                    tuple(params),
+                )
+                row = cursor.fetchone()
+        return _coerce_action_row(row) if row else None
+
+
+def _get_pending_action_store():
+    global _PENDING_ACTION_STORE
+    if _PENDING_ACTION_STORE is not None:
+        return _PENDING_ACTION_STORE
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    backend = str(os.environ.get("IV_AGENT_STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    if database_url and backend != "local":
+        try:
+            _PENDING_ACTION_STORE = _PostgresPendingActionStore(database_url)
+            return _PENDING_ACTION_STORE
+        except Exception as exc:
+            logger.warning("Falling back to file pending action store: %s", exc)
+    _PENDING_ACTION_STORE = _FilePendingActionStore(PENDING_ACTIONS_PATH)
+    return _PENDING_ACTION_STORE
 
 
 def _public_pending_action(action: dict[str, Any]) -> dict[str, Any]:
@@ -190,8 +387,7 @@ def register_pending_actions(
     if not raw_actions:
         return []
 
-    state = _read_pending_action_state()
-    existing_ids = {str(item.get("action_id")) for item in state["actions"] if isinstance(item, dict)}
+    store = _get_pending_action_store()
     registered: list[dict[str, Any]] = []
 
     for raw_action in raw_actions:
@@ -205,9 +401,8 @@ def register_pending_actions(
             continue
 
         action_id = str(raw_action.get("action_id") or raw_action.get("id") or "").strip()
-        if not action_id or action_id in existing_ids:
+        if not action_id:
             action_id = _new_id("act")
-        existing_ids.add(action_id)
 
         payload = raw_action.get("payload")
         if payload is None:
@@ -225,11 +420,9 @@ def register_pending_actions(
             "user_id": str(raw_action.get("user_id") or user_id or payload.get("user_id") or "default").strip() or "default",
             "created_at": utc_timestamp(),
         }
-        state["actions"].append(action)
+        store.add(action)
         registered.append(_public_pending_action(action))
 
-    if registered:
-        _write_pending_action_state(state)
     return registered
 
 
@@ -242,19 +435,10 @@ def find_latest_pending_action_for_thread(
     normalized_thread_id = str(thread_id or "").strip()
     if not normalized_thread_id:
         return None
-    normalized_user_id = str(user_id or "").strip()
-    state = _read_pending_action_state()
-    candidates = [
-        action for action in state["actions"]
-        if isinstance(action, dict)
-        and action.get("status") == "pending"
-        and action.get("thread_id") == normalized_thread_id
-        and (not normalized_user_id or not action.get("user_id") or action.get("user_id") == normalized_user_id)
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-    return _public_pending_action(candidates[0])
+    normalized_user_id = str(user_id or "").strip() or None
+    store = _get_pending_action_store()
+    action = store.latest_pending(normalized_thread_id, user_id=normalized_user_id)
+    return _public_pending_action(action) if action else None
 
 
 def confirm_pending_action(
@@ -268,13 +452,8 @@ def confirm_pending_action(
     if not normalized_action_id:
         raise KeyError("Pending action not found")
 
-    state = _read_pending_action_state()
-    target_action: dict[str, Any] | None = None
-    for action in state["actions"]:
-        if isinstance(action, dict) and action.get("action_id") == normalized_action_id:
-            target_action = action
-            break
-
+    store = _get_pending_action_store()
+    target_action = store.get(normalized_action_id)
     if not target_action:
         raise KeyError("Pending action not found")
 
@@ -292,18 +471,21 @@ def confirm_pending_action(
     try:
         result = executor(target_action)
     except Exception as exc:
-        target_action["status"] = "failed"
-        target_action["failed_at"] = utc_timestamp()
-        target_action["error"] = str(exc)
-        _write_pending_action_state(state)
+        store.update(normalized_action_id, {
+            "status": "failed",
+            "failed_at": datetime.now(timezone.utc),
+            "error": str(exc),
+        })
         raise
 
-    target_action["status"] = "confirmed"
-    target_action["confirmed_at"] = utc_timestamp()
-    target_action["result"] = make_json_safe(result)
-    _write_pending_action_state(state)
+    updated = store.update(normalized_action_id, {
+        "status": "confirmed",
+        "confirmed_at": datetime.now(timezone.utc),
+        "result": make_json_safe(result),
+    }) or target_action
+    updated["status"] = "confirmed"
     return {
-        "action": _public_pending_action(target_action),
+        "action": _public_pending_action(updated),
         "result": make_json_safe(result),
     }
 
