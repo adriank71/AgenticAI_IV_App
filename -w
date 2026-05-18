@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stützli | Agent Workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="error-banner" class="error-banner hidden" role="alert"></div>
+  <div id="loading-overlay" class="loading-overlay hidden" aria-hidden="true">
+    <div class="spinner" aria-label="Loading"></div>
+  </div>
+
+  <div class="layout-shell">
+    <aside class="app-nav">
+      <div class="app-nav-brand">
+        <div class="brand-copy">
+          <h1 class="brand">Stützli</h1>
+          <p class="brand-kicker">Agent Workspace</p>
+        </div>
+        <button id="toggle-sidebar" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
+          <span class="material-symbols-outlined">left_panel_close</span>
+        </button>
+      </div>
+
+      <nav class="thread-nav" aria-label="Chats">
+        <button id="new-thread" class="nav-link new-thread-button" type="button">
+          <span class="material-symbols-outlined">edit_square</span>
+          <span>New chat</span>
+        </button>
+
+        <button class="nav-link all-chats-link" type="button" data-view-target="adviser">
+          <span class="material-symbols-outlined">forum</span>
+          <span>All chats</span>
+        </button>
+
+        <div id="chat-list" class="chat-list" aria-label="All chats"></div>
+
+        <button class="nav-link community-nav-link" type="button" data-view-target="community">
+          <span class="material-symbols-outlined">groups</span>
+          <span>Community</span>
+        </button>
+      </nav>
+
+      <div class="app-nav-footer">
+        <button id="open-settings-view" class="profile-nav-button" type="button" aria-label="Open profile" title="Profile">
+          <span class="material-symbols-outlined">account_circle</span>
+        </button>
+        <a id="gmail-connect-nav" class="gmail-connect-nav-button" href="/api/mail/oauth/gmail/start" title="Gmail verbinden">
+          <span class="material-symbols-outlined">mail</span>
+          <span class="gmail-connect-nav-label">Gmail verbinden</span>
+        </a>
+      </div>
+    </aside>
+
+    <div class="layout-main">
+      <header class="workspace-topbar" aria-label="Workspace navigation">
+        <div class="workspace-topbar-group" role="group" aria-label="Workspace panels">
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="calendar" aria-label="Open calendar" title="Calendar">
+            <span class="material-symbols-outlined">calendar_today</span>
+            <span class="workspace-panel-button-label">Calendar</span>
+          </button>
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="reports" aria-label="Open storage" title="Storage">
+            <span class="material-symbols-outlined">folder</span>
+            <span class="workspace-panel-button-label">Storage</span>
+          </button>
+          <button class="panel-toggle-button workspace-panel-button" type="button" data-workspace-panel="automations" aria-label="Open automations" title="Automations &amp; Reminder">
+            <span class="material-symbols-outlined">automation</span>
+            <span class="workspace-panel-button-label">Automations &amp; Reminder</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="app-views">
+        <section id="view-dashboard" class="app-view" data-view="dashboard">
+          <div class="dashboard-shell">
+            <article class="dashboard-card glass-panel">
+              <p class="eyebrow">Total Assistant Hours</p>
+              <h2 id="dashboard-hours-value" class="dashboard-value">0.00</h2>
+              <p class="muted-copy">Logged this month</p>
+            </article>
+            <article class="dashboard-card glass-panel">
+              <p class="eyebrow">Appointments</p>
+              <h2 id="dashboard-events-value" class="dashboard-value">0</h2>
+              <p class="muted-copy">Scheduled this month</p>
+            </article>
+            <article class="dashboard-card glass-panel">
+              <p class="eyebrow">Assistant Sessions</p>
+              <h2 id="dashboard-assistant-value" class="dashboard-value">0</h2>
+              <p class="muted-copy">Eligible for reimbursement</p>
+            </article>
+            <article class="dashboard-card action-card glass-panel">
+              <p class="section-title">Next Steps</p>
+              <ul class="dashboard-list">
+                <li><span class="material-symbols-outlined">description</span><span id="dashboard-report-label">Generate monthly report for --</span></li>
+                <li><span class="material-symbols-outlined">forum</span><span>Ask Stützli about policy updates</span></li>
+                <li><span class="material-symbols-outlined">event_upcoming</span><span>Review today's focus blocks</span></li>
+              </ul>
+              <div class="dashboard-actions">
+                <button id="dashboard-open-calendar" class="secondary-button" type="button">Open Calendar</button>
+                <button id="dashboard-open-chat" class="primary-button" type="button">Open IV Adviser</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-calendar" class="app-view" data-view="calendar">
+          <div class="app-shell">
+            <main class="main-content">
+              <section class="calendar-shell glass-panel">
+                <div class="workspace-panel-header">
+                  <h2 class="workspace-panel-title">Calendar</h2>
+                </div>
+                <div id="calendar-toolbar" class="calendar-panel-toolbar">
+                  <div class="view-switch" role="group" aria-label="Calendar view">
+                    <button id="view-month" class="view-button" type="button" data-view="dayGridMonth">Month</button>
+                    <button id="view-week" class="view-button is-active" type="button" data-view="timeGridWeek">Week</button>
+                    <button id="view-day" class="view-button" type="button" data-view="timeGridDay">Day</button>
+                  </div>
+                  <div class="month-controls" aria-label="Month navigation">
+                    <button id="prev-month" class="icon-button" type="button" aria-label="Previous period">
+                      <span class="material-symbols-outlined">chevron_left</span>
+                    </button>
+                    <input id="month-picker" class="month-picker" type="month" aria-label="Select month" />
+                    <button id="next-month" class="icon-button" type="button" aria-label="Next period">
+                      <span class="material-symbols-outlined">chevron_right</span>
+                    </button>
+                    <div class="toolbar-actions">
+                      <button id="open-add-modal" class="primary-button compact-action" type="button">
+                        <span class="material-symbols-outlined">add</span>
+                        <span>New</span>
+                      </button>
+                      <button id="export-calendar-pdf" class="icon-button" type="button" aria-label="Export calendar as PDF" title="Export as PDF">
+                        <span class="material-symbols-outlined">picture_as_pdf</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="calendar-header-row">
+                  <h2 id="calendar-heading" class="calendar-heading">January 13 - 19, 2025</h2>
+                </div>
+                <div id="calendar"></div>
+              </section>
+            </main>
+
+            <aside class="sidebar">
+              <section class="sidebar-card hours-card glass-panel">
+                <p class="section-title">Metric Overview</p>
+                <div class="hours-inline">
+                  <h3 id="hours-value" class="hours-value">0.00</h3>
+                  <span class="hours-unit">Hours</span>
+                </div>
+                <p class="muted-copy">Logged this month</p>
+                <div class="capacity-row">
+                  <p class="section-title">Clinical Capacity</p>
+                  <span id="focus-count-pill" class="status-pill ghost">0 tasks</span>
+                </div>
+                <div class="capacity-bar" aria-hidden="true">
+                  <span id="capacity-progress" style="width: 0%"></span>
+                </div>
+              </section>
+
+              <section class="sidebar-card focus-card glass-panel">
+                <div class="focus-card-header">
+                  <p class="section-title">Today's Focus</p>
+                </div>
+                <div id="focus-list" class="focus-list">
+                  <p class="muted-copy">No appointments for today.</p>
+                </div>
+              </section>
+
+              <section class="sidebar-card actions-card glass-panel">
+                <button id="open-export-modal" class="secondary-button" type="button">Export Month Plan</button>
+                <button id="generate-report" class="primary-button" type="button">Generate Report</button>
+              </section>
+
+              <section class="sidebar-card automations-card glass-panel">
+                <div class="automations-card-header">
+                  <p class="section-title">Automations</p>
+                  <button id="open-automations-card" class="ghost-button" type="button" aria-label="Open automations panel">
+                    <span class="material-symbols-outlined">tune</span>
+                  </button>
+                </div>
+                <div id="automation-summary" class="automation-summary">
+                  <p class="muted-copy">No automations yet. Tap the dial to add one.</p>
+                </div>
+                <button id="quick-add-automation" class="secondary-button" type="button">
+                  <span class="material-symbols-outlined">add</span>
+                  <span>New automation</span>
+                </button>
+              </section>
+
+              <section class="sidebar-card legend-card glass-panel">
+                <p class="section-title">Categories</p>
+                <ul class="legend-list">
+                  <li><span class="legend-chip assistant"></span><span>Assistant</span></li>
+                  <li><span class="legend-chip transport"></span><span>Transport</span></li>
+                  <li><span class="legend-chip other"></span><span>Therapy</span></li>
+                </ul>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section id="view-adviser" class="app-view is-active" data-view="adviser">
+          <div id="adviser-shell" class="adviser-shell is-welcome">
+            <div id="chat-welcome" class="chat-welcome">
+              <h2>How can I help you?</h2>
+            </div>
+            <section id="chat-thread" class="chat-thread glass-panel" aria-live="polite">
+            </section>
+
+            <div class="chat-chips">
+              <button class="chat-chip" type="button" data-chat-prompt="Add an appointment to the calendar">Add an appointment to the calendar</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Upload a document">Upload a document</button>
+              <button class="chat-chip" type="button" data-chat-prompt="Create an automation">Create an automation</button>
+            </div>
+
+            <form id="adviser-form" class="chat-input-wrap glass-panel">
+              <div class="chat-composer-row">
+                <button id="chat-attach-button" class="chat-icon-button" type="button" aria-label="Add files and more" title="Add files and more">
+                  <span class="material-symbols-outlined">attach_file</span>
+                </button>
+                <button id="chat-qr-button" class="chat-icon-button" type="button" aria-label="Scan and upload files" title="Scan and upload files">
+                  <span class="material-symbols-outlined">qr_code_2</span>
+                </button>
+                <input id="chat-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,.docx" multiple />
+                <input id="adviser-input" type="text" maxlength="500" placeholder="Ask Stützli anything about your case..." />
+                <div class="chat-voice-waveform" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <button id="chat-voice-button" class="chat-icon-button" type="button" aria-label="Voice Input" title="Voice Input">
+                  <span class="material-symbols-outlined">mic</span>
+                </button>
+                <button id="adviser-cancel" class="secondary-button chat-cancel-button hidden" type="button">Cancel</button>
+                <button id="adviser-send" class="primary-button send-button" type="submit">
+                  <span class="material-symbols-outlined">send</span>
+                </button>
+              </div>
+              <div id="chat-voice-status-row" class="chat-voice-status-row hidden" aria-live="polite">
+                <span id="chat-voice-status" class="chat-voice-status"></span>
+                <span id="chat-voice-transcript" class="chat-voice-transcript"></span>
+              </div>
+              <div id="chat-attachment-tray" class="chat-attachment-tray hidden" aria-live="polite">
+                <div id="chat-attachment-list" class="chat-attachment-list"></div>
+                <p id="chat-attachment-status" class="chat-attachment-status" role="status"></p>
+              </div>
+            </form>
+            <p class="adviser-footnote">Stützli AI can make mistakes. Please verify critical legal dates with your official IV case worker.</p>
+          </div>
+        </section>
+
+        <section id="view-community" class="app-view" data-view="community">
+          <div class="community-shell">
+            <section class="community-main glass-panel">
+              <div class="community-header">
+                <div>
+                  <p class="eyebrow">Parent Community</p>
+                  <h2 id="community-topic-title" class="community-title">Daily Support</h2>
+                </div>
+                <span id="community-count" class="status-pill">0 posts</span>
+              </div>
+
+              <div id="community-thread" class="community-thread" aria-live="polite"></div>
+
+              <form id="community-form" class="community-composer glass-panel">
+                <label class="community-name-field">
+                  <span>Your name</span>
+                  <input id="community-name" type="text" maxlength="40" value="You" aria-label="Your display name" />
+                </label>
+                <div class="community-message-field">
+                  <input id="community-input" type="text" maxlength="420" placeholder="Share an update with other parents..." aria-label="Community message" />
+                  <button id="community-send" class="primary-button send-button" type="submit" aria-label="Send community message">
+                    <span class="material-symbols-outlined">send</span>
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <aside class="community-sidebar">
+              <section class="community-card glass-panel">
+                <p class="section-title">Channels</p>
+                <div class="community-channel-list" role="group" aria-label="Community channels">
+                  <button class="community-channel is-active" type="button" data-community-channel="daily">
+                    <span class="material-symbols-outlined">favorite</span>
+                    <span>Daily Support</span>
+                  </button>
+                  <button class="community-channel" type="button" data-community-channel="reimbursement">
+                    <span class="material-symbols-outlined">receipt_long</span>
+                    <span>Reimbursements</span>
+                  </button>
+                  <button class="community-channel" type="button" data-community-channel="therapy">
+                    <span class="material-symbols-outlined">school</span>
+                    <span>School & Therapy</span>
+                  </button>
+                </div>
+              </section>
+
+              <section class="community-card community-guidelines glass-panel">
+                <p class="section-title">Community Care</p>
+                <ul class="community-care-list">
+                  <li><span class="material-symbols-outlined">shield_person</span><span>Keep names and case numbers private.</span></li>
+                  <li><span class="material-symbols-outlined">volunteer_activism</span><span>Share practical support and lived experience.</span></li>
+                  <li><span class="material-symbols-outlined">verified_user</span><span>Confirm official deadlines with IV staff.</span></li>
+                </ul>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section id="view-reports" class="app-view" data-view="reports">
+          <div class="reports-shell">
+            <div class="workspace-panel-header">
+              <h2 class="workspace-panel-title">Storage</h2>
+            </div>
+            <article class="reports-card glass-panel invoices-card">
+              <details class="reports-section" open>
+                <summary class="reports-section-summary">
+                  <div class="reports-section-copy">
+                    <p class="section-title">Upload files</p>
+                    <p class="muted-copy">Option 1 for drag and drop, option 2 for upload by phone scan.</p>
+                  </div>
+                  <div class="reports-section-meta">
+                    <span class="reports-section-pill">2 options</span>
+                    <span class="material-symbols-outlined reports-section-chevron" aria-hidden="true">expand_more</span>
+                  </div>
+                </summary>
+                <div class="reports-section-body">
+                  <div class="storage-options" aria-label="Document upload options">
+                    <section id="invoice-drop-zone" class="storage-option drop-option" tabindex="0" role="button" aria-label="Upload documents by drag and drop">
+                      <div class="storage-option-label">Option 1</div>
+                      <div class="storage-option-icon">
+                        <span class="material-symbols-outlined">upload_file</span>
+                      </div>
+                      <div>
+                        <p class="section-title">Drag and Drop</p>
+                        <p class="muted-copy">Drop PDFs or receipt images here, or choose files from this device.</p>
+                      </div>
+                      <input id="invoice-file-input" class="file-input-hidden" type="file" accept="image/*,application/pdf" multiple />
+                      <button id="invoice-file-button" class="secondary-button" type="button">Choose documents</button>
+                      <p id="invoice-upload-status" class="upload-status" role="status">Ready for upload</p>
+                    </section>
+
+                    <section class="storage-option qr-option" aria-label="Scan with phone QR code">
+                      <div class="storage-option-label">Option 2</div>
+                      <div>
+                        <p class="section-title">Phone QR Scan</p>
+                        <p class="muted-copy">Scan this QR code with your phone, then capture documents with the camera route.</p>
+                        <a id="invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+                      </div>
+                      <img id="invoices-qr" class="invoices-qr" alt="Scan QR to add documents" />
+                    </section>
+                  </div>
+                </div>
+              </details>
+
+              <details class="reports-section document-database" open>
+                <summary class="reports-section-summary">
+                  <div class="reports-section-copy">
+                    <p class="section-title">Document Database</p>
+                    <p class="muted-copy">New uploads are assigned immediately, highlighted in orange, and can be confirmed with a checkmark or moved by drag and drop.</p>
+                  </div>
+                  <div class="reports-section-meta">
+                    <span class="document-count"><span id="documents-total-count">0</span><span id="documents-total-label">documents</span></span>
+                    <span class="material-symbols-outlined reports-section-chevron" aria-hidden="true">expand_more</span>
+                  </div>
+                </summary>
+                <div class="reports-section-body">
+                  <p id="document-browser-status" class="upload-status" role="status">Loading document buckets...</p>
+                  <div id="document-bucket-board" class="document-bucket-board" aria-label="Document bucket board"></div>
+                </div>
+              </details>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-automations" class="app-view" data-view="automations">
+          <div class="panel-shell automations-panel-shell">
+            <div class="workspace-panel-header">
+              <div>
+                <p class="eyebrow">Automations</p>
+                <h2 class="panel-title">Reminders & Drafts</h2>
+              </div>
+              <div class="workspace-panel-header-meta">
+                <span id="automation-panel-count" class="status-pill">0</span>
+              </div>
+            </div>
+            <div class="panel-actions">
+              <button id="panel-new-automation" class="primary-button" type="button">
+                <span class="material-symbols-outlined">add</span>
+                <span>New automation</span>
+              </button>
+              <button id="panel-generate-report" class="primary-button" type="button">
+                <span class="material-symbols-outlined">add</span>
+                <span>Generate Report</span>
+              </button>
+            </div>
+            <div id="automation-panel-summary" class="automation-summary">
+              <p class="muted-copy">No automations yet.</p>
+            </div>
+            <section class="automation-list-section">
+              <p class="section-title">Active automations</p>
+              <div id="automation-panel-list" class="automation-list">
+                <p class="muted-copy">No automations yet. Use the button above to add one.</p>
+              </div>
+            </section>
+            <div class="automations-demo-footer">
+              <p class="section-title">Demo</p>
+              <button id="send-uli-reminder" class="secondary-button automations-demo-reminder-btn" type="button">
+                <span class="material-symbols-outlined">notification_important</span>
+                <span>Send Report Reminder</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-settings" class="app-view" data-view="settings">
+          <div class="settings-shell">
+            <section class="settings-panel glass-panel">
+              <div class="settings-header">
+                <div>
+                  <p class="eyebrow">Profile</p>
+                  <h2 class="settings-title">Settings</h2>
+                </div>
+                <span id="profile-save-status" class="status-pill">Not loaded</span>
+              </div>
+              <form id="profile-form" class="profile-form">
+                <div class="profile-grid">
+                  <section class="profile-group">
+                    <p class="section-title">Insured Person</p>
+                    <label>
+                      <span>Full name</span>
+                      <input data-profile-path="insuredPerson.fullName" type="text" autocomplete="name" />
+                    </label>
+                    <label>
+                      <span>AHV number</span>
+                      <input data-profile-path="insuredPerson.ahvNumber" type="text" />
+                    </label>
+                    <label>
+                      <span>Street</span>
+                      <input data-profile-path="insuredPerson.street" type="text" autocomplete="street-address" />
+                    </label>
+                    <div class="profile-inline-fields">
+                      <label>
+                        <span>ZIP</span>
+                        <input data-profile-path="insuredPerson.zip" type="text" autocomplete="postal-code" />
+                      </label>
+                      <label>
+                        <span>City</span>
+                        <input data-profile-path="insuredPerson.city" type="text" autocomplete="address-level2" />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section class="profile-group">
+                    <p class="section-title">Invoice Issuer</p>
+                    <label>
+                      <span>Full name</span>
+                      <input data-profile-path="invoiceIssuer.fullName" type="text" autocomplete="name" />
+                    </label>
+                    <label>
+                      <span>Email</span>
+                      <input data-profile-path="invoiceIssuer.email" type="email" autocomplete="email" />
+                    </label>
+                    <label>
+                      <span>Phone</span>
+                      <input data-profile-path="invoiceIssuer.phone" type="tel" autocomplete="tel" />
+                    </label>
+                    <label class="profile-checkbox">
+                      <input id="profile-same-as-insured" data-profile-path="invoiceIssuer.sameAsInsuredPerson" type="checkbox" />
+                      <span>Same as insured person</span>
+                    </label>
+                  </section>
+
+                  <section class="profile-group">
+                    <p class="section-title">Billing</p>
+                    <label>
+                      <span>IBAN</span>
+                      <input data-profile-path="billing.iban" type="text" />
+                    </label>
+                    <label>
+                      <span>Reference number</span>
+                      <input data-profile-path="billing.referenceNumber" type="text" />
+                    </label>
+                    <label>
+                      <span>GLN</span>
+                      <input data-profile-path="billing.gln" type="text" />
+                    </label>
+                    <label>
+                      <span>Account holder</span>
+                      <input data-profile-path="billing.accountHolderFullName" type="text" />
+                    </label>
+                  </section>
+                </div>
+                <div class="settings-actions">
+                  <button id="reload-profile" class="secondary-button" type="button">Reload</button>
+                  <button id="save-profile" class="primary-button" type="submit">Save Profile</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="chat-qr-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="chat-qr-modal-title">
+    <div class="modal-backdrop" data-close-modal="chat-qr-modal"></div>
+    <div class="modal-panel chat-qr-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="chat-qr-modal-title">Scan files</h2>
+          <p class="modal-subtitle">Scan the QR code with your phone and upload photos through the camera app.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="chat-qr-modal" aria-label="Close">&times;</button>
+      </div>
+      <div class="chat-qr-content">
+        <img id="chat-invoices-qr" class="invoices-qr chat-invoices-qr" alt="Scan QR to add documents" />
+        <a id="chat-invoices-camera-link" class="invoices-camera-link" href="/camera">Open camera link</a>
+        <p id="chat-qr-status" class="upload-status" role="status">Loading QR code...</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="add-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="add-modal-title">
+    <div class="modal-backdrop" data-close-modal="add-modal"></div>
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 id="add-modal-title">Add Event</h2>
+        <button class="modal-close" type="button" data-close-modal="add-modal" aria-label="Close">&times;</button>
+      </div>
+      <section id="voice-composer" class="voice-composer" aria-label="Voice event composer">
+        <button id="voice-composer-button" class="voice-composer-button" type="button" aria-label="Hold to dictate event" title="Hold to dictate event">
+          <span class="voice-pulse" aria-hidden="true"></span>
+          <span class="voice-pulse voice-pulse--delay" aria-hidden="true"></span>
+          <span class="voice-composer-icon material-symbols-outlined">mic</span>
+        </button>
+        <div class="voice-composer-body">
+          <p id="voice-composer-status" class="voice-composer-status">Tap to dictate - e.g. "Tomorrow 9 to 12 personal care"</p>
+          <div id="voice-composer-bars" class="voice-composer-bars" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <p id="voice-composer-transcript" class="voice-composer-transcript" aria-live="polite"></p>
+        </div>
+      </section>
+      <div id="voice-draft-preview" class="voice-draft-preview hidden" role="status">
+        <p id="voice-draft-transcript" class="voice-draft-transcript"></p>
+        <p id="voice-draft-status" class="voice-draft-status"></p>
+      </div>
+      <form id="add-event-form" class="modal-form">
+        <div class="form-row form-row--split">
+          <label id="event-date-field">
+            <span>Date</span>
+            <input id="event-date" name="date" type="date" required />
+          </label>
+          <label id="event-all-day-field" class="all-day-toggle">
+            <input id="event-all-day" name="all_day" type="checkbox" />
+            <span class="all-day-toggle-pill">
+              <span class="all-day-toggle-dot"></span>
+              <span class="all-day-toggle-label">All-day</span>
+            </span>
+          </label>
+        </div>
+        <div id="event-time-fields" class="recurrence-grid">
+          <label>
+            <span>Start time</span>
+            <input id="event-time" name="time" type="time" required />
+          </label>
+          <label>
+            <span>End time</span>
+            <input id="event-end-time" name="end_time" type="time" required />
+          </label>
+        </div>
+        <label id="event-category-field">
+          <span>Category</span>
+          <select id="event-category" name="category" required>
+            <option value="assistant">Assistant</option>
+            <option value="transport">Transport</option>
+            <option value="other">Therapy</option>
+          </select>
+        </label>
+        <label id="event-title-field">
+          <span>Title</span>
+          <input id="event-title" name="title" type="text" maxlength="200" required />
+        </label>
+        <div id="transport-fields" class="transport-fields hidden-field">
+          <div class="transport-mode-group">
+            <p class="transport-section-title">Transport Mode</p>
+            <div class="transport-mode-grid">
+              <button class="transport-mode-button is-active" type="button" data-transport-mode="bus_bahn">
+                <span class="transport-mode-icon material-symbols-outlined">directions_bus</span>
+                <span>Bus / Train</span>
+              </button>
+              <button class="transport-mode-button" type="button" data-transport-mode="privatauto">
+                <span class="transport-mode-icon material-symbols-outlined">directions_car</span>
+                <span>Private car</span>
+              </button>
+              <button class="transport-mode-button" type="button" data-transport-mode="taxi">
+                <span class="transport-mode-icon material-symbols-outlined">local_taxi</span>
+                <span>Taxi</span>
+              </button>
+              <button class="transport-mode-button" type="button" data-transport-mode="fahrdienst">
+                <span class="transport-mode-icon material-symbols-outlined">medical_services</span>
+                <span>Ride service</span>
+              </button>
+            </div>
+          </div>
+          <div class="transport-meta-grid">
+            <label>
+              <span>Kilometers</span>
+              <input id="transport-kilometers" name="transport_kilometers" type="number" min="0" step="0.1" value="0.0" />
+            </label>
+          </div>
+          <label class="transport-address-field">
+            <span>Address (Location & Treatment Center)</span>
+            <input id="transport-address" name="transport_address" type="text" maxlength="240" placeholder="Clinic name, street, city..." />
+          </label>
+          <input id="transport-mode" name="transport_mode" type="hidden" value="bus_bahn" />
+        </div>
+        <label id="event-notes-field">
+          <span>Notes</span>
+          <textarea id="event-notes" name="notes" rows="4"></textarea>
+        </label>
+        <div id="assistant-hours-fields" class="assistant-hours-fields">
+          <label>
+            <span>Personal care</span>
+            <input data-assistant-hours="koerperpflege" type="number" min="0" step="0.1" value="0.0" />
+          </label>
+          <label>
+            <span>Meal assistance</span>
+            <input data-assistant-hours="mahlzeiten_eingeben" type="number" min="0" step="0.1" value="0.0" />
+          </label>
+          <label>
+            <span>Meal preparation</span>
+            <input data-assistant-hours="mahlzeiten_zubereiten" type="number" min="0" step="0.1" value="0.0" />
+          </label>
+          <label>
+            <span>Therapy accompaniment</span>
+            <input data-assistant-hours="begleitung_therapie" type="number" min="0" step="0.1" value="0.0" />
+          </label>
+        </div>
+        <div id="event-recurrence-grid" class="recurrence-grid">
+          <label>
+            <span>Repeat</span>
+            <select id="event-recurrence" name="recurrence">
+              <option value="none">Do not repeat</option>
+              <option value="weekly">Every week</option>
+              <option value="biweekly">Every 2 weeks</option>
+              <option value="monthly">Every month</option>
+            </select>
+          </label>
+          <label>
+            <span>Repetitions</span>
+            <input id="event-repeat-count" name="repeat_count" type="number" min="0" step="1" value="0" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="add-modal">Cancel</button>
+          <button id="submit-add-event" class="primary-button" type="submit">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="pdf-export-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pdf-export-modal-title">
+    <div class="modal-backdrop" data-close-modal="pdf-export-modal"></div>
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 id="pdf-export-modal-title">Calendar PDF Export</h2>
+        <button class="modal-close" type="button" data-close-modal="pdf-export-modal" aria-label="Close">&times;</button>
+      </div>
+      <form id="pdf-export-form" class="modal-form">
+        <div class="form-row form-row--split">
+          <label>
+            <span>From</span>
+            <input id="pdf-export-from" type="month" name="from" required />
+          </label>
+          <label>
+            <span>To</span>
+            <input id="pdf-export-to" type="month" name="to" required />
+          </label>
+        </div>
+        <label>
+          <span>Layout per page</span>
+          <div class="pdf-layout-switch view-switch" role="group" aria-label="PDF layout">
+            <button class="view-button is-active" type="button" data-pdf-layout="weekly" aria-pressed="true">Weekly view</button>
+            <button class="view-button" type="button" data-pdf-layout="monthly" aria-pressed="false">Monthly overview</button>
+          </div>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="pdf-export-modal">Cancel</button>
+          <button id="generate-pdf-btn" class="primary-button" type="submit">Generate PDF</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="export-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
+    <div class="modal-backdrop" data-close-modal="export-modal"></div>
+    <div class="modal-panel export-panel">
+      <div class="modal-header">
+        <h2 id="export-modal-title">Month Plan Export</h2>
+        <button class="modal-close" type="button" data-close-modal="export-modal" aria-label="Close">&times;</button>
+      </div>
+      <pre id="export-summary" class="export-summary"></pre>
+      <div class="modal-actions">
+        <button id="copy-export" class="secondary-button" type="button">Copy to clipboard</button>
+        <button class="primary-button" type="button" data-close-modal="export-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="report-modal-title">
+    <div class="modal-backdrop" data-close-modal="report-modal"></div>
+    <div class="modal-panel report-panel">
+      <div class="modal-header">
+        <h2 id="report-modal-title">Generate Documents</h2>
+        <button class="modal-close" type="button" data-close-modal="report-modal" aria-label="Close">&times;</button>
+      </div>
+      <div id="report-status" class="report-status hidden" role="status"></div>
+      <form id="report-form" class="modal-form">
+        <div id="report-config-panel" class="report-config-panel">
+          <div class="report-type-picker">
+          <button class="report-type-button is-active" type="button" data-report-type="assistenzbeitrag" aria-pressed="true">Assistance contribution report</button>
+          <button class="report-type-button" type="button" data-report-type="transportkostenabrechnung" aria-pressed="false">Transport cost report</button>
+        </div>
+        <label>
+          <span>Reporting month</span>
+          <select id="report-month" name="month" required></select>
+        </label>
+        <p class="muted-copy">Select one or both report types. The assistance contribution report uses saved profile data and assistant hours from calendar entries for the selected month.</p>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="report-modal">Cancel</button>
+          <button id="submit-report" class="primary-button" type="submit">Generate PDF</button>
+        </div>
+        </div>
+      </form>
+      <div id="report-results-wrap" class="report-results-wrap hidden">
+        <p class="section-title">Generated Documents</p>
+        <div id="report-results-list" class="report-results-list"></div>
+      </div>
+      <div id="report-preview-wrap" class="report-preview-wrap hidden">
+        <p class="section-title">Document Preview</p>
+        <iframe id="report-preview-frame" class="report-preview-frame" title="Report PDF preview"></iframe>
+      </div>
+      <div id="report-results-actions" class="report-results-actions hidden">
+        <button id="generate-new-report" class="secondary-button" type="button">Generate New PDF</button>
+        <button id="send-report" class="primary-button" type="button">Send Report</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mail-report-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mail-report-modal-title">
+    <div class="modal-backdrop" data-close-modal="mail-report-modal"></div>
+    <div class="modal-panel mail-report-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="mail-report-modal-title">Report senden</h2>
+          <p class="modal-subtitle">PDF aus dem verbundenen Postfach verschicken.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="mail-report-modal" aria-label="Close">&times;</button>
+      </div>
+      <div id="mail-report-status" class="report-status hidden" role="status"></div>
+      <form id="mail-report-form" class="modal-form">
+        <label>
+          <span>Mail-Adresse</span>
+          <input id="mail-report-to" name="to_email" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          <span>Betreff</span>
+          <input id="mail-report-subject" name="subject" type="text" required>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="mail-report-modal">Cancel</button>
+          <button id="submit-mail-report" class="primary-button" type="submit">Senden</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="automations-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="automations-modal-title">
+    <div class="modal-backdrop" data-close-modal="automations-modal"></div>
+    <div class="modal-panel automations-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="automations-modal-title">Automations & Reminders</h2>
+          <p class="modal-subtitle">Schedule reminders or auto-fill reports.</p>
+        </div>
+        <button class="modal-close" type="button" data-close-modal="automations-modal" aria-label="Close">&times;</button>
+      </div>
+
+      <div class="automation-presets" role="group" aria-label="Quick presets">
+        <button class="automation-preset" type="button" data-preset="month_end_report">
+          <span class="material-symbols-outlined">event_repeat</span>
+          <span class="automation-preset-text">
+            <strong>Month-end report</strong>
+            <span>Auto-generate the assistance contribution report on the last day</span>
+          </span>
+        </button>
+        <button class="automation-preset" type="button" data-preset="weekly_review">
+          <span class="material-symbols-outlined">checklist</span>
+          <span class="automation-preset-text">
+            <strong>Weekly review</strong>
+            <span>Sunday evening — review missing entries</span>
+          </span>
+        </button>
+        <button class="automation-preset" type="button" data-preset="custom_reminder">
+          <span class="material-symbols-outlined">add_alert</span>
+          <span class="automation-preset-text">
+            <strong>Custom reminder</strong>
+            <span>Pick date, time, and message</span>
+          </span>
+        </button>
+      </div>
+
+      <form id="automation-form" class="modal-form automation-form">
+        <label>
+          <span>Title</span>
+          <input id="automation-title" name="title" type="text" maxlength="120" required placeholder="e.g. Monthly report ready" />
+        </label>
+        <div class="recurrence-grid">
+          <label>
+            <span>Action</span>
+            <select id="automation-action" name="action">
+              <option value="notify">Notify only</option>
+              <option value="generate_assistenzbeitrag">Generate assistance contribution report</option>
+            </select>
+          </label>
+          <label>
+            <span>Schedule</span>
+            <select id="automation-schedule" name="schedule">
+              <option value="month_end">Last day of month</option>
+              <option value="weekly_sun">Every Sunday</option>
+              <option value="weekly_mon">Every Monday</option>
+              <option value="daily">Every day</option>
+              <option value="once">One-time on date</option>
+            </select>
+          </label>
+        </div>
+        <div id="automation-date-row" class="recurrence-grid hidden-field">
+          <label>
+            <span>Date</span>
+            <input id="automation-date" name="run_date" type="date" />
+          </label>
+          <label>
+            <span>Time (24h)</span>
+            <input id="automation-time" name="run_time" type="time" value="09:00" />
+          </label>
+        </div>
+        <label>
+          <span>Note (optional)</span>
+          <textarea id="automation-note" name="note" rows="2" maxlength="400" placeholder="Optional message shown when the reminder fires"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="secondary-button" type="button" data-close-modal="automations-modal">Cancel</button>
+          <button id="submit-automation" class="primary-button" type="submit">Save automation</button>
+        </div>
+      </form>
+
+      <section class="automation-list-section">
+        <div class="automation-list-header">
+          <p class="section-title">Active automations</p>
+          <span id="automation-count" class="status-pill">0</span>
+        </div>
+        <div id="automation-list" class="automation-list">
+          <p class="muted-copy">No automations yet. Pick a preset above or save a custom reminder.</p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="delete-popover" class="delete-popover hidden" role="dialog" aria-modal="false">
+    <p id="delete-popover-title" class="delete-title"></p>
+    <p id="delete-popover-meta" class="delete-meta"></p>
+    <div class="delete-actions">
+      <button id="cancel-delete" class="secondary-button" type="button">Cancel</button>
+      <button id="edit-event" class="primary-button" type="button">Edit</button>
+      <button id="confirm-delete" class="danger-button" type="button">Delete</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -4327,8 +4327,9 @@ body {
 
 #view-reports .reports-shell {
   min-height: 100%;
+  height: auto;
   align-content: start;
-  padding: 16px 16px 32px;
+  padding: 12px 4px 24px;
 }
 
 #view-reports .storage-options {
@@ -5551,14 +5552,6 @@ body {
   scrollbar-gutter: stable;
 }
 
-#view-reports.app-view.is-panel-active {
-  height: calc(100vh - 64px);
-}
-
-#view-reports .reports-card {
-  min-height: 100%;
-}
-
 #view-calendar .fc .fc-scroller,
 #view-calendar .fc .fc-scroller-liquid-absolute {
   overflow-y: auto !important;
@@ -6440,8 +6433,8 @@ body {
 }
 
 .reports-shell {
-  height: 100%;
-  min-height: 0;
+  min-height: 100%;
+  height: auto;
   padding: 0 0 16px;
 }
 
