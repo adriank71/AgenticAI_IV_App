@@ -6472,3 +6472,50 @@ body {
   }
 }
 
+/* Final authoritative adviser layout so the thread remains the scroll owner. */
+#view-adviser.app-view.is-active {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.adviser-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.chat-chips,
+.chat-input-wrap,
+.adviser-footnote {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 920px) {
+  #view-adviser.app-view.is-active {
+    height: auto;
+    overflow: visible;
+  }
+
+  .adviser-shell {
+    height: auto;
+    overflow: visible;
+  }
+
+  .chat-thread {
+    max-height: none;
+  }
+}
+

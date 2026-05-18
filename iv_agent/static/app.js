@@ -3088,7 +3088,7 @@ function appendChatMessage(role, messageText, policyCard = null, extras = {}) {
 
   const meta = document.createElement("span");
   meta.className = "chat-meta";
-  meta.textContent = role === "user" ? "You" : "Stutzli";
+  meta.textContent = role === "user" ? "You" : "Stützli";
   bubble.appendChild(meta);
 
   row.appendChild(avatar);
@@ -3579,7 +3579,7 @@ async function openChatQrModal(triggerElement) {
 
 function normalizeChatSession(rawChat, index = 0) {
   const now = new Date().toISOString();
-  const fallbackTitle = index === 0 ? "Stutzli planning" : `Chat ${index + 1}`;
+  const fallbackTitle = index === 0 ? "Stützli planning" : `Chat ${index + 1}`;
   const messages = Array.isArray(rawChat && rawChat.messages)
     ? rawChat.messages
       .map((message) => ({
@@ -3596,7 +3596,7 @@ function normalizeChatSession(rawChat, index = 0) {
 
   return {
     id: String((rawChat && rawChat.id) || createChatId()),
-    title: String((rawChat && rawChat.title) || fallbackTitle).trim() || fallbackTitle,
+    title: (String((rawChat && rawChat.title) || fallbackTitle).trim() || fallbackTitle).replace(/Stutzli/g, "Stützli"),
     threadId: String((rawChat && rawChat.threadId) || "").trim(),
     messages,
     createdAt: String((rawChat && rawChat.createdAt) || now),
@@ -3607,7 +3607,7 @@ function normalizeChatSession(rawChat, index = 0) {
 function seedChatSessions() {
   const now = new Date().toISOString();
   return [
-    "Stutzli planning",
+    "Stützli planning",
     "Assistance contribution report",
     "Transport receipts",
     "Calendar cleanup",
