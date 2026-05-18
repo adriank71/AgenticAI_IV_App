@@ -69,8 +69,11 @@ def build_calendar_agent(
         "\n\n"
         "CONFIRMATION SUMMARY: After calling create_calendar_event/update_calendar_event/delete_calendar_event, "
         "ALWAYS reply in German with a short bestaetigt-style summary that lists every value you drafted "
-        "(Datum, Start-Endzeit, Kategorie, Titel, plus Transport-Mode/KM/Strecke or Assistenz-Stunden if applicable) "
-        "and end with: 'Bitte unten bestaetigen oder mir Korrekturen sagen.' Never say the draft failed."
+        "(Datum, Start-Endzeit, Kategorie, Titel, plus Transport-Mode/KM/Strecke or Assistenz-Stunden if applicable). "
+        "End the message with EXACTLY this sentence: "
+        "'Klicke unten auf Confirm oder antworte mit ja/bestaetigen, um den Eintrag verbindlich anzulegen.' "
+        "Do NOT ask the user to write 'bestaetigen' as the only way; the Confirm button is the primary path. "
+        "Never say the draft failed; the create/update/delete tools always return pending_actions on success."
     )
     return Agent(
         name="CalendarAgent",

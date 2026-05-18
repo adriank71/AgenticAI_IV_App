@@ -87,7 +87,7 @@ try:
         _get_openai_client,
     )
     from . import reminders as reminders_module
-    from .agents.orchestrator import confirm_pending_action, run_agent_chat
+    from .agents.orchestrator import confirm_pending_action, find_latest_pending_action_for_thread, run_agent_chat
     from .reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 except ImportError:
     from calendar_manager import (
@@ -162,7 +162,7 @@ except ImportError:
         _get_openai_client,
     )
     import reminders as reminders_module
-    from agents.orchestrator import confirm_pending_action, run_agent_chat
+    from agents.orchestrator import confirm_pending_action, find_latest_pending_action_for_thread, run_agent_chat
     from reminders_agent import build_reminder_draft_from_audio, build_reminder_draft_from_text
 
 
@@ -1294,10 +1294,96 @@ def build_agent_calendar_snapshot(payload: dict) -> dict:
     }
 
 
+_CONFIRM_PHRASES = {
+    "ja", "ja bitte", "ja gerne", "ja danke", "yes", "y", "ok", "okay", "k",
+    "passt", "stimmt", "richtig", "korrekt", "geht klar", "alles richtig",
+    "bestaetigen", "bestaetigt", "bestätigen", "bestätigt",
+    "bestaetige", "bestätige", "bestaetige ich", "bestätige ich",
+    "anlegen", "leg an", "lege an", "leg den termin an", "lege den termin an",
+    "erstellen", "speichern", "uebernehmen", "übernehmen",
+    "confirm", "confirmed", "go", "do it", "mach es", "mach das", "machs",
+}
+
+
+def _is_confirm_message(message: str) -> bool:
+    normalized = str(message or "").strip().lower().rstrip(".!?")
+    return bool(normalized) and normalized in _CONFIRM_PHRASES
+
+
+def _build_confirm_chat_response(
+    confirmation: dict,
+    action: dict,
+    agent_payload: dict,
+) -> dict:
+    action_type = str(action.get("type") or "").strip()
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    if action_type == "create_event":
+        title = str(payload.get("title") or "Termin")
+        answer = f"Bestaetigt. Ich habe den Termin '{title}' im Kalender angelegt."
+    elif action_type == "update_event":
+        answer = "Bestaetigt. Termin aktualisiert."
+    elif action_type == "delete_event":
+        answer = "Bestaetigt. Termin geloescht."
+    elif action_type == "create_reminder":
+        answer = "Bestaetigt. Erinnerung gespeichert."
+    elif action_type == "generate_report":
+        answer = "Bestaetigt. Report wird erstellt."
+    else:
+        answer = "Bestaetigt. Aktion ausgefuehrt."
+
+    result_payload = confirmation.get("result") if isinstance(confirmation.get("result"), dict) else {}
+    report_artifacts = build_report_chat_artifacts(result_payload) if action_type == "generate_report" else []
+    return {
+        "answer": answer,
+        "citations": [],
+        "tool_events": [
+            {"type": "agent", "name": "auto_confirm", "status": "completed", "message": "Auto-confirmed pending action"},
+        ],
+        "artifacts": report_artifacts,
+        "pending_actions": [],
+        "structured_actions": [],
+        "thread_id": agent_payload.get("thread_id"),
+        "calendar_updated": action_type in {"create_event", "update_event", "delete_event"},
+        "storage_updated": action_type in {
+            "storage.create_folder",
+            "storage.move_document",
+            "storage.delete_document",
+            "storage.update_metadata",
+            "storage.reassign_bucket",
+        },
+        "reports_generated": bool(report_artifacts),
+        "auto_confirmed_action_id": action.get("action_id"),
+    }
+
+
 @app.post("/api/agent/chat")
 def api_agent_chat():
     try:
         agent_payload = build_agent_chat_payload(get_json_payload(required=True))
+
+        if _is_confirm_message(agent_payload.get("message", "")):
+            thread_id = str(agent_payload.get("thread_id") or "").strip()
+            client_context = agent_payload.get("client_context") if isinstance(agent_payload.get("client_context"), dict) else {}
+            profile_hint = client_context.get("profile_id") or client_context.get("user_id")
+            user_id = normalize_user_id(profile_hint) if profile_hint else None
+            latest = find_latest_pending_action_for_thread(thread_id, user_id=user_id) if thread_id else None
+            if latest and latest.get("action_id"):
+                try:
+                    confirmation = confirm_pending_action(
+                        latest["action_id"],
+                        execute_pending_agent_action,
+                        thread_id=thread_id or None,
+                        user_id=user_id,
+                    )
+                    response_payload = _build_confirm_chat_response(
+                        confirmation,
+                        confirmation.get("action") or latest,
+                        agent_payload,
+                    )
+                    return jsonify(make_json_safe(response_payload))
+                except (KeyError, PermissionError, ValueError, RuntimeError, FileNotFoundError) as exc:
+                    logger.info("Auto-confirm failed, falling back to agent: %s", exc)
+
         response_payload = run_agent_chat(
             agent_payload,
             local_tools={"calendar_snapshot": build_agent_calendar_snapshot},

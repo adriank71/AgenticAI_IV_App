@@ -4291,6 +4291,23 @@ async function submitAdviserPrompt(rawPrompt) {
     };
     appendChatMessage("bot", replyText, replyPolicy, messageExtras);
     pushChatHistory("assistant", replyText, messageExtras);
+
+    if (data && (data.calendar_updated || data.storage_updated || data.reports_generated)) {
+      clearCalendarDataCache();
+      try {
+        await Promise.all([
+          refreshAutomations(),
+          refreshDashboardData().catch(() => {}),
+          data.storage_updated ? refreshDocumentBucketBoard({ force: true }).catch(() => {}) : Promise.resolve(),
+        ]);
+      } catch (_error) {
+        /* ignore refresh failures */
+      }
+      if (data.calendar_updated && state.calendar) {
+        state.calendar.refetchEvents();
+        await refreshCalendarData().catch(() => {});
+      }
+    }
   } catch (error) {
     if (error.name === "AbortError") {
       return;

@@ -233,6 +233,30 @@ def register_pending_actions(
     return registered
 
 
+def find_latest_pending_action_for_thread(
+    thread_id: str,
+    *,
+    user_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the most recently drafted, still-pending action for a given thread."""
+    normalized_thread_id = str(thread_id or "").strip()
+    if not normalized_thread_id:
+        return None
+    normalized_user_id = str(user_id or "").strip()
+    state = _read_pending_action_state()
+    candidates = [
+        action for action in state["actions"]
+        if isinstance(action, dict)
+        and action.get("status") == "pending"
+        and action.get("thread_id") == normalized_thread_id
+        and (not normalized_user_id or not action.get("user_id") or action.get("user_id") == normalized_user_id)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return _public_pending_action(candidates[0])
+
+
 def confirm_pending_action(
     action_id: str,
     executor: Callable[[dict[str, Any]], dict[str, Any]],
