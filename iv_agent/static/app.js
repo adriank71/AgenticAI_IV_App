@@ -1115,28 +1115,13 @@ function toggleWorkspacePanel(viewName) {
   switchAppView(viewName).catch(() => {});
 }
 
-const workspacePanelIntentOrder = ["calendar", "automations", "reports"];
-
-const workspacePanelPhraseIntents = [
-  { panel: "calendar", phrases: ["calendar entry", "calendar event", "calendar appointment", "kalender eintrag", "kalendereintrag", "kalendertermin"] },
-  { panel: "automations", phrases: ["active automations", "aktive automatisierungen", "monatlicher report", "month end report", "assistenzbeitrag report"] },
-  { panel: "reports", phrases: ["rechnung hochladen", "dokument hochladen", "datei hochladen", "rechnung speichern", "dokument speichern", "in storage", "in der datenbank"] },
-];
+const workspacePanelIntentOrder = ["calendar", "reports", "automations"];
 
 const workspacePanelWordIntents = [
-  { panel: "calendar", patterns: [/\bcalendar\b/, /\bkalender\w*/, /\btermin\w*/, /\bappointment\w*/, /\bevent\w*/, /\beintrag\w*/] },
-  { panel: "automations", patterns: [/\berinner\w*/, /\breminder\w*/, /\breport\w*/, /\bbericht\w*/, /\bautomation\w*/, /\bautomatisier\w*/, /\bwiederkehr\w*/] },
-  { panel: "reports", patterns: [/\bhochlad\w*/, /\bupload\w*/, /\bspeicher\w*/, /\bdatenbank\w*/, /\bdatabase\w*/, /\bdokument\w*/, /\brechnung\w*/, /\bpdf\b/, /\bablage\w*/, /\bstorage\b/, /\bdatei\w*/] },
+  { panel: "calendar", patterns: [/\bkalend(?:ar|er)\w*/, /\btermin\w*/] },
+  { panel: "reports", patterns: [/\bdatei\w*/, /\brechnung\w*/, /\bhochlad\w*/] },
+  { panel: "automations", patterns: [/\berinner\w*/, /\breport\w*/, /\bformular\w*/] },
 ];
-
-const calendarActionTypes = new Set(["create_event", "update_event", "delete_event"]);
-const automationActionTypes = new Set(["create_reminder", "generate_report", "send_report"]);
-const storageActionTypes = new Set([
-  "storage.create_folder",
-  "storage.move_document",
-  "storage.delete_document",
-  "storage.update_metadata",
-]);
 
 function normalizeWorkspaceIntentText(text) {
   return String(text || "")
@@ -1154,80 +1139,14 @@ function detectPanelIntentFromText(text) {
     return "";
   }
 
-  const matches = new Map();
-  workspacePanelPhraseIntents.forEach((entry) => {
-    if (entry.phrases.some((phrase) => normalized.includes(normalizeWorkspaceIntentText(phrase)))) {
-      matches.set(entry.panel, Math.max(matches.get(entry.panel) || 0, 2));
+  for (const panel of workspacePanelIntentOrder) {
+    const entry = workspacePanelWordIntents.find((candidate) => candidate.panel === panel);
+    if (entry && entry.patterns.some((pattern) => pattern.test(normalized))) {
+      return panel;
     }
-  });
-  workspacePanelWordIntents.forEach((entry) => {
-    if (entry.patterns.some((pattern) => pattern.test(normalized))) {
-      matches.set(entry.panel, Math.max(matches.get(entry.panel) || 0, 1));
-    }
-  });
-
-  if (!matches.size) {
-    return "";
   }
 
-  return workspacePanelIntentOrder
-    .map((panel) => ({ panel, score: matches.get(panel) || 0 }))
-    .filter((match) => match.score > 0)
-    .sort((left, right) => right.score - left.score || workspacePanelIntentOrder.indexOf(left.panel) - workspacePanelIntentOrder.indexOf(right.panel))[0].panel;
-}
-
-function getActionType(action) {
-  return String((action && (action.type || action.action_type)) || "").trim();
-}
-
-function detectPanelIntentFromActions(actions) {
-  const items = Array.isArray(actions) ? actions : [];
-  const matchedPanels = new Set();
-  items.forEach((action) => {
-    const actionType = getActionType(action);
-    if (calendarActionTypes.has(actionType)) {
-      matchedPanels.add("calendar");
-    } else if (automationActionTypes.has(actionType)) {
-      matchedPanels.add("automations");
-    } else if (storageActionTypes.has(actionType)) {
-      matchedPanels.add("reports");
-    }
-
-    const payload = action && action.payload && typeof action.payload === "object" ? action.payload : {};
-    const textIntent = detectPanelIntentFromText([
-      action && action.title,
-      actionType,
-      payload.title,
-      payload.name,
-      payload.note,
-      payload.file_name,
-    ].filter(Boolean).join(" "));
-    if (textIntent) {
-      matchedPanels.add(textIntent);
-    }
-  });
-
-  return workspacePanelIntentOrder.find((panel) => matchedPanels.has(panel)) || "";
-}
-
-function detectPanelIntentFromToolEvents(toolEvents) {
-  const items = Array.isArray(toolEvents) ? toolEvents : [];
-  return detectPanelIntentFromText(
-    items.map((event) => [event && event.name, event && event.type, event && event.message].filter(Boolean).join(" ")).join(" ")
-  );
-}
-
-function detectPanelIntentFromConfirmedAction(payload) {
-  if (!payload || typeof payload !== "object") {
-    return "";
-  }
-  if (payload.calendar_updated === true) {
-    return "calendar";
-  }
-  if (payload.storage_updated === true) {
-    return "reports";
-  }
-  return detectPanelIntentFromActions(payload.action ? [payload.action] : []);
+  return "";
 }
 
 function openWorkspacePanelForIntent(intent, options = {}) {
@@ -4212,7 +4131,6 @@ async function confirmPendingAgentAction(actionId, button) {
       }),
     });
     button.textContent = "Confirmed";
-    const confirmedPanelIntent = detectPanelIntentFromConfirmedAction(payload);
     const artifacts = Array.isArray(payload && payload.artifacts) ? payload.artifacts : [];
     if (payload && payload.result) {
       const messageText = payload.reports_generated
@@ -4234,7 +4152,6 @@ async function confirmPendingAgentAction(actionId, button) {
       state.calendar.refetchEvents();
       await refreshCalendarData();
     }
-    openWorkspacePanelForIntent(confirmedPanelIntent, { source: "confirmed-action" });
   } catch (error) {
     button.disabled = false;
     button.textContent = originalText;
@@ -4249,7 +4166,7 @@ async function submitAdviserPrompt(rawPrompt) {
 
   markChatStarted();
   const attachmentPayload = getChatAttachmentPayload();
-  const promptPanelIntent = detectPanelIntentFromText(prompt) || (attachmentPayload.length ? "reports" : "");
+  const promptPanelIntent = detectPanelIntentFromText(prompt);
   openWorkspacePanelForIntent(promptPanelIntent, { source: "user-message" });
   appendChatMessage("user", prompt, null, { attachments: attachmentPayload });
   pushChatHistory("user", prompt);
@@ -4317,9 +4234,6 @@ async function submitAdviserPrompt(rawPrompt) {
       : (Array.isArray(data.structured_actions) ? data.structured_actions : []);
     const toolEvents = Array.isArray(data.tool_events) ? data.tool_events : [];
     const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
-    const responsePanelIntent = detectPanelIntentFromActions(pendingActions)
-      || detectPanelIntentFromToolEvents(toolEvents)
-      || detectPanelIntentFromText(replyText);
     removeChatPendingIndicator();
     const messageExtras = {
       citations: Array.isArray(data.citations) ? data.citations : [],
@@ -4328,7 +4242,6 @@ async function submitAdviserPrompt(rawPrompt) {
       toolEvents,
     };
     appendChatMessage("bot", replyText, replyPolicy, messageExtras);
-    openWorkspacePanelForIntent(responsePanelIntent, { source: "assistant-message" });
     pushChatHistory("assistant", replyText, messageExtras);
   } catch (error) {
     if (error.name === "AbortError") {

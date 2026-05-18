@@ -6190,8 +6190,10 @@ body {
 }
 
 #view-adviser.app-view.is-active {
-  display: block;
+  display: flex;
+  flex-direction: column;
   grid-column: 1;
+  min-width: 0;
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -6207,6 +6209,7 @@ body {
 }
 
 .adviser-shell {
+  flex: 1 1 auto;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -6230,7 +6233,10 @@ body {
 .chat-thread {
   flex: 1 1 auto;
   min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   background: transparent;
   border: 0;
   border-radius: 0;
