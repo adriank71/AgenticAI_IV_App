@@ -673,6 +673,12 @@ def _run_agents_sdk(
         _tool_event("orchestrator", "started", f"OpenAI Agents SDK orchestrator using {AGENT_MODEL}", event_type="agent")
     ]
     orchestrator_tools = []
+    turn_cache: dict[str, Any] = {}
+
+    try:
+        from ..tools.storage_tools import _filter_signature, _resolve_filter_documents
+    except ImportError:
+        from tools.storage_tools import _filter_signature, _resolve_filter_documents
 
     client_context = request_payload.get("client_context", {}) if isinstance(request_payload.get("client_context"), dict) else {}
     context_user_id = normalize_user_id(client_context.get("profile_id") or client_context.get("user_id") or "default")
@@ -802,63 +808,44 @@ def _run_agents_sdk(
         storage_bucket: str = "",
         limit: int = 10,
     ) -> str:
-        """Search stored documents for mixed calendar/document questions with optional storage bucket."""
-        try:
-            from ..tools.storage_tools import _structured_storage_query as _normalize_storage_query
-        except ImportError:
-            from tools.storage_tools import _structured_storage_query as _normalize_storage_query
-        tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
-        bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
-        structural_filters_present = any(
-            [
-                bucket_filter,
-                document_type,
-                institution,
-                _json_list(tags_json),
-                _optional_int(year),
-                _optional_int(month),
-                start_date,
-                end_date,
-            ]
-        )
-        normalized_query = _normalize_storage_query(
-            query,
-            storage_bucket=bucket_filter,
+        """Search stored documents. Combines structural filters with optional keyword query in ONE DB call.
+        Pass query="" for pure structural filtering (faster). Cached within a turn."""
+        tags = _json_list(tags_json)
+        cache_key = "search:" + _filter_signature(
+            query=query,
+            year=_optional_int(year),
+            month=_optional_int(month),
+            start_date=start_date,
+            end_date=end_date,
+            document_type=document_type,
             institution=institution,
+            tags=tags,
+            folder_id=folder_id,
+            storage_bucket=storage_bucket,
+            limit=limit,
         )
-        effective_query = normalized_query if structural_filters_present else (normalized_query or query)
-        documents = service_search_documents(
+        if cache_key in turn_cache:
+            tool_events.append(_tool_event("search_user_documents", "cached", "Document search served from cache"))
+            return json.dumps(make_json_safe(turn_cache[cache_key]), ensure_ascii=True)
+        tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
+        documents, effective_query = _resolve_filter_documents(
             user_id=context_user_id,
-            query=effective_query,
+            query=query,
+            storage_bucket=storage_bucket,
+            document_type=document_type,
+            institution=institution,
+            tags=tags,
             year=_optional_int(year),
             month=_optional_int(month),
             start_date=start_date or None,
             end_date=end_date or None,
-            document_type=document_type,
-            institution=institution,
-            tags=_json_list(tags_json),
-            storage_bucket=bucket_filter,
-            folder_id=folder_id or None,
             limit=limit,
         )
-        if not documents and effective_query and structural_filters_present:
-            documents = service_search_documents(
-                user_id=context_user_id,
-                query="",
-                year=_optional_int(year),
-                month=_optional_int(month),
-                start_date=start_date or None,
-                end_date=end_date or None,
-                document_type=document_type,
-                institution=institution,
-                tags=_json_list(tags_json),
-                storage_bucket=bucket_filter,
-                folder_id=folder_id or None,
-                limit=limit,
-            )
         _collect_document_artifacts(documents)
         tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
-        return json.dumps(make_json_safe({"query": query, "effective_query": effective_query, "documents": documents}), ensure_ascii=True)
+        payload = {"query": query, "effective_query": effective_query, "documents": documents, "count": len(documents)}
+        turn_cache[cache_key] = payload
+        return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     orchestrator_tools.append(search_user_documents)
 
@@ -909,68 +896,56 @@ def _run_agents_sdk(
         end_date: str = "",
         limit: int = 20,
         bundle_name: str = "",
+        include_sum: bool = True,
     ) -> str:
-        """Bundle stored documents into a downloadable ZIP artifact (read-only, no pending action)."""
+        """One-shot: fetch documents + build ZIP + (when invoices present) compute CHF sum
+        in a SINGLE tool call. Read-only. Cached by filter signature within a turn so duplicate
+        calls are instant. Use this for any 'bundle/zip/Paket' request — do not also call
+        search_user_documents or sum_user_invoice_amounts for the same filters."""
+        tags = _json_list(tags_json)
+        explicit_ids = _json_list(document_ids_json)
+        bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
+        cache_key = "bundle:" + _filter_signature(
+            document_ids=explicit_ids,
+            query=query,
+            storage_bucket=storage_bucket,
+            document_type=document_type,
+            institution=institution,
+            tags=tags,
+            year=_optional_int(year),
+            month=_optional_int(month),
+            start_date=start_date,
+            end_date=end_date,
+            limit=bounded_limit,
+            bundle_name=bundle_name,
+            include_sum=include_sum,
+        )
+        if cache_key in turn_cache:
+            tool_events.append(_tool_event("bundle_user_documents", "cached", "Bundle served from cache"))
+            return json.dumps(make_json_safe(turn_cache[cache_key]), ensure_ascii=True)
+
         tool_events.append(_tool_event("bundle_user_documents", "started", "Building ZIP bundle"))
-        document_ids = _json_list(document_ids_json)
         documents: list[dict[str, Any]] = []
-        if document_ids:
-            for document_id in document_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
+        effective_query = ""
+        if explicit_ids:
+            for document_id in explicit_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
                 document = service_get_document(user_id=context_user_id, document_id=document_id)
                 if document:
                     documents.append(document)
         else:
-            try:
-                from ..tools.storage_tools import _structured_storage_query as _normalize_storage_query
-            except ImportError:
-                from tools.storage_tools import _structured_storage_query as _normalize_storage_query
-            bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
-            bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
-            normalized_query = _normalize_storage_query(
-                query,
-                storage_bucket=bucket_filter,
-                institution=institution,
-            )
-            structural_filters_present = any(
-                [
-                    bucket_filter,
-                    document_type,
-                    institution,
-                    _json_list(tags_json),
-                    _optional_int(year),
-                    _optional_int(month),
-                    start_date,
-                    end_date,
-                ]
-            )
-            effective_query = normalized_query if structural_filters_present else (normalized_query or query)
-            documents = service_search_documents(
+            documents, effective_query = _resolve_filter_documents(
                 user_id=context_user_id,
-                query=effective_query,
+                query=query,
+                storage_bucket=storage_bucket,
+                document_type=document_type,
+                institution=institution,
+                tags=tags,
                 year=_optional_int(year),
                 month=_optional_int(month),
                 start_date=start_date or None,
                 end_date=end_date or None,
-                document_type=document_type,
-                institution=institution,
-                tags=_json_list(tags_json),
-                storage_bucket=bucket_filter,
                 limit=bounded_limit,
             )
-            if not documents and effective_query and structural_filters_present:
-                documents = service_search_documents(
-                    user_id=context_user_id,
-                    query="",
-                    year=_optional_int(year),
-                    month=_optional_int(month),
-                    start_date=start_date or None,
-                    end_date=end_date or None,
-                    document_type=document_type,
-                    institution=institution,
-                    tags=_json_list(tags_json),
-                    storage_bucket=bucket_filter,
-                    limit=bounded_limit,
-                )
             if not documents:
                 fallback_ids: list[str] = []
                 for item in collected_artifacts:
@@ -992,32 +967,50 @@ def _run_agents_sdk(
             file_name=bundle_title if bundle_title.lower().endswith(".zip") else "documents_bundle.zip",
         )
         if not bundle:
+            payload = {
+                "bundle": None,
+                "documents": [],
+                "count": 0,
+                "effective_query": effective_query,
+                "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
+            }
+            turn_cache[cache_key] = payload
             tool_events.append(_tool_event("bundle_user_documents", "completed", "No documents to bundle"))
-            return json.dumps(
-                make_json_safe(
-                    {
-                        "bundle": None,
-                        "documents": [],
-                        "count": 0,
-                        "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
-                    }
-                ),
-                ensure_ascii=True,
-            )
+            return json.dumps(make_json_safe(payload), ensure_ascii=True)
+
         collected_artifacts.append(bundle)
-        tool_events.append(_tool_event("bundle_user_documents", "completed", f"Bundle with {len(bundle['document_ids'])} files"))
-        return json.dumps(
-            make_json_safe(
-                {
-                    "bundle": bundle,
-                    "documents": documents,
-                    "count": len(bundle["document_ids"]),
-                    "download_url": bundle["download_url"],
-                    "max_files": DOCUMENT_BUNDLE_MAX_FILES,
-                }
-            ),
-            ensure_ascii=True,
+        payload: dict[str, Any] = {
+            "bundle": bundle,
+            "documents": documents,
+            "count": len(bundle["document_ids"]),
+            "download_url": bundle["download_url"],
+            "max_files": DOCUMENT_BUNDLE_MAX_FILES,
+            "effective_query": effective_query,
+        }
+        has_invoice = any(
+            str((document or {}).get("document_type") or "").lower() == "invoice"
+            for document in documents
         )
+        if include_sum and has_invoice:
+            bucket_filter_for_sum = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+            sum_payload = service_sum_invoice_amounts(
+                user_id=context_user_id,
+                query="",
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                institution=institution,
+                tags=tags,
+                storage_bucket=bucket_filter_for_sum,
+                limit=max(bounded_limit, 100),
+            )
+            payload["sum"] = sum_payload
+            _collect_document_artifacts(sum_payload.get("counted_documents") or [])
+            _collect_document_artifacts(sum_payload.get("documents_without_amount") or [])
+        turn_cache[cache_key] = payload
+        tool_events.append(_tool_event("bundle_user_documents", "completed", f"Bundle with {len(bundle['document_ids'])} files"))
+        return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     orchestrator_tools.append(bundle_user_documents)
 
@@ -1099,27 +1092,21 @@ def _run_agents_sdk(
     tool_events.append(_tool_event("AutomationsAgent", "available", "AutomationsAgent handoff registered", event_type="agent"))
 
     instructions = (
-        "You are the IV-Helper orchestrator. Every chat message reaches you first. "
-        "Before answering, decide whether to answer directly, inspect local app state, draft a pending action, "
-        "or hand off to a specialized agent. "
-        "For every calendar, appointment, Termin, Therapie, scheduling, counting, or availability request, hand off to CalendarAgent. "
-        "For upload, delete, move, metadata, folder, Datei speichern, Dokument loeschen, or document organization requests, hand off to StorageAgent. "
-        "For document retrieval requests ('gib mir alle Dokumente', 'zeige Rechnungen', 'download Datei') always read storage first and ensure document artifacts are produced. "
-        "For any request to bundle/zip/pack/download multiple files together ('bündeln', 'als ZIP', 'als Ordner herunterladen', 'Paket', 'zusammen herunterladen'), "
-        "use the bundle_user_documents tool directly or hand off to StorageAgent — never draft a pending action and never claim that bundling is read-only or blocked. "
-        "For invoice total or sum requests, use sum_user_invoice_amounts or hand off to StorageAgent so the sum is based on filtered storage documents and checksum duplicate removal. "
-        "When the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, use it as the storage_bucket filter for storage reads. "
-        "For report generation, Assistenzbeitrag report, Transportkosten report, automation, reminder, Monatsende, or recurring reminder requests, hand off to AutomationsAgent. "
-        "For 'Was bedeutet...', IV questions, deadlines, Fristen, document understanding, comparisons, action items, broader knowledge, "
-        "or 'frag den IV Assistant' requests, hand off to KnowledgeAgent. "
-        "If the request combines calendar and documents, use local read tools from both domains before answering or hand off to the best specialized agent. "
-        "Raw file Base64 is never available to you; uploaded attachments are already persisted and represented as document metadata. "
-        "Do not execute side effects directly. For create, update, delete, reminder creation, PDF generation, report sending, "
-        "or automation saves, call draft_pending_action and explain that the user must confirm it. "
-        "Supported generic action_type values are create_reminder, generate_report, and send_report. Calendar mutations belong to CalendarAgent. "
-        "Report generation and automation saves belong to AutomationsAgent. Storage mutations belong to StorageAgent. Document explanation and synthesis belongs to KnowledgeAgent. "
-        "Answer in German unless the user explicitly requests another language. Format final answers as clean concise Markdown. "
-        "Keep answers concise, mention which capability you used when useful, and cite retrieved sources when available."
+        "You are the IV-Helper orchestrator. Route each request to the fewest tools/agents needed. "
+        "Routing: calendar/Termin/Therapie → CalendarAgent. Upload/delete/move/folder/metadata mutations → StorageAgent. "
+        "Report/Assistenzbeitrag/Transportkosten/reminder/automation → AutomationsAgent. "
+        "'Was bedeutet…', IV-Fragen, Fristen, Vergleich, Synthese → KnowledgeAgent. "
+        "FAST PATH for storage reads — handle directly with the local tools (no handoff): "
+        "(a) 'bundle/zip/Paket/ZIP/Ordner herunterladen' → call bundle_user_documents ONCE with structural filters (storage_bucket, year, month, document_type). "
+        "    bundle_user_documents already computes the invoice sum when invoices are present (include_sum=true). "
+        "    Do NOT also call search_user_documents or sum_user_invoice_amounts in the same turn — bundle_user_documents returns docs+ZIP+sum together. "
+        "(b) Pure 'finde/suche/zeige Dokumente' → search_user_documents with structural filters and query=\"\". "
+        "(c) Pure 'Summe/Total Rechnungen' (no bundle) → sum_user_invoice_amounts with structural filters. "
+        "RULES: storage_bucket values are IV, TixiTaxi, Stiftung, Versicherung. "
+        "Never pass German plural nouns ('Rechnungen', 'Dokumente', 'Dateien') or month names ('Mai') as query — those are NOT search keywords; use year/month/storage_bucket and query=\"\". "
+        "For side-effects (create/update/delete/report/reminder) use draft_pending_action; calendar mutations go to CalendarAgent. "
+        "Raw Base64 is never available — uploads are already persisted. "
+        "Answer in concise German Markdown."
     )
     agent = Agent(
         name="IV-Helper Orchestrator",

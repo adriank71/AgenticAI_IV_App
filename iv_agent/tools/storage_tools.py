@@ -151,6 +151,62 @@ def _structured_storage_query(query: str, *, storage_bucket: str = "", instituti
     return " ".join(meaningful) if meaningful else raw
 
 
+def _filter_signature(**filters: Any) -> str:
+    safe = {key: value for key, value in filters.items() if value not in (None, "", 0, [])}
+    return json.dumps(safe, sort_keys=True, default=str)
+
+
+def _resolve_filter_documents(
+    *,
+    user_id: str,
+    query: str,
+    storage_bucket: str,
+    document_type: str,
+    institution: str,
+    tags: list[str],
+    year: int | None,
+    month: int | None,
+    start_date: str | None,
+    end_date: str | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], str]:
+    """Resolve documents matching the given filters in ONE DB call.
+
+    Decides upfront whether a keyword query is meaningful. When only structural filters
+    are given (bucket/date/type/etc.), uses list_documents (no ILIKE) for speed. Returns
+    (documents, effective_query) so callers can communicate what was actually applied.
+    """
+    bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+    normalized_query = _structured_storage_query(query, storage_bucket=bucket_filter, institution=institution)
+    structural_filters_present = any(
+        [
+            bucket_filter,
+            document_type,
+            institution,
+            tags,
+            year,
+            month,
+            start_date,
+            end_date,
+        ]
+    )
+    effective_query = normalized_query if structural_filters_present else (normalized_query or query)
+    documents = service_search_documents(
+        user_id=user_id,
+        query=effective_query,
+        year=year,
+        month=month,
+        start_date=start_date,
+        end_date=end_date,
+        document_type=document_type,
+        institution=institution,
+        tags=tags,
+        storage_bucket=bucket_filter,
+        limit=limit,
+    )
+    return documents, effective_query
+
+
 def build_storage_tools(
     function_tool: Any,
     *,
@@ -165,6 +221,7 @@ def build_storage_tools(
     tool_event_factory: Any,
 ) -> list[Any]:
     tools: list[Any] = []
+    turn_cache: dict[str, Any] = {}
 
     def _storage_tool_result(tool_name: str, callback: Any) -> str:
         tool_events.append(tool_event_factory(tool_name, "started", f"{tool_name} started"))
@@ -259,57 +316,71 @@ def build_storage_tools(
         storage_bucket: str = "",
         limit: int = 10,
     ) -> str:
-        """Search stored documents for the current user by filename, summary, metadata, extracted text, and optional storage bucket."""
+        """Search stored documents for the current user. Combines structural filters
+        (bucket/date/type/institution/tags) with optional keyword query in ONE DB call.
+        Pass an empty query when you only want structural filtering (faster).
+        """
 
         def read() -> dict[str, Any]:
-            bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+            tags = _json_list(tags_json)
+            cache_key = "search:" + _filter_signature(
+                query=query,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date,
+                end_date=end_date,
+                document_type=document_type,
+                institution=institution,
+                tags=tags,
+                storage_bucket=storage_bucket,
+                limit=limit,
+            )
+            cached = turn_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            documents, effective_query = _resolve_filter_documents(
+                user_id=context_user_id,
+                query=query,
+                storage_bucket=storage_bucket,
+                document_type=document_type,
+                institution=institution,
+                tags=tags,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                limit=limit,
+            )
             structural_filters_present = any(
                 [
-                    bucket_filter,
+                    storage_bucket or infer_document_bucket_from_text(f"{query} {institution}"),
                     document_type,
                     institution,
-                    _json_list(tags_json),
+                    tags,
                     _optional_int(year),
                     _optional_int(month),
                     start_date,
                     end_date,
                 ]
             )
-            normalized_query = _structured_storage_query(
-                query,
-                storage_bucket=bucket_filter,
-                institution=institution,
-            )
-            effective_query = normalized_query if structural_filters_present else (normalized_query or query)
-            documents = service_search_documents(
-                user_id=context_user_id,
-                query=effective_query,
-                year=_optional_int(year),
-                month=_optional_int(month),
-                start_date=start_date or None,
-                end_date=end_date or None,
-                document_type=document_type,
-                institution=institution,
-                tags=_json_list(tags_json),
-                storage_bucket=bucket_filter,
-                limit=limit,
-            )
             if not documents and effective_query and structural_filters_present:
-                documents = service_search_documents(
+                documents, _ = _resolve_filter_documents(
                     user_id=context_user_id,
                     query="",
+                    storage_bucket=storage_bucket,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=tags,
                     year=_optional_int(year),
                     month=_optional_int(month),
                     start_date=start_date or None,
                     end_date=end_date or None,
-                    document_type=document_type,
-                    institution=institution,
-                    tags=_json_list(tags_json),
-                    storage_bucket=bucket_filter,
                     limit=limit,
                 )
             _collect_document_artifacts(documents)
-            return {"query": query, "effective_query": effective_query, "documents": documents}
+            payload = {"query": query, "effective_query": effective_query, "documents": documents, "count": len(documents)}
+            turn_cache[cache_key] = payload
+            return payload
 
         return _storage_tool_result(
             "search_documents",
@@ -490,89 +561,83 @@ def build_storage_tools(
         end_date: str = "",
         limit: int = 20,
         bundle_name: str = "",
+        include_sum: bool = True,
     ) -> str:
-        """Create a downloadable ZIP artifact URL for selected or searched documents without changing storage.
+        """One-shot: fetch documents matching filters, build a ZIP download URL, and
+        (when include_sum is True and any invoice is present) compute the CHF sum.
 
-        Read-only operation - never drafts a pending action. If document_ids_json is empty
-        and no filters match, it falls back to documents already collected in this turn so
-        the user always gets a usable ZIP link or a clear "nichts zu bündeln" message.
+        Read-only. Never drafts a pending action. Designed so the agent only needs
+        ONE tool call for a request like "bundle all TixiTaxi invoices for May 2026 and
+        give me the total in CHF". Cached within a turn by filter signature.
         """
+
+        def _resolve_documents_by_ids(document_ids: list[str]) -> list[dict[str, Any]]:
+            resolved: list[dict[str, Any]] = []
+            for document_id in document_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
+                document = service_get_document(user_id=context_user_id, document_id=document_id)
+                if document:
+                    resolved.append(document)
+            return resolved
 
         def _fallback_documents_from_collected() -> list[dict[str, Any]]:
             if collected_artifacts is None:
                 return []
             fallback_ids: list[str] = []
             for item in collected_artifacts:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") != "document":
+                if not isinstance(item, dict) or item.get("type") != "document":
                     continue
                 document_id = str(item.get("document_id") or item.get("id") or "").strip()
                 if document_id and document_id not in fallback_ids:
                     fallback_ids.append(document_id)
-            recovered: list[dict[str, Any]] = []
-            for document_id in fallback_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
-                document = service_get_document(user_id=context_user_id, document_id=document_id)
-                if document:
-                    recovered.append(document)
-            return recovered
+            return _resolve_documents_by_ids(fallback_ids)
 
         def read() -> dict[str, Any]:
-            document_ids = _json_list(document_ids_json)
+            tags = _json_list(tags_json)
+            explicit_ids = _json_list(document_ids_json)
+            bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
+
+            cache_key = "bundle:" + _filter_signature(
+                document_ids=explicit_ids,
+                query=query,
+                storage_bucket=storage_bucket,
+                document_type=document_type,
+                institution=institution,
+                tags=tags,
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date,
+                end_date=end_date,
+                limit=bounded_limit,
+                bundle_name=bundle_name,
+                include_sum=include_sum,
+            )
+            cached = turn_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
             documents: list[dict[str, Any]] = []
-            if document_ids:
-                for document_id in document_ids[:DOCUMENT_BUNDLE_MAX_FILES]:
-                    document = service_get_document(user_id=context_user_id, document_id=document_id)
-                    if document:
-                        documents.append(document)
+            effective_query = ""
+            if explicit_ids:
+                documents = _resolve_documents_by_ids(explicit_ids)
             else:
-                bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
-                query_filter = _structured_storage_query(query, storage_bucket=bucket_filter, institution=institution)
-                bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
-                has_filter = any(
-                    [
-                        query_filter,
-                        bucket_filter,
-                        document_type,
-                        institution,
-                        _json_list(tags_json),
-                        _optional_int(year),
-                        _optional_int(month),
-                        start_date,
-                        end_date,
-                    ]
+                documents, effective_query = _resolve_filter_documents(
+                    user_id=context_user_id,
+                    query=query,
+                    storage_bucket=storage_bucket,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=tags,
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    limit=bounded_limit,
                 )
-                if has_filter:
-                    documents = service_search_documents(
-                        user_id=context_user_id,
-                        query=query_filter,
-                        year=_optional_int(year),
-                        month=_optional_int(month),
-                        start_date=start_date or None,
-                        end_date=end_date or None,
-                        document_type=document_type,
-                        institution=institution,
-                        tags=_json_list(tags_json),
-                        storage_bucket=bucket_filter,
-                        limit=bounded_limit,
-                    )
-                    if not documents and query_filter:
-                        documents = service_search_documents(
-                            user_id=context_user_id,
-                            query="",
-                            year=_optional_int(year),
-                            month=_optional_int(month),
-                            start_date=start_date or None,
-                            end_date=end_date or None,
-                            document_type=document_type,
-                            institution=institution,
-                            tags=_json_list(tags_json),
-                            storage_bucket=bucket_filter,
-                            limit=bounded_limit,
-                        )
                 if not documents:
                     documents = _fallback_documents_from_collected()
+
             _collect_document_artifacts(documents)
+
             bundle_title = (bundle_name or "Dokumentenpaket.zip").strip() or "Dokumentenpaket.zip"
             bundle = service_build_document_bundle_artifact(
                 documents,
@@ -581,21 +646,52 @@ def build_storage_tools(
                 file_name=bundle_title if bundle_title.lower().endswith(".zip") else "documents_bundle.zip",
             )
             if not bundle:
-                return {
+                payload = {
                     "bundle": None,
                     "documents": [],
                     "count": 0,
+                    "effective_query": effective_query,
                     "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
                 }
+                turn_cache[cache_key] = payload
+                return payload
+
             if collected_artifacts is not None:
                 collected_artifacts.append(bundle)
-            return {
+
+            payload: dict[str, Any] = {
                 "bundle": bundle,
                 "documents": documents,
                 "count": len(bundle.get("document_ids") or []),
                 "download_url": bundle["download_url"],
                 "max_files": DOCUMENT_BUNDLE_MAX_FILES,
+                "effective_query": effective_query,
             }
+
+            has_invoice = any(
+                str((document or {}).get("document_type") or "").lower() == "invoice"
+                for document in documents
+            )
+            if include_sum and has_invoice:
+                bucket_filter_for_sum = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+                sum_payload = service_sum_invoice_amounts(
+                    user_id=context_user_id,
+                    query="",
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    institution=institution,
+                    tags=tags,
+                    storage_bucket=bucket_filter_for_sum,
+                    limit=max(bounded_limit, 100),
+                )
+                payload["sum"] = sum_payload
+                _collect_document_artifacts(sum_payload.get("counted_documents") or [])
+                _collect_document_artifacts(sum_payload.get("documents_without_amount") or [])
+
+            turn_cache[cache_key] = payload
+            return payload
 
         return _storage_tool_result("bundle_documents", read)
 
