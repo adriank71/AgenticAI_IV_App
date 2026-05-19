@@ -598,12 +598,21 @@ def classify_text_locally(text: str, file_name: str = "") -> dict[str, Any]:
 
 def _coerce_bucket_name(value: Any, *, allowed: list[str], fallback: str) -> str:
     candidate = str(value or "").strip()
+    if not candidate:
+        return fallback
     if candidate in allowed:
         return candidate
-    if candidate.lower() in INSURANCE_BUCKET_ALIASES:
+    candidate_lower = candidate.lower()
+    for bucket_name in allowed:
+        if bucket_name.lower() == candidate_lower:
+            return bucket_name
+    if candidate_lower in INSURANCE_BUCKET_ALIASES:
         for bucket_name in allowed:
             if bucket_name.lower() in INSURANCE_BUCKET_ALIASES:
                 return bucket_name
+    inferred = infer_document_bucket_from_text(candidate)
+    if inferred and inferred in allowed:
+        return inferred
     return fallback
 
 

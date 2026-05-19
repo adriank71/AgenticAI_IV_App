@@ -150,6 +150,60 @@ class StorageToolsTests(unittest.TestCase):
         self.assertEqual(search_mock.call_args.kwargs["year"], 2026)
         self.assertEqual(search_mock.call_args.kwargs["month"], 5)
 
+    def test_search_documents_drops_plural_german_query_when_structural_filters_present(self):
+        document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "file_name": "tixi_rechnung_mai_1.pdf",
+            "content_type": "application/pdf",
+            "storage_bucket": "TixiTaxi",
+        }
+
+        with patch("iv_agent.tools.storage_tools.service_search_documents", return_value=[document]) as search_mock:
+            tools, _events = self._build_tools([])
+            payload = json.loads(
+                tools["search_documents"](
+                    query="Rechnungen",
+                    storage_bucket="TixiTaxi",
+                    year=2026,
+                    month=5,
+                )
+            )
+
+        self.assertEqual(len(payload["documents"]), 1)
+        self.assertEqual(search_mock.call_args.kwargs["query"], "")
+        self.assertEqual(search_mock.call_args.kwargs["storage_bucket"], "TixiTaxi")
+        self.assertEqual(search_mock.call_args.kwargs["year"], 2026)
+        self.assertEqual(search_mock.call_args.kwargs["month"], 5)
+
+    def test_search_documents_retries_without_query_when_first_attempt_empty(self):
+        document = {
+            "document_id": "doc-1",
+            "user_id": "default",
+            "file_name": "tixi_rechnung_mai_1.pdf",
+            "content_type": "application/pdf",
+            "storage_bucket": "TixiTaxi",
+        }
+
+        with patch(
+            "iv_agent.tools.storage_tools.service_search_documents",
+            side_effect=[[], [document]],
+        ) as search_mock:
+            tools, _events = self._build_tools([])
+            payload = json.loads(
+                tools["search_documents"](
+                    query="quartalsabrechnung",
+                    storage_bucket="TixiTaxi",
+                    year=2026,
+                    month=5,
+                )
+            )
+
+        self.assertEqual(len(payload["documents"]), 1)
+        self.assertEqual(search_mock.call_count, 2)
+        self.assertEqual(search_mock.call_args_list[0].kwargs["query"], "quartalsabrechnung")
+        self.assertEqual(search_mock.call_args_list[1].kwargs["query"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

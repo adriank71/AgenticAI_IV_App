@@ -2268,7 +2268,7 @@ function renderMailConnectionState() {
     if (connected) {
       elements.gmailConnectNav.classList.add("is-connected");
       elements.gmailConnectNav.removeAttribute("href");
-      if (label) label.textContent = "Gmail verbunden";
+      if (label) label.textContent = "Gmail connected";
     } else {
       elements.gmailConnectNav.classList.remove("is-connected");
       elements.gmailConnectNav.setAttribute("href", "/api/mail/oauth/gmail/start");

@@ -803,10 +803,33 @@ def _run_agents_sdk(
         limit: int = 10,
     ) -> str:
         """Search stored documents for mixed calendar/document questions with optional storage bucket."""
+        try:
+            from ..tools.storage_tools import _structured_storage_query as _normalize_storage_query
+        except ImportError:
+            from tools.storage_tools import _structured_storage_query as _normalize_storage_query
         tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
+        bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+        structural_filters_present = any(
+            [
+                bucket_filter,
+                document_type,
+                institution,
+                _json_list(tags_json),
+                _optional_int(year),
+                _optional_int(month),
+                start_date,
+                end_date,
+            ]
+        )
+        normalized_query = _normalize_storage_query(
+            query,
+            storage_bucket=bucket_filter,
+            institution=institution,
+        )
+        effective_query = normalized_query if structural_filters_present else (normalized_query or query)
         documents = service_search_documents(
             user_id=context_user_id,
-            query=query,
+            query=effective_query,
             year=_optional_int(year),
             month=_optional_int(month),
             start_date=start_date or None,
@@ -814,13 +837,28 @@ def _run_agents_sdk(
             document_type=document_type,
             institution=institution,
             tags=_json_list(tags_json),
-            storage_bucket=storage_bucket or infer_document_bucket_from_text(query),
+            storage_bucket=bucket_filter,
             folder_id=folder_id or None,
             limit=limit,
         )
+        if not documents and effective_query and structural_filters_present:
+            documents = service_search_documents(
+                user_id=context_user_id,
+                query="",
+                year=_optional_int(year),
+                month=_optional_int(month),
+                start_date=start_date or None,
+                end_date=end_date or None,
+                document_type=document_type,
+                institution=institution,
+                tags=_json_list(tags_json),
+                storage_bucket=bucket_filter,
+                folder_id=folder_id or None,
+                limit=limit,
+            )
         _collect_document_artifacts(documents)
         tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
-        return json.dumps(make_json_safe({"query": query, "documents": documents}), ensure_ascii=True)
+        return json.dumps(make_json_safe({"query": query, "effective_query": effective_query, "documents": documents}), ensure_ascii=True)
 
     orchestrator_tools.append(search_user_documents)
 
@@ -882,11 +920,33 @@ def _run_agents_sdk(
                 if document:
                     documents.append(document)
         else:
+            try:
+                from ..tools.storage_tools import _structured_storage_query as _normalize_storage_query
+            except ImportError:
+                from tools.storage_tools import _structured_storage_query as _normalize_storage_query
             bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
             bounded_limit = min(max(1, int(limit or 20)), DOCUMENT_BUNDLE_MAX_FILES)
+            normalized_query = _normalize_storage_query(
+                query,
+                storage_bucket=bucket_filter,
+                institution=institution,
+            )
+            structural_filters_present = any(
+                [
+                    bucket_filter,
+                    document_type,
+                    institution,
+                    _json_list(tags_json),
+                    _optional_int(year),
+                    _optional_int(month),
+                    start_date,
+                    end_date,
+                ]
+            )
+            effective_query = normalized_query if structural_filters_present else (normalized_query or query)
             documents = service_search_documents(
                 user_id=context_user_id,
-                query=query,
+                query=effective_query,
                 year=_optional_int(year),
                 month=_optional_int(month),
                 start_date=start_date or None,
@@ -897,6 +957,20 @@ def _run_agents_sdk(
                 storage_bucket=bucket_filter,
                 limit=bounded_limit,
             )
+            if not documents and effective_query and structural_filters_present:
+                documents = service_search_documents(
+                    user_id=context_user_id,
+                    query="",
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=_json_list(tags_json),
+                    storage_bucket=bucket_filter,
+                    limit=bounded_limit,
+                )
             if not documents:
                 fallback_ids: list[str] = []
                 for item in collected_artifacts:

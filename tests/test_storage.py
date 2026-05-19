@@ -11,6 +11,7 @@ from iv_agent.calendar_manager import PostgresEventStore
 from iv_agent.reminders import PostgresReminderStore
 from iv_agent.services.storage_service import (
     StorageService,
+    _coerce_bucket_name,
     build_chat_document_artifact,
     extract_invoice_amount_fields,
     extract_document_text,
@@ -323,6 +324,15 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(params[1], "IV")
         self.assertEqual(params[2], 2026)
         self.assertEqual(params[3], 5)
+
+    def test_coerce_bucket_name_is_case_insensitive(self):
+        allowed = ["Stiftung", "TixiTaxi", "IV", "Versicherung"]
+        self.assertEqual(_coerce_bucket_name("tixitaxi", allowed=allowed, fallback=""), "TixiTaxi")
+        self.assertEqual(_coerce_bucket_name("TIXITAXI", allowed=allowed, fallback=""), "TixiTaxi")
+        self.assertEqual(_coerce_bucket_name("TixiTaxi", allowed=allowed, fallback=""), "TixiTaxi")
+        self.assertEqual(_coerce_bucket_name("Tixi Taxi", allowed=allowed, fallback=""), "TixiTaxi")
+        self.assertEqual(_coerce_bucket_name("", allowed=allowed, fallback="IV"), "IV")
+        self.assertEqual(_coerce_bucket_name("unknown", allowed=allowed, fallback=""), "")
 
     def test_chat_document_artifact_contains_stable_download_url(self):
         artifact = build_chat_document_artifact(

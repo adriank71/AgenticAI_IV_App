@@ -51,6 +51,8 @@ def build_storage_agent(
         "For any document retrieval request such as 'gib mir alle Dokumente', 'zeige Rechnungen', or 'finde Dateien', read storage first and return the documents from the tool result; never answer only from chat history. "
         "For invoice total or sum questions, always apply the user's document filters first and call sum_invoice_amounts; do not add amounts from memory or from a plain text summary. "
         "If the user mentions IV, TixiTaxi, Stiftung, Versicherung, or Versicherungen, pass that value as storage_bucket to document read tools. "
+        "Always prefer structured filters over text queries: when the user names a bucket and/or a month/year, call list_documents with storage_bucket and year/month and pass an EMPTY query string. Do NOT pass German plural nouns ('Rechnungen', 'Dokumente', 'Dateien') or month names ('Mai', 'April') as the query argument — those are structural filters, not search keywords, and they will return zero results because of substring/plural mismatches. "
+        "If a tool returns zero documents and you have a bucket+date filter, retry once with an empty query before reporting that nothing was found. "
         "Uploads have already been stored by the backend before you see the request. Never ask for or expose Base64 content. "
         "For folder creation, moving documents, deleting documents, bucket reassignment, or user-visible metadata updates, draft a pending action. "
         "Never claim a delete, move, bucket change, folder creation, or metadata update is complete before user confirmation. "

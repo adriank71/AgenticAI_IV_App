@@ -222,6 +222,7 @@ def build_storage_tools(
     ) -> str:
         """List stored documents for the current user with optional year, month, type, institution, tags, folder, and storage bucket filters."""
         def read() -> dict[str, Any]:
+            bucket_filter = storage_bucket or infer_document_bucket_from_text(institution)
             documents = service_list_documents(
                 user_id=context_user_id,
                 year=_optional_int(year),
@@ -232,7 +233,7 @@ def build_storage_tools(
                 institution=institution,
                 tags=_json_list(tags_json),
                 folder_id=folder_id or None,
-                storage_bucket=storage_bucket or infer_document_bucket_from_text(institution),
+                storage_bucket=bucket_filter,
                 limit=limit,
             )
             _collect_document_artifacts(documents)
@@ -259,10 +260,30 @@ def build_storage_tools(
         limit: int = 10,
     ) -> str:
         """Search stored documents for the current user by filename, summary, metadata, extracted text, and optional storage bucket."""
+
         def read() -> dict[str, Any]:
+            bucket_filter = storage_bucket or infer_document_bucket_from_text(f"{query} {institution}")
+            structural_filters_present = any(
+                [
+                    bucket_filter,
+                    document_type,
+                    institution,
+                    _json_list(tags_json),
+                    _optional_int(year),
+                    _optional_int(month),
+                    start_date,
+                    end_date,
+                ]
+            )
+            normalized_query = _structured_storage_query(
+                query,
+                storage_bucket=bucket_filter,
+                institution=institution,
+            )
+            effective_query = normalized_query if structural_filters_present else (normalized_query or query)
             documents = service_search_documents(
                 user_id=context_user_id,
-                query=query,
+                query=effective_query,
                 year=_optional_int(year),
                 month=_optional_int(month),
                 start_date=start_date or None,
@@ -270,11 +291,25 @@ def build_storage_tools(
                 document_type=document_type,
                 institution=institution,
                 tags=_json_list(tags_json),
-                storage_bucket=storage_bucket or infer_document_bucket_from_text(query),
+                storage_bucket=bucket_filter,
                 limit=limit,
             )
+            if not documents and effective_query and structural_filters_present:
+                documents = service_search_documents(
+                    user_id=context_user_id,
+                    query="",
+                    year=_optional_int(year),
+                    month=_optional_int(month),
+                    start_date=start_date or None,
+                    end_date=end_date or None,
+                    document_type=document_type,
+                    institution=institution,
+                    tags=_json_list(tags_json),
+                    storage_bucket=bucket_filter,
+                    limit=limit,
+                )
             _collect_document_artifacts(documents)
-            return {"query": query, "documents": documents}
+            return {"query": query, "effective_query": effective_query, "documents": documents}
 
         return _storage_tool_result(
             "search_documents",
@@ -521,6 +556,20 @@ def build_storage_tools(
                         storage_bucket=bucket_filter,
                         limit=bounded_limit,
                     )
+                    if not documents and query_filter:
+                        documents = service_search_documents(
+                            user_id=context_user_id,
+                            query="",
+                            year=_optional_int(year),
+                            month=_optional_int(month),
+                            start_date=start_date or None,
+                            end_date=end_date or None,
+                            document_type=document_type,
+                            institution=institution,
+                            tags=_json_list(tags_json),
+                            storage_bucket=bucket_filter,
+                            limit=bounded_limit,
+                        )
                 if not documents:
                     documents = _fallback_documents_from_collected()
             _collect_document_artifacts(documents)
