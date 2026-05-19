@@ -2,6 +2,7 @@ import importlib.util
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -490,8 +491,15 @@ def confirm_pending_action(
     }
 
 
-def _tool_event(name: str, status: str, message: str, *, event_type: str = "tool_call") -> dict[str, Any]:
-    return {
+def _tool_event(
+    name: str,
+    status: str,
+    message: str,
+    *,
+    event_type: str = "tool_call",
+    duration_ms: int | None = None,
+) -> dict[str, Any]:
+    event = {
         "id": _new_id("tool"),
         "type": event_type,
         "name": name,
@@ -499,6 +507,100 @@ def _tool_event(name: str, status: str, message: str, *, event_type: str = "tool
         "message": message,
         "timestamp": utc_timestamp(),
     }
+    if duration_ms is not None:
+        event["duration_ms"] = duration_ms
+    return event
+
+
+def _elapsed_ms(start: float) -> int:
+    return max(0, int(round((time.perf_counter() - start) * 1000)))
+
+
+def _derive_selected_agent(tool_events: list[dict[str, Any]]) -> str:
+    domain_tools = {
+        "calendar": {
+            "calendar_snapshot",
+            "list_calendar_range",
+            "list_calendar_events",
+            "count_calendar_events",
+            "check_availability",
+            "create_calendar_event",
+            "update_calendar_event",
+            "delete_calendar_event",
+        },
+        "storage": {
+            "list_user_documents",
+            "search_user_documents",
+            "sum_user_invoice_amounts",
+            "bundle_user_documents",
+            "list_documents",
+            "search_documents",
+            "count_documents",
+            "get_document_details",
+            "summarize_document",
+            "classify_document",
+            "group_documents",
+            "sum_invoice_amounts",
+            "bundle_documents",
+            "list_document_folders",
+            "match_documents",
+            "create_document_folder",
+            "move_document",
+            "delete_document",
+            "update_document_metadata",
+            "reassign_document_bucket",
+        },
+        "knowledge": {
+            "analyze_iv_knowledge_request",
+            "search_internal_knowledge",
+            "retrieve_relevant_documents",
+            "ask_watsonx_iv_assistant",
+            "summarize_document_context",
+            "compare_documents",
+            "extract_action_items",
+            "synthesize_answer",
+        },
+        "automations": {
+            "list_automations",
+            "draft_generate_report",
+            "draft_report_reminder_email",
+            "draft_create_month_end_reminder",
+        },
+    }
+    available_agent_names = {"CalendarAgent", "StorageAgent", "KnowledgeAgent", "AutomationsAgent"}
+    for event in tool_events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("status") or "") == "available" and event.get("name") in available_agent_names:
+            continue
+        name = str(event.get("name") or "")
+        for domain, names in domain_tools.items():
+            if name in names:
+                return domain
+    return "orchestrator"
+
+
+def _extract_usage_payload(result: Any) -> dict[str, Any]:
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        context_wrapper = getattr(result, "context_wrapper", None)
+        usage = getattr(context_wrapper, "usage", None)
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        return make_json_safe(usage)
+    payload: dict[str, Any] = {}
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "requests",
+        "cached_input_tokens",
+    ):
+        value = getattr(usage, name, None)
+        if value is not None:
+            payload[name] = value
+    return make_json_safe(payload)
 
 def _run_orchestrator_unavailable(
     request_payload: dict[str, Any],
@@ -517,6 +619,7 @@ def _run_orchestrator_unavailable(
         token in lower_message for token in ("calendar", "kalender", "termin", "event")
     ):
         try:
+            started_at = time.perf_counter()
             snapshot = local_tools["calendar_snapshot"](
                 {
                     "month": request_payload.get("client_context", {}).get("current_month", ""),
@@ -529,7 +632,7 @@ def _run_orchestrator_unavailable(
                 f" Der lokale Kalenderzugriff ist im Backend registriert; "
                 f"fuer {month or 'den aktuellen Monat'} wurden {event_count} Termine gefunden."
             )
-            tool_events.append(_tool_event("calendar_snapshot", "completed", "Local calendar snapshot checked"))
+            tool_events.append(_tool_event("calendar_snapshot", "completed", "Local calendar snapshot checked", duration_ms=_elapsed_ms(started_at)))
         except Exception as exc:
             logger.warning("Could not inspect local calendar while orchestrator is unavailable: %s", exc)
             tool_events.append(_tool_event("calendar_snapshot", "failed", "Local calendar snapshot failed"))
@@ -539,6 +642,7 @@ def _run_orchestrator_unavailable(
         for token in ("dokument", "datei", "rechnung", "storage", "bucket", "download", "ablage")
     ):
         try:
+            started_at = time.perf_counter()
             try:
                 from ..services.storage_service import (
                     build_chat_document_artifact,
@@ -576,7 +680,7 @@ def _run_orchestrator_unavailable(
             if documents:
                 lines.append("Die Download-Links sind als Dokument-Artefakte angehaengt.")
             document_answer = "\n".join(lines)
-            tool_events.append(_tool_event("list_user_documents", "completed", "Local document metadata read"))
+            tool_events.append(_tool_event("list_user_documents", "completed", "Local document metadata read", duration_ms=_elapsed_ms(started_at)))
         except Exception as exc:
             logger.warning("Could not inspect documents while orchestrator is unavailable: %s", exc)
             tool_events.append(_tool_event("list_user_documents", "failed", "Local document metadata failed"))
@@ -601,6 +705,7 @@ def _run_orchestrator_unavailable(
         "pending_actions": [],
         "structured_actions": [],
         "thread_id": request_payload["thread_id"],
+        "selected_agent": _derive_selected_agent(tool_events),
     }
 
 
@@ -705,9 +810,12 @@ def _run_agents_sdk(
     @function_tool
     def draft_pending_action(action_type: str, title: str, payload_json: str) -> str:
         """Draft a side-effecting action for user confirmation without executing it."""
+        tool_events.append(_tool_event("draft_pending_action", "started", "Drafting pending action"))
+        started_at = time.perf_counter()
         try:
             payload = json.loads(payload_json or "{}")
         except json.JSONDecodeError as exc:
+            tool_events.append(_tool_event("draft_pending_action", "failed", "payload_json must be valid JSON", duration_ms=_elapsed_ms(started_at)))
             raise ValueError("payload_json must be valid JSON") from exc
         actions = register_pending_actions(
             [{"type": action_type, "title": title, "payload": payload}],
@@ -716,6 +824,7 @@ def _run_agents_sdk(
         )
         drafted_actions.extend(actions)
         structured_actions.extend(actions)
+        tool_events.append(_tool_event("draft_pending_action", "completed", "Pending action drafted", duration_ms=_elapsed_ms(started_at)))
         return json.dumps(
             {
                 "pending_actions": actions,
@@ -748,6 +857,7 @@ def _run_agents_sdk(
     def list_calendar_range(start_at: str, end_at: str, query: str = "") -> str:
         """Read calendar events for mixed calendar/document questions using explicit ISO datetime bounds."""
         tool_events.append(_tool_event("list_calendar_range", "started", "Reading local calendar"))
+        started_at = time.perf_counter()
         payload = service_list_calendar_events(
             user_id=context_user_id,
             start_at=start_at,
@@ -755,7 +865,7 @@ def _run_agents_sdk(
             query=query,
             timezone_name=context_timezone,
         )
-        tool_events.append(_tool_event("list_calendar_range", "completed", "Calendar range read"))
+        tool_events.append(_tool_event("list_calendar_range", "completed", "Calendar range read", duration_ms=_elapsed_ms(started_at)))
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     orchestrator_tools.append(list_calendar_range)
@@ -775,6 +885,7 @@ def _run_agents_sdk(
     ) -> str:
         """Read stored documents for mixed calendar/document questions with optional storage bucket."""
         tool_events.append(_tool_event("list_user_documents", "started", "Reading document metadata"))
+        started_at = time.perf_counter()
         documents = service_list_documents(
             user_id=context_user_id,
             year=_optional_int(year),
@@ -789,7 +900,7 @@ def _run_agents_sdk(
             limit=limit,
         )
         _collect_document_artifacts(documents)
-        tool_events.append(_tool_event("list_user_documents", "completed", "Document metadata read"))
+        tool_events.append(_tool_event("list_user_documents", "completed", "Document metadata read", duration_ms=_elapsed_ms(started_at)))
         return json.dumps(make_json_safe({"documents": documents}), ensure_ascii=True)
 
     orchestrator_tools.append(list_user_documents)
@@ -828,6 +939,7 @@ def _run_agents_sdk(
             tool_events.append(_tool_event("search_user_documents", "cached", "Document search served from cache"))
             return json.dumps(make_json_safe(turn_cache[cache_key]), ensure_ascii=True)
         tool_events.append(_tool_event("search_user_documents", "started", "Searching documents"))
+        started_at = time.perf_counter()
         documents, effective_query = _resolve_filter_documents(
             user_id=context_user_id,
             query=query,
@@ -842,7 +954,7 @@ def _run_agents_sdk(
             limit=limit,
         )
         _collect_document_artifacts(documents)
-        tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed"))
+        tool_events.append(_tool_event("search_user_documents", "completed", "Document search completed", duration_ms=_elapsed_ms(started_at)))
         payload = {"query": query, "effective_query": effective_query, "documents": documents, "count": len(documents)}
         turn_cache[cache_key] = payload
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
@@ -863,6 +975,7 @@ def _run_agents_sdk(
     ) -> str:
         """Sum stored invoices after applying document filters; exact duplicate checksums are ignored."""
         tool_events.append(_tool_event("sum_user_invoice_amounts", "started", "Summing invoice amounts"))
+        started_at = time.perf_counter()
         payload = service_sum_invoice_amounts(
             user_id=context_user_id,
             query=query,
@@ -877,7 +990,7 @@ def _run_agents_sdk(
         )
         _collect_document_artifacts(payload.get("counted_documents") or [])
         _collect_document_artifacts(payload.get("documents_without_amount") or [])
-        tool_events.append(_tool_event("sum_user_invoice_amounts", "completed", "Invoice sum completed"))
+        tool_events.append(_tool_event("sum_user_invoice_amounts", "completed", "Invoice sum completed", duration_ms=_elapsed_ms(started_at)))
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     orchestrator_tools.append(sum_user_invoice_amounts)
@@ -925,6 +1038,7 @@ def _run_agents_sdk(
             return json.dumps(make_json_safe(turn_cache[cache_key]), ensure_ascii=True)
 
         tool_events.append(_tool_event("bundle_user_documents", "started", "Building ZIP bundle"))
+        started_at = time.perf_counter()
         documents: list[dict[str, Any]] = []
         effective_query = ""
         if explicit_ids:
@@ -975,7 +1089,7 @@ def _run_agents_sdk(
                 "message": "Keine Dokumente zum Bündeln gefunden. Bitte zuerst Dokumente auflisten oder konkrete document_ids angeben.",
             }
             turn_cache[cache_key] = payload
-            tool_events.append(_tool_event("bundle_user_documents", "completed", "No documents to bundle"))
+            tool_events.append(_tool_event("bundle_user_documents", "completed", "No documents to bundle", duration_ms=_elapsed_ms(started_at)))
             return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
         collected_artifacts.append(bundle)
@@ -1009,7 +1123,7 @@ def _run_agents_sdk(
             _collect_document_artifacts(sum_payload.get("counted_documents") or [])
             _collect_document_artifacts(sum_payload.get("documents_without_amount") or [])
         turn_cache[cache_key] = payload
-        tool_events.append(_tool_event("bundle_user_documents", "completed", f"Bundle with {len(bundle['document_ids'])} files"))
+        tool_events.append(_tool_event("bundle_user_documents", "completed", f"Bundle with {len(bundle['document_ids'])} files", duration_ms=_elapsed_ms(started_at)))
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     orchestrator_tools.append(bundle_user_documents)
@@ -1138,6 +1252,8 @@ def _run_agents_sdk(
         "pending_actions": drafted_actions,
         "structured_actions": structured_actions,
         "thread_id": request_payload["thread_id"],
+        "selected_agent": _derive_selected_agent(tool_events),
+        "usage": _extract_usage_payload(result),
     }
 
 

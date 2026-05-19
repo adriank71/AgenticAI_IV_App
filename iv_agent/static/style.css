@@ -5887,20 +5887,23 @@ body {
 }
 
 .gmail-connect-nav-button {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
+  border: 0;
   border-radius: 10px;
   background: #ececef;
   color: #24292f;
   font-size: 0.8rem;
   font-weight: 600;
+  font-family: inherit;
   text-decoration: none;
   cursor: pointer;
   transition: background 0.15s;
   white-space: nowrap;
   overflow: hidden;
+  align-self: flex-start;
 }
 
 .gmail-connect-nav-button .material-symbols-outlined {
@@ -5916,16 +5919,22 @@ body {
 .gmail-connect-nav-button.is-connected {
   background: #d4edda;
   color: #1a7a3a;
-  cursor: default;
 }
 
 .gmail-connect-nav-button.is-connected:hover {
-  background: #d4edda;
+  background: #f5c6cb;
+  color: #842029;
+}
+
+.gmail-connect-nav-button[disabled] {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 .sidebar-collapsed .gmail-connect-nav-button {
-  width: 48px;
-  height: 48px;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
   justify-content: center;
   padding: 0;
 }
@@ -5969,9 +5978,11 @@ body {
 
 .app-nav-footer {
   display: flex;
-  align-items: flex-end;
-  justify-content: flex-start;
-  padding: 0 0 0 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 12px 8px;
 }
 
 .nav-link {
@@ -6136,8 +6147,11 @@ body {
 }
 
 .sidebar-collapsed .app-nav-footer {
-  justify-content: center;
-  padding: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 0 8px;
 }
 
 .sidebar-collapsed .profile-nav-button,

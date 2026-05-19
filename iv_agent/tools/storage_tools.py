@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from typing import Any
 
 try:
@@ -225,12 +226,13 @@ def build_storage_tools(
 
     def _storage_tool_result(tool_name: str, callback: Any) -> str:
         tool_events.append(tool_event_factory(tool_name, "started", f"{tool_name} started"))
+        started_at = time.perf_counter()
         try:
             payload = callback()
         except Exception as exc:
-            tool_events.append(tool_event_factory(tool_name, "failed", str(exc)))
+            tool_events.append(tool_event_factory(tool_name, "failed", str(exc), duration_ms=max(0, int(round((time.perf_counter() - started_at) * 1000)))))
             raise
-        tool_events.append(tool_event_factory(tool_name, "completed", f"{tool_name} completed"))
+        tool_events.append(tool_event_factory(tool_name, "completed", f"{tool_name} completed", duration_ms=max(0, int(round((time.perf_counter() - started_at) * 1000)))))
         return json.dumps(make_json_safe(payload), ensure_ascii=True)
 
     def _register_storage_pending_action(action_type: str, title: str, payload: dict[str, Any]) -> dict[str, Any]:

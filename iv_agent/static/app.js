@@ -2265,15 +2265,64 @@ function renderMailConnectionState() {
   }
   if (elements.gmailConnectNav) {
     const label = elements.gmailConnectNav.querySelector(".gmail-connect-nav-label");
+    const icon = elements.gmailConnectNav.querySelector(".gmail-connect-nav-icon");
+    const accountEmail =
+      (state.mailStatus &&
+        state.mailStatus.providers &&
+        state.mailStatus.providers.gmail &&
+        state.mailStatus.providers.gmail.account_email) ||
+      "";
     if (connected) {
       elements.gmailConnectNav.classList.add("is-connected");
-      elements.gmailConnectNav.removeAttribute("href");
+      elements.gmailConnectNav.dataset.action = "disconnect";
       if (label) label.textContent = "Gmail connected";
+      if (icon) icon.textContent = "mail";
+      const tip = accountEmail
+        ? `Gmail (${accountEmail}) trennen`
+        : "Gmail trennen";
+      elements.gmailConnectNav.setAttribute("title", tip);
+      elements.gmailConnectNav.setAttribute("aria-label", tip);
     } else {
       elements.gmailConnectNav.classList.remove("is-connected");
-      elements.gmailConnectNav.setAttribute("href", "/api/mail/oauth/gmail/start");
+      elements.gmailConnectNav.dataset.action = "connect";
       if (label) label.textContent = "Gmail verbinden";
+      if (icon) icon.textContent = "mail";
+      elements.gmailConnectNav.setAttribute("title", "Gmail verbinden");
+      elements.gmailConnectNav.setAttribute("aria-label", "Gmail verbinden");
     }
+  }
+}
+
+async function handleGmailConnectNavClick(event) {
+  if (!elements.gmailConnectNav) return;
+  event.preventDefault();
+  const action = elements.gmailConnectNav.dataset.action || "connect";
+  if (action === "connect") {
+    window.location.href = "/api/mail/oauth/gmail/start";
+    return;
+  }
+  const accountEmail =
+    (state.mailStatus &&
+      state.mailStatus.providers &&
+      state.mailStatus.providers.gmail &&
+      state.mailStatus.providers.gmail.account_email) ||
+    "";
+  const promptText = accountEmail
+    ? `Gmail-Konto (${accountEmail}) wirklich trennen?`
+    : "Gmail-Konto wirklich trennen?";
+  if (!window.confirm(promptText)) return;
+  elements.gmailConnectNav.disabled = true;
+  try {
+    state.mailStatus = await apiFetch("/api/mail/disconnect", {
+      method: "POST",
+      body: JSON.stringify({ provider: "gmail" }),
+      showLoading: false,
+    });
+    renderMailConnectionState();
+  } catch (error) {
+    showError(error.message || "Gmail konnte nicht getrennt werden.");
+  } finally {
+    elements.gmailConnectNav.disabled = false;
   }
 }
 
@@ -4983,6 +5032,9 @@ function bindEvents() {
     elements.settingsButton.addEventListener("click", () => {
       switchAppView("settings").catch(() => {});
     });
+  }
+  if (elements.gmailConnectNav) {
+    elements.gmailConnectNav.addEventListener("click", handleGmailConnectNavClick);
   }
   if (elements.profileForm) {
     elements.profileForm.addEventListener("submit", submitProfileForm);
